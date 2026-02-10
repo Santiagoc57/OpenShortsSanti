@@ -3,7 +3,7 @@ import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, 
 import { getApiUrl, apiFetch } from '../config';
 import SubtitleModal from './SubtitleModal';
 
-export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, onPlay, onPause }) {
+export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobId, uploadPostKey, uploadUserId, geminiApiKey, onPlay, onPause }) {
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const [showRecutModal, setShowRecutModal] = useState(false);
@@ -33,6 +33,13 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         const secs = total % 60;
         return `${mins}:${String(secs).padStart(2, '0')}`;
     };
+    const rawScore = Number(clip?.virality_score);
+    const clipScore = Number.isFinite(rawScore) ? Math.max(0, Math.min(100, Math.round(rawScore))) : 0;
+    const scoreBadgeClass = clipScore >= 80
+        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+        : clipScore >= 65
+            ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+            : 'bg-zinc-500/15 border-zinc-500/30 text-zinc-300';
     const [postResult, setPostResult] = useState(null);
 
     const [isEditing, setIsEditing] = useState(false);
@@ -94,7 +101,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 },
                 body: JSON.stringify({
                     job_id: jobId,
-                    clip_index: index,
+                    clip_index: clipIndex,
                     input_filename: currentVideoUrl.split('/').pop()
                 })
              });
@@ -139,7 +146,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     job_id: jobId,
-                    clip_index: index,
+                    clip_index: clipIndex,
                     position: options.position,
                     font_size: options.fontSize,
                     font_family: options.fontFamily,
@@ -190,7 +197,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     job_id: jobId,
-                    clip_index: index,
+                    clip_index: clipIndex,
                     start: Number(recutStart),
                     end: Number(recutEnd)
                 })
@@ -242,7 +249,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         try {
             const payload = {
                 job_id: jobId,
-                clip_index: index,
+                clip_index: clipIndex,
                 api_key: uploadPostKey,
                 user_id: uploadUserId,
                 platforms: selectedPlatforms,
@@ -287,7 +294,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     };
 
     return (
-        <div className="bg-surface border border-white/5 rounded-2xl overflow-hidden flex flex-col md:flex-row group hover:border-white/10 transition-all animate-[fadeIn_0.5s_ease-out] min-h-[300px] h-auto" style={{ animationDelay: `${index * 0.1}s` }}>
+        <div className="bg-surface border border-white/5 rounded-2xl overflow-hidden flex flex-col md:flex-row group hover:border-white/10 transition-all animate-[fadeIn_0.5s_ease-out] min-h-[300px] h-auto" style={{ animationDelay: `${displayIndex * 0.1}s` }}>
             {/* Left: Video Preview (Responsive Width) */}
             <div className="w-full md:w-[180px] lg:w-[200px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
                 <video
@@ -310,7 +317,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 />
                 <div className="absolute top-3 left-3 flex gap-2">
                     <span className="bg-black/60 backdrop-blur-md text-white text-[10px] font-bold px-2 py-1 rounded-md border border-white/10 uppercase tracking-wide">
-                        Clip {index + 1}
+                        Clip {displayIndex + 1}
                     </span>
                 </div>
                 
@@ -331,6 +338,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         {clip.video_title_for_youtube_short || "Viral Clip Generated"}
                     </h3>
                     <div className="flex flex-wrap gap-2 text-[10px] text-zinc-500 font-mono">
+                        <span className={`px-1.5 py-0.5 rounded border shrink-0 ${scoreBadgeClass}`} title={clip.score_reason || 'Predicted performance score'}>
+                            Score {clipScore}/100
+                        </span>
                         <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">{Math.floor(clip.end - clip.start)}s</span>
                         <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">
                             {formatTime(clip.start)} - {formatTime(clip.end)}
@@ -437,7 +447,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                 const a = document.createElement('a');
                                 a.style.display = 'none';
                                 a.href = url;
-                                a.download = `clip-${index + 1}.mp4`;
+                                a.download = `clip-${displayIndex + 1}.mp4`;
                                 document.body.appendChild(a);
                                 a.click();
                                 window.URL.revokeObjectURL(url);
@@ -574,7 +584,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     const res = await apiFetch('/api/subtitle/preview', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ job_id: jobId, clip_index: index })
+                        body: JSON.stringify({ job_id: jobId, clip_index: clipIndex })
                     });
                     if (!res.ok) {
                         const errText = await res.text();
@@ -631,7 +641,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                                 const a = document.createElement('a');
                                                 a.style.display = 'none';
                                                 a.href = url;
-                                                a.download = `clip-${index + 1}.mp4`;
+                                                a.download = `clip-${displayIndex + 1}.mp4`;
                                                 document.body.appendChild(a);
                                                 a.click();
                                                 window.URL.revokeObjectURL(url);

@@ -59,6 +59,8 @@ OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by pre
     {{
       "start": <number in seconds, e.g., 12.340>,
       "end": <number in seconds, e.g., 37.900>,
+      "virality_score": <integer 0-100, where 100 is highest predicted performance>,
+      "score_reason": "<one short reason why this clip should perform>",
       "video_description_for_tiktok": "<description for TikTok oriented to get views>",
       "video_description_for_instagram": "<description for Instagram oriented to get views>",
       "video_title_for_youtube_short": "<title for YouTube Short oriented to get views 100 chars max>"
@@ -66,6 +68,45 @@ OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by pre
   ]
 }}
 """
+
+def _default_score_by_rank(rank):
+    """Fallback score when model does not provide virality_score."""
+    return max(55, 92 - (rank * 6))
+
+def _normalize_clip_score(raw_score, rank):
+    default = _default_score_by_rank(rank)
+    try:
+        score = int(round(float(raw_score)))
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(100, score))
+
+def normalize_shorts_payload(result_json):
+    """
+    Ensures each clip has stable scoring metadata for UI sorting:
+    - virality_score: int [0,100]
+    - score_reason: short string
+    """
+    if not isinstance(result_json, dict):
+        return result_json
+
+    shorts = result_json.get('shorts')
+    if not isinstance(shorts, list):
+        return result_json
+
+    normalized = []
+    for i, clip in enumerate(shorts):
+        if not isinstance(clip, dict):
+            continue
+        clip['virality_score'] = _normalize_clip_score(clip.get('virality_score'), i)
+        reason = clip.get('score_reason')
+        if not reason:
+            reason = f"AI ranking position #{i+1} based on hook and retention potential."
+        clip['score_reason'] = str(reason).strip()[:220]
+        normalized.append(clip)
+
+    result_json['shorts'] = normalized
+    return result_json
 
 # Load the YOLO model once (Keep for backup or scene analysis if needed)
 model = YOLO('yolov8n.pt')
@@ -969,6 +1010,8 @@ def get_viral_clips(transcript_result, video_duration, max_clips=None):
 
         if max_clips and isinstance(result_json.get('shorts'), list):
             result_json['shorts'] = result_json['shorts'][:max_clips]
+
+        result_json = normalize_shorts_payload(result_json)
             
         return result_json
     except Exception as e:

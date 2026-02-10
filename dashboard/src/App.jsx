@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
-import { getApiUrl, apiFetch } from './config';
+import { apiFetch } from './config';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -139,6 +139,7 @@ function App() {
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [results, setResults] = useState(null);
+  const [clipSort, setClipSort] = useState('top'); // top, balanced, safe
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
@@ -241,6 +242,7 @@ function App() {
     setStatus('processing');
     setLogs(["Starting process..."]);
     setResults(null);
+    setClipSort('top');
     setProcessingMedia(data);
 
     try {
@@ -299,9 +301,43 @@ function App() {
     setStatus('idle');
     setJobId(null);
     setResults(null);
+    setClipSort('top');
     setLogs([]);
     setProcessingMedia(null);
   };
+
+  const sortedClips = useMemo(() => {
+    const clips = results?.clips;
+    if (!Array.isArray(clips)) return [];
+
+    const normalized = clips.map((clip, idx) => {
+      const rawScore = Number(clip?.virality_score);
+      const fallbackScore = Math.max(55, 92 - (idx * 6));
+      const score = Number.isFinite(rawScore) ? Math.max(0, Math.min(100, Math.round(rawScore))) : fallbackScore;
+
+      const rawClipIndex = Number(clip?.clip_index);
+      const clipIndex = Number.isFinite(rawClipIndex) ? rawClipIndex : idx;
+
+      const duration = Math.max(0, Number(clip?.end ?? 0) - Number(clip?.start ?? 0));
+      return { ...clip, virality_score: score, clip_index: clipIndex, _duration: duration };
+    });
+
+    const sorted = [...normalized];
+    if (clipSort === 'balanced') {
+      sorted.sort((a, b) => a.clip_index - b.clip_index);
+    } else if (clipSort === 'safe') {
+      sorted.sort((a, b) => {
+        if (b.virality_score !== a.virality_score) return b.virality_score - a.virality_score;
+        return a._duration - b._duration;
+      });
+    } else {
+      sorted.sort((a, b) => {
+        if (b.virality_score !== a.virality_score) return b.virality_score - a.virality_score;
+        return a.clip_index - b.clip_index;
+      });
+    }
+    return sorted;
+  }, [results, clipSort]);
 
   // --- UI Components ---
 
@@ -541,9 +577,9 @@ function App() {
                 <h2 className="text-lg font-semibold mb-6 flex items-center gap-2 shrink-0">
                   <Sparkles className="text-yellow-400" size={20} />
                   Generated Shorts
-                  {results?.clips?.length > 0 && (
+                  {sortedClips.length > 0 && (
                     <span className="text-xs bg-white/10 text-white px-2 py-0.5 rounded-full ml-auto">
-                      {results.clips.length} Clips
+                      {sortedClips.length} Clips
                     </span>
                   )}
                   {results?.cost_analysis && (
@@ -553,14 +589,30 @@ function App() {
                   )}
                 </h2>
 
+                {sortedClips.length > 1 && (
+                  <div className="mb-4 shrink-0 flex items-center gap-2">
+                    <span className="text-xs text-zinc-500">Order:</span>
+                    <select
+                      value={clipSort}
+                      onChange={(e) => setClipSort(e.target.value)}
+                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                    >
+                      <option value="top">Top Score</option>
+                      <option value="balanced">Timeline</option>
+                      <option value="safe">Safe Bets</option>
+                    </select>
+                  </div>
+                )}
+
                  <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
-                    {results && results.clips && results.clips.length > 0 ? (
+                    {sortedClips.length > 0 ? (
                        <div className={`grid gap-4 pb-10 ${status === 'complete' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
-                           {results.clips.map((clip, i) => (
+                           {sortedClips.map((clip, i) => (
                           <ResultCard
-                               key={i}
+                               key={`${clip.clip_index}-${clip.video_url || i}`}
                                clip={clip}
-                               index={i}
+                               displayIndex={i}
+                               clipIndex={clip.clip_index}
                                jobId={jobId}
                                uploadPostKey={uploadPostKey}
                                uploadUserId={uploadUserId}

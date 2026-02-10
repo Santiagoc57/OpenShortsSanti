@@ -77,6 +77,35 @@ def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     except Exception:
         return False
 
+def _default_score_by_rank(rank: int) -> int:
+    return max(55, 92 - (rank * 6))
+
+def _normalize_clip_payload(clip: Dict, rank: int) -> Dict:
+    """
+    Ensure clip carries stable metadata used by the dashboard:
+    - clip_index
+    - virality_score
+    - score_reason
+    """
+    if not isinstance(clip, dict):
+        clip = {}
+
+    clip['clip_index'] = int(clip.get('clip_index', rank))
+
+    raw_score = clip.get('virality_score')
+    try:
+        score = int(round(float(raw_score)))
+    except (TypeError, ValueError):
+        score = _default_score_by_rank(rank)
+    clip['virality_score'] = max(0, min(100, score))
+
+    reason = clip.get('score_reason')
+    if not reason:
+        reason = f"AI ranking position #{rank+1} based on hook and retention potential."
+    clip['score_reason'] = str(reason).strip()[:220]
+
+    return clip
+
 async def cleanup_jobs():
     """Background task to remove old jobs and files."""
     import time
@@ -230,6 +259,7 @@ async def run_job(job_id, job_data):
                         # Check which clips actually exist on disk
                         ready_clips = []
                         for i, clip in enumerate(clips):
+                             clip = _normalize_clip_payload(clip, i)
                              clip_filename = f"{base_name}_clip_{i+1}.mp4"
                              clip_path = os.path.join(output_dir, clip_filename)
                              if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
@@ -271,6 +301,7 @@ async def run_job(job_id, job_data):
                 cost_analysis = data.get('cost_analysis')
 
                 for i, clip in enumerate(clips):
+                     clip = _normalize_clip_payload(clip, i)
                      clip_filename = f"{base_name}_clip_{i+1}.mp4"
                      clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
                 
