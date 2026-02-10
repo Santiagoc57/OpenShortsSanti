@@ -126,6 +126,15 @@ const pollJob = async (jobId) => {
 };
 
 function App() {
+  const getInitialClipSort = () => {
+    const stored = localStorage.getItem('clipSortPreset');
+    return ['top', 'balanced', 'safe'].includes(stored) ? stored : 'top';
+  };
+  const getInitialClipFilter = () => {
+    const stored = localStorage.getItem('clipFilterPreset');
+    return ['all', 'top', 'medium', 'low'].includes(stored) ? stored : 'all';
+  };
+
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
@@ -139,8 +148,10 @@ function App() {
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [results, setResults] = useState(null);
-  const [clipSort, setClipSort] = useState('top'); // top, balanced, safe
-  const [clipFilter, setClipFilter] = useState('all'); // all, top, medium, low
+  const [clipSort, setClipSort] = useState(getInitialClipSort); // top, balanced, safe
+  const [clipFilter, setClipFilter] = useState(getInitialClipFilter); // all, top, medium, low
+  const [isBatchScheduling, setIsBatchScheduling] = useState(false);
+  const [batchScheduleReport, setBatchScheduleReport] = useState(null);
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
@@ -181,6 +192,14 @@ function App() {
       fetchUserProfiles();
     }
   }, [uploadPostKey]);
+
+  useEffect(() => {
+    localStorage.setItem('clipSortPreset', clipSort);
+  }, [clipSort]);
+
+  useEffect(() => {
+    localStorage.setItem('clipFilterPreset', clipFilter);
+  }, [clipFilter]);
 
   useEffect(() => {
     let interval;
@@ -243,8 +262,7 @@ function App() {
     setStatus('processing');
     setLogs(["Starting process..."]);
     setResults(null);
-    setClipSort('top');
-    setClipFilter('all');
+    setBatchScheduleReport(null);
     setProcessingMedia(data);
 
     try {
@@ -303,8 +321,7 @@ function App() {
     setStatus('idle');
     setJobId(null);
     setResults(null);
-    setClipSort('top');
-    setClipFilter('all');
+    setBatchScheduleReport(null);
     setLogs([]);
     setProcessingMedia(null);
   };
@@ -348,6 +365,81 @@ function App() {
     if (clipFilter === 'all') return sortedClips;
     return sortedClips.filter((clip) => clip.score_band === clipFilter);
   }, [sortedClips, clipFilter]);
+
+  const handleQueueTopClips = async () => {
+    if (!jobId || sortedClips.length === 0) return;
+    if (!uploadPostKey || !uploadUserId) {
+      alert("Configura Upload-Post API Key y User Profile en Settings para usar Queue Top 3.");
+      return;
+    }
+
+    const candidates = [...sortedClips]
+      .sort((a, b) => b.virality_score - a.virality_score || a.clip_index - b.clip_index)
+      .slice(0, 3);
+
+    if (candidates.length === 0) return;
+
+    const selectedProfile = userProfiles.find((p) => p.username === uploadUserId);
+    const connectedPlatforms = Array.isArray(selectedProfile?.connected)
+      ? selectedProfile.connected.filter((p) => ['tiktok', 'instagram', 'youtube'].includes(p))
+      : [];
+    const platforms = connectedPlatforms.length > 0 ? connectedPlatforms : ['tiktok', 'instagram', 'youtube'];
+
+    setIsBatchScheduling(true);
+    setBatchScheduleReport(null);
+    setLogs((prev) => [...prev, `Queueing top ${candidates.length} clips (${platforms.join(', ')})...`]);
+
+    let success = 0;
+    const failures = [];
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
+    for (let i = 0; i < candidates.length; i += 1) {
+      const clip = candidates[i];
+      // Start 15 minutes from now, then every +60 minutes.
+      const scheduledAt = new Date(Date.now() + (15 + (i * 60)) * 60 * 1000).toISOString();
+      try {
+        const payload = {
+          job_id: jobId,
+          clip_index: clip.clip_index,
+          api_key: uploadPostKey,
+          user_id: uploadUserId,
+          platforms,
+          title: clip.video_title_for_youtube_short || `Viral Clip #${i + 1}`,
+          description: clip.video_description_for_instagram || clip.video_description_for_tiktok || "Check this out!",
+          scheduled_date: scheduledAt,
+          timezone
+        };
+
+        const res = await apiFetch('/api/social/post', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          failures.push(`Clip ${clip.clip_index + 1}: ${errText}`);
+        } else {
+          success += 1;
+        }
+      } catch (e) {
+        failures.push(`Clip ${clip.clip_index + 1}: ${e.message}`);
+      }
+    }
+
+    const report = {
+      success,
+      total: candidates.length,
+      failures
+    };
+    setBatchScheduleReport(report);
+    if (failures.length === 0) {
+      setLogs((prev) => [...prev, `Queue Top 3 completed: ${success}/${candidates.length} scheduled.`]);
+    } else {
+      setLogs((prev) => [...prev, `Queue Top 3 completed with issues: ${success}/${candidates.length} scheduled.`]);
+    }
+    setIsBatchScheduling(false);
+  };
 
   // --- UI Components ---
 
@@ -622,6 +714,29 @@ function App() {
                       <option value="medium">Medium (65-79)</option>
                       <option value="low">Low (&lt;65)</option>
                     </select>
+                    <button
+                      onClick={handleQueueTopClips}
+                      disabled={isBatchScheduling || sortedClips.length === 0}
+                      className="ml-1 text-xs bg-primary/20 border border-primary/40 text-primary rounded-md px-2 py-1 hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Schedule top 3 clips with 60-minute spacing"
+                    >
+                      {isBatchScheduling ? 'Queueing...' : 'Queue Top 3'}
+                    </button>
+                  </div>
+                )}
+
+                {batchScheduleReport && (
+                  <div className={`mb-4 text-xs rounded-lg border px-3 py-2 ${
+                    batchScheduleReport.failures.length === 0
+                      ? 'bg-green-500/10 border-green-500/30 text-green-300'
+                      : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                  }`}>
+                    <p>{`Batch schedule: ${batchScheduleReport.success}/${batchScheduleReport.total} queued.`}</p>
+                    {batchScheduleReport.failures.length > 0 && (
+                      <p className="mt-1 text-[11px] text-amber-300">
+                        {batchScheduleReport.failures[0]}
+                      </p>
+                    )}
                   </div>
                 )}
 
