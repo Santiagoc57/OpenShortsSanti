@@ -1,0 +1,24 @@
+# Video files
+*.mp4
+
+# YOLO model
+*.pt
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Temporary files
+temp_*.mp4
+
+.DS_Store
+
+.env
+*_metadata.json
+
+.cache
+
+.config
+
+output/
