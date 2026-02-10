@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield } from 'lucide-react';
+import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, Search } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
@@ -187,6 +187,10 @@ function App() {
   const [batchScheduleReport, setBatchScheduleReport] = useState(null);
   const [isExportingPack, setIsExportingPack] = useState(false);
   const [packExportReport, setPackExportReport] = useState(null);
+  const [clipSearchQuery, setClipSearchQuery] = useState('');
+  const [isSearchingClips, setIsSearchingClips] = useState(false);
+  const [clipSearchResults, setClipSearchResults] = useState([]);
+  const [clipSearchError, setClipSearchError] = useState(null);
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
@@ -323,6 +327,8 @@ function App() {
     setResults(null);
     setBatchScheduleReport(null);
     setPackExportReport(null);
+    setClipSearchResults([]);
+    setClipSearchError(null);
     setProcessingMedia(data);
 
     try {
@@ -383,6 +389,8 @@ function App() {
     setResults(null);
     setBatchScheduleReport(null);
     setPackExportReport(null);
+    setClipSearchResults([]);
+    setClipSearchError(null);
     setLogs([]);
     setProcessingMedia(null);
   };
@@ -659,6 +667,37 @@ function App() {
       setLogs((prev) => [...prev, `Export pack failed: ${e.message}`]);
     } finally {
       setIsExportingPack(false);
+    }
+  };
+
+  const handleClipSearch = async () => {
+    if (!jobId) return;
+    const query = clipSearchQuery.trim();
+    if (!query) return;
+    setIsSearchingClips(true);
+    setClipSearchError(null);
+    try {
+      const res = await apiFetch('/api/search/clips', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: jobId,
+          query,
+          limit: 6
+        })
+      });
+      if (!res.ok) {
+        throw new Error(await res.text());
+      }
+      const data = await res.json();
+      setClipSearchResults(Array.isArray(data.matches) ? data.matches : []);
+      setLogs((prev) => [...prev, `Clip search \"${query}\": ${(data.matches || []).length} matches.`]);
+    } catch (e) {
+      setClipSearchError(e.message);
+      setClipSearchResults([]);
+      setLogs((prev) => [...prev, `Clip search failed: ${e.message}`]);
+    } finally {
+      setIsSearchingClips(false);
     }
   };
 
@@ -1027,6 +1066,54 @@ function App() {
                     >
                       {isExportingPack ? 'Exporting...' : 'Export Pack'}
                     </button>
+                  </div>
+                )}
+
+                {sortedClips.length > 0 && (
+                  <div className="mb-4 rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                    <div className="flex items-center gap-2">
+                      <Search size={14} className="text-zinc-400" />
+                      <input
+                        type="text"
+                        value={clipSearchQuery}
+                        onChange={(e) => setClipSearchQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleClipSearch();
+                        }}
+                        placeholder="Clip Anything: ej. 'cuando habla de deuda' o 'momento polémico'"
+                        className="flex-1 text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                      />
+                      <button
+                        onClick={handleClipSearch}
+                        disabled={isSearchingClips || !clipSearchQuery.trim()}
+                        className="text-xs bg-white/10 border border-white/20 rounded-md px-2 py-1.5 text-zinc-200 hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {isSearchingClips ? 'Searching...' : 'Search'}
+                      </button>
+                    </div>
+
+                    {clipSearchError && (
+                      <p className="mt-2 text-[11px] text-red-300">{clipSearchError}</p>
+                    )}
+
+                    {clipSearchResults.length > 0 && (
+                      <div className="mt-2 max-h-36 overflow-y-auto border border-white/10 rounded bg-black/20 divide-y divide-white/5">
+                        {clipSearchResults.map((m, i) => (
+                          <div key={`${m.start}-${m.end}-${i}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="text-zinc-200 truncate">{m.snippet || `Match ${i + 1}`}</div>
+                              <div className="text-zinc-500">{`${m.start}s - ${m.end}s | score ${m.match_score}`}</div>
+                            </div>
+                            <button
+                              onClick={() => handleClipPlay(m.start)}
+                              className="shrink-0 text-[11px] bg-primary/20 border border-primary/40 text-primary rounded px-2 py-1 hover:bg-primary/30"
+                            >
+                              Play
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 

@@ -37,9 +37,9 @@ Este documento centraliza la hoja de ruta del producto y el estado real de imple
 - Calendario editorial visual (hoy hay schedule y batch, pero no vista calendario).
 - Brand kit/template engine (hoy hay estilos de subtítulos, no presets de marca completos).
 - Multi-ratio como feature de producto (hoy el core está optimizado a vertical).
+- `Clip Anything` (MVP por búsqueda en transcript ya disponible; falta capa semántica avanzada).
 
 ### ⛔ Pendiente
-- `Clip Anything` real (búsqueda semántica por prompt dentro del video).
 - Auto B-roll/emojis y packaging avanzado.
 - Suite avanzada de audio (noise cleanup/filler removal como flujo integrado end-to-end).
 
@@ -70,6 +70,7 @@ Este documento centraliza la hoja de ruta del producto y el estado real de imple
 
 ## Sprint 5 (siguiente)
 1. `Clip Anything`: query semántica sobre transcript con timestamps.
+   - Estado: **en progreso** (MVP backend + UI de búsqueda implementado).
 2. Agrupación por tópicos/chapters en VOD largos.
 3. Shortlist semántica + shortlist por score.
 

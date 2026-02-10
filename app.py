@@ -141,6 +141,25 @@ def _default_topic_tags(clip: Dict) -> List[str]:
             break
     return tags
 
+def _tokenize_query(text: str) -> List[str]:
+    if not text:
+        return []
+    words = re.findall(r"[a-zA-ZÀ-ÿ0-9]{3,}", text.lower())
+    stop = {
+        "the", "and", "for", "with", "that", "this", "from", "como", "para",
+        "cuando", "donde", "sobre", "porque", "video", "clip", "short", "shorts"
+    }
+    out: List[str] = []
+    seen = set()
+    for w in words:
+        if w in stop or w in seen:
+            continue
+        seen.add(w)
+        out.append(w)
+        if len(out) >= 8:
+            break
+    return out
+
 def _normalize_clip_payload(clip: Dict, rank: int) -> Dict:
     """
     Ensure clip carries stable metadata used by the dashboard:
@@ -970,6 +989,114 @@ async def export_pack(req: ExportPackRequest):
         "clips_in_manifest": len(normalized_clips),
         "video_files_added": clip_files_added,
         "srt_files_added": srt_files_added
+    }
+
+class ClipSearchRequest(BaseModel):
+    job_id: str
+    query: str
+    limit: int = 5
+
+@app.post("/api/search/clips")
+async def search_clips(req: ClipSearchRequest):
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    json_files = sorted(glob.glob(os.path.join(output_dir, "*_metadata.json")))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+
+    try:
+        with open(json_files[0], "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read metadata: {e}")
+
+    transcript = (data.get("transcript") or {})
+    segments = transcript.get("segments") or []
+    if not isinstance(segments, list) or not segments:
+        raise HTTPException(status_code=400, detail="Transcript segments not available")
+
+    query = (req.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    keywords = _tokenize_query(query)
+    if not keywords:
+        raise HTTPException(status_code=400, detail="Query too short or unsupported")
+
+    transcript_text = str(transcript.get("text", "")).lower()
+    segments_scored = []
+    for idx, seg in enumerate(segments):
+        seg_text = str(seg.get("text", "")).lower()
+        if not seg_text:
+            continue
+        # Weighted keyword matching with phrase bonus.
+        score = 0.0
+        matched = []
+        for kw in keywords:
+            if kw in seg_text:
+                matched.append(kw)
+                score += 1.0
+        if query.lower() in seg_text:
+            score += 1.5
+        elif query.lower() in transcript_text:
+            # Global mention exists; local segment still gets a soft boost.
+            score += 0.25
+
+        if score <= 0:
+            continue
+        segments_scored.append((score, idx, matched, seg))
+
+    if not segments_scored:
+        return {"matches": [], "keywords": keywords}
+
+    segments_scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+    limit = max(1, min(20, int(req.limit)))
+
+    # Estimate video duration from transcript.
+    duration = 0.0
+    for seg in segments:
+        try:
+            duration = max(duration, float(seg.get("end", 0.0)))
+        except Exception:
+            pass
+
+    matches = []
+    used_ranges = []
+    for score, idx, matched, seg in segments_scored:
+        start = max(0.0, float(seg.get("start", 0.0)) - 3.0)
+        end = float(seg.get("end", 0.0)) + 12.0
+        if end - start < 15.0:
+            end = start + 15.0
+        if end - start > 60.0:
+            end = start + 60.0
+        if duration > 0:
+            end = min(end, duration)
+
+        overlap = False
+        for s0, e0 in used_ranges:
+            if not (end <= s0 or start >= e0):
+                overlap = True
+                break
+        if overlap:
+            continue
+        used_ranges.append((start, end))
+
+        matches.append({
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "duration": round(end - start, 3),
+            "match_score": round(float(score), 3),
+            "keywords": matched,
+            "snippet": str(seg.get("text", "")).strip()[:240]
+        })
+        if len(matches) >= limit:
+            break
+
+    return {
+        "matches": matches,
+        "keywords": keywords
     }
 
 class SocialPostRequest(BaseModel):
