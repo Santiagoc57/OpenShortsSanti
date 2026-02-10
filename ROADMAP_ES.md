@@ -59,9 +59,13 @@ Este documento centraliza la hoja de ruta del producto y el estado real de imple
 - batch scheduling configurable con presets persistidos.
 - export pack para equipos/agencia.
 
-## Sprint 4 (siguiente)
-1. Vista calendario para publicaciones programadas.
-2. Queue templates (presets de N + intervalos por estrategia).
+## Sprint 4 (completado)
+1. Vista calendario/timeline de publicaciones programadas (en panel de resultados).
+2. Queue templates por estrategia:
+   - `Growth`
+   - `Balanced`
+   - `Conservative`
+   - `Custom`
 3. Descarga de reportes batch en CSV.
 
 ## Sprint 5 (siguiente)
@@ -85,4 +89,3 @@ Archivos clave:
 - Pipeline IA/video: `main.py`
 - Dashboard: `dashboard/src/App.jsx`
 - Cards de clips: `dashboard/src/components/ResultCard.jsx`
-

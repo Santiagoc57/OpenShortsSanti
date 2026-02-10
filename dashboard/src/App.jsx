@@ -157,6 +157,10 @@ function App() {
     const stored = localStorage.getItem('batchScopePreset');
     return ['visible', 'global'].includes(stored) ? stored : 'visible';
   };
+  const getInitialBatchStrategy = () => {
+    const stored = localStorage.getItem('batchStrategyPreset');
+    return ['growth', 'balanced', 'conservative', 'custom'].includes(stored) ? stored : 'balanced';
+  };
 
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
   // Social API State - Load encrypted or plain
@@ -178,6 +182,7 @@ function App() {
   const [batchStartDelayMinutes, setBatchStartDelayMinutes] = useState(getInitialBatchStartDelay);
   const [batchIntervalMinutes, setBatchIntervalMinutes] = useState(getInitialBatchInterval);
   const [batchScope, setBatchScope] = useState(getInitialBatchScope); // visible | global
+  const [batchStrategy, setBatchStrategy] = useState(getInitialBatchStrategy); // growth | balanced | conservative | custom
   const [isBatchScheduling, setIsBatchScheduling] = useState(false);
   const [batchScheduleReport, setBatchScheduleReport] = useState(null);
   const [isExportingPack, setIsExportingPack] = useState(false);
@@ -250,6 +255,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem('batchScopePreset', batchScope);
   }, [batchScope]);
+
+  useEffect(() => {
+    localStorage.setItem('batchStrategyPreset', batchStrategy);
+  }, [batchStrategy]);
 
   useEffect(() => {
     let interval;
@@ -447,6 +456,68 @@ function App() {
     });
   }, [sortedClips, clipFilter, clipTagFilter]);
 
+  const applyBatchStrategy = (strategy) => {
+    setBatchStrategy(strategy);
+    if (strategy === 'growth') {
+      setBatchTopCount(5);
+      setBatchStartDelayMinutes(5);
+      setBatchIntervalMinutes(30);
+      setBatchScope('global');
+      return;
+    }
+    if (strategy === 'conservative') {
+      setBatchTopCount(2);
+      setBatchStartDelayMinutes(60);
+      setBatchIntervalMinutes(240);
+      setBatchScope('visible');
+      return;
+    }
+    if (strategy === 'balanced') {
+      setBatchTopCount(3);
+      setBatchStartDelayMinutes(15);
+      setBatchIntervalMinutes(60);
+      setBatchScope('visible');
+      return;
+    }
+  };
+
+  const handleBatchReportCsvDownload = () => {
+    if (!batchScheduleReport || !Array.isArray(batchScheduleReport.timeline) || batchScheduleReport.timeline.length === 0) return;
+    const lines = [
+      [
+        'scheduled_at',
+        'clip_index',
+        'clip_title',
+        'virality_score',
+        'platforms',
+        'status',
+        'error'
+      ].join(',')
+    ];
+    batchScheduleReport.timeline.forEach((item) => {
+      const safe = (v) => `"${String(v ?? '').replaceAll('"', '""')}"`;
+      lines.push([
+        safe(item.scheduled_at),
+        safe(item.clip_index),
+        safe(item.clip_title),
+        safe(item.virality_score),
+        safe((item.platforms || []).join('|')),
+        safe(item.status),
+        safe(item.error || '')
+      ].join(','));
+    });
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `batch_schedule_report_${jobId || 'job'}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const handleQueueTopClips = async () => {
     const candidatePool = batchScope === 'global' ? sortedClips : visibleClips;
     if (!jobId || candidatePool.length === 0) return;
@@ -478,6 +549,7 @@ function App() {
 
     let success = 0;
     const failures = [];
+    const timeline = [];
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
     for (let i = 0; i < candidates.length; i += 1) {
@@ -505,18 +577,51 @@ function App() {
         if (!res.ok) {
           const errText = await res.text();
           failures.push(`Clip ${clip.clip_index + 1}: ${errText}`);
+          timeline.push({
+            clip_index: clip.clip_index,
+            clip_title: clip.video_title_for_youtube_short || `Clip ${clip.clip_index + 1}`,
+            virality_score: clip.virality_score,
+            scheduled_at: scheduledAt,
+            platforms,
+            status: 'failed',
+            error: errText
+          });
         } else {
           success += 1;
+          timeline.push({
+            clip_index: clip.clip_index,
+            clip_title: clip.video_title_for_youtube_short || `Clip ${clip.clip_index + 1}`,
+            virality_score: clip.virality_score,
+            scheduled_at: scheduledAt,
+            platforms,
+            status: 'scheduled',
+            error: ''
+          });
         }
       } catch (e) {
         failures.push(`Clip ${clip.clip_index + 1}: ${e.message}`);
+        timeline.push({
+          clip_index: clip.clip_index,
+          clip_title: clip.video_title_for_youtube_short || `Clip ${clip.clip_index + 1}`,
+          virality_score: clip.virality_score,
+          scheduled_at: scheduledAt,
+          platforms,
+          status: 'failed',
+          error: e.message
+        });
       }
     }
 
     const report = {
       success,
       total: candidates.length,
-      failures
+      failures,
+      timeline: timeline.sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at)),
+      strategy: batchStrategy,
+      scope: batchScope,
+      top_count: topCount,
+      start_delay_minutes: startDelay,
+      interval_minutes: interval
     };
     setBatchScheduleReport(report);
     if (failures.length === 0) {
@@ -841,19 +946,36 @@ function App() {
                         <option key={tag} value={tag}>{tag}</option>
                       ))}
                     </select>
+                    <span className="text-xs text-zinc-500">Strategy:</span>
+                    <select
+                      value={batchStrategy}
+                      onChange={(e) => applyBatchStrategy(e.target.value)}
+                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                    >
+                      <option value="growth">Growth</option>
+                      <option value="balanced">Balanced</option>
+                      <option value="conservative">Conservative</option>
+                      <option value="custom">Custom</option>
+                    </select>
                     <span className="text-xs text-zinc-500 ml-1">Top N:</span>
                     <input
                       type="number"
                       min="1"
                       max="10"
                       value={batchTopCount}
-                      onChange={(e) => setBatchTopCount(Math.max(1, Math.min(10, Number(e.target.value || 1))))}
+                      onChange={(e) => {
+                        setBatchStrategy('custom');
+                        setBatchTopCount(Math.max(1, Math.min(10, Number(e.target.value || 1))));
+                      }}
                       className="w-16 text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
                     />
                     <span className="text-xs text-zinc-500">Start in:</span>
                     <select
                       value={batchStartDelayMinutes}
-                      onChange={(e) => setBatchStartDelayMinutes(Number(e.target.value))}
+                      onChange={(e) => {
+                        setBatchStrategy('custom');
+                        setBatchStartDelayMinutes(Number(e.target.value));
+                      }}
                       className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
                     >
                       <option value={0}>now</option>
@@ -865,7 +987,10 @@ function App() {
                     <span className="text-xs text-zinc-500">Every:</span>
                     <select
                       value={batchIntervalMinutes}
-                      onChange={(e) => setBatchIntervalMinutes(Number(e.target.value))}
+                      onChange={(e) => {
+                        setBatchStrategy('custom');
+                        setBatchIntervalMinutes(Number(e.target.value));
+                      }}
                       className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
                     >
                       <option value={15}>15m</option>
@@ -877,7 +1002,10 @@ function App() {
                     <span className="text-xs text-zinc-500">Scope:</span>
                     <select
                       value={batchScope}
-                      onChange={(e) => setBatchScope(e.target.value)}
+                      onChange={(e) => {
+                        setBatchStrategy('custom');
+                        setBatchScope(e.target.value);
+                      }}
                       className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
                     >
                       <option value="visible">Visible</option>
@@ -908,11 +1036,46 @@ function App() {
                       ? 'bg-green-500/10 border-green-500/30 text-green-300'
                       : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
                   }`}>
-                    <p>{`Batch schedule: ${batchScheduleReport.success}/${batchScheduleReport.total} queued.`}</p>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p>{`Batch schedule: ${batchScheduleReport.success}/${batchScheduleReport.total} queued.`}</p>
+                      <button
+                        onClick={handleBatchReportCsvDownload}
+                        className="text-[11px] bg-white/10 border border-white/20 rounded px-2 py-1 hover:bg-white/15"
+                      >
+                        Export Batch CSV
+                      </button>
+                    </div>
+                    <p className="mt-1 text-[11px] text-zinc-300">
+                      {`Strategy: ${batchScheduleReport.strategy || 'custom'} | Scope: ${batchScheduleReport.scope || 'visible'} | Top N: ${batchScheduleReport.top_count ?? '-'} | Every: ${batchScheduleReport.interval_minutes ?? '-'}m`}
+                    </p>
                     {batchScheduleReport.failures.length > 0 && (
                       <p className="mt-1 text-[11px] text-amber-300">
                         {batchScheduleReport.failures[0]}
                       </p>
+                    )}
+                    {Array.isArray(batchScheduleReport.timeline) && batchScheduleReport.timeline.length > 0 && (
+                      <div className="mt-3 max-h-36 overflow-y-auto border border-white/10 rounded bg-black/20">
+                        <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400 border-b border-white/10">
+                          Queue Calendar
+                        </div>
+                        <div className="divide-y divide-white/5">
+                          {batchScheduleReport.timeline.map((item, idx) => (
+                            <div key={`${item.clip_index}-${item.scheduled_at}-${idx}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="text-zinc-200 truncate">{item.clip_title}</div>
+                                <div className="text-zinc-500">{new Date(item.scheduled_at).toLocaleString()}</div>
+                              </div>
+                              <span className={`shrink-0 px-1.5 py-0.5 rounded border ${
+                                item.status === 'scheduled'
+                                  ? 'bg-green-500/15 border-green-500/30 text-green-300'
+                                  : 'bg-red-500/15 border-red-500/30 text-red-300'
+                              }`}>
+                                {item.status}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                     )}
                   </div>
                 )}
