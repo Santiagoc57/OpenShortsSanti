@@ -81,6 +81,13 @@ def _normalize_clip_score(raw_score, rank):
         return default
     return max(0, min(100, score))
 
+def _score_band(score):
+    if score >= 80:
+        return "top"
+    if score >= 65:
+        return "medium"
+    return "low"
+
 def normalize_shorts_payload(result_json):
     """
     Ensures each clip has stable scoring metadata for UI sorting:
@@ -99,6 +106,7 @@ def normalize_shorts_payload(result_json):
         if not isinstance(clip, dict):
             continue
         clip['virality_score'] = _normalize_clip_score(clip.get('virality_score'), i)
+        clip['score_band'] = _score_band(clip['virality_score'])
         reason = clip.get('score_reason')
         if not reason:
             reason = f"AI ranking position #{i+1} based on hook and retention potential."

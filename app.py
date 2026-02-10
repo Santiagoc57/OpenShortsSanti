@@ -80,6 +80,13 @@ def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
 def _default_score_by_rank(rank: int) -> int:
     return max(55, 92 - (rank * 6))
 
+def _score_band(score: int) -> str:
+    if score >= 80:
+        return "top"
+    if score >= 65:
+        return "medium"
+    return "low"
+
 def _normalize_clip_payload(clip: Dict, rank: int) -> Dict:
     """
     Ensure clip carries stable metadata used by the dashboard:
@@ -98,6 +105,7 @@ def _normalize_clip_payload(clip: Dict, rank: int) -> Dict:
     except (TypeError, ValueError):
         score = _default_score_by_rank(rank)
     clip['virality_score'] = max(0, min(100, score))
+    clip['score_band'] = _score_band(clip['virality_score'])
 
     reason = clip.get('score_reason')
     if not reason:

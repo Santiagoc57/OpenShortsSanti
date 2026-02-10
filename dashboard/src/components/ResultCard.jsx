@@ -348,6 +348,11 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                         <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#shorts</span>
                         <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#viral</span>
                     </div>
+                    {clip.score_reason && (
+                        <p className="mt-2 text-[10px] text-zinc-500 line-clamp-2" title={clip.score_reason}>
+                            {clip.score_reason}
+                        </p>
+                    )}
                     {subtitledVideoUrl && (
                         <div className="mt-2 flex items-center gap-2 text-[10px] text-zinc-400">
                             <span>Subtitles</span>

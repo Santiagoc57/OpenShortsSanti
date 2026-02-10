@@ -140,6 +140,7 @@ function App() {
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [results, setResults] = useState(null);
   const [clipSort, setClipSort] = useState('top'); // top, balanced, safe
+  const [clipFilter, setClipFilter] = useState('all'); // all, top, medium, low
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
@@ -243,6 +244,7 @@ function App() {
     setLogs(["Starting process..."]);
     setResults(null);
     setClipSort('top');
+    setClipFilter('all');
     setProcessingMedia(data);
 
     try {
@@ -302,6 +304,7 @@ function App() {
     setJobId(null);
     setResults(null);
     setClipSort('top');
+    setClipFilter('all');
     setLogs([]);
     setProcessingMedia(null);
   };
@@ -319,7 +322,8 @@ function App() {
       const clipIndex = Number.isFinite(rawClipIndex) ? rawClipIndex : idx;
 
       const duration = Math.max(0, Number(clip?.end ?? 0) - Number(clip?.start ?? 0));
-      return { ...clip, virality_score: score, clip_index: clipIndex, _duration: duration };
+      const band = clip?.score_band || (score >= 80 ? 'top' : score >= 65 ? 'medium' : 'low');
+      return { ...clip, virality_score: score, score_band: band, clip_index: clipIndex, _duration: duration };
     });
 
     const sorted = [...normalized];
@@ -338,6 +342,12 @@ function App() {
     }
     return sorted;
   }, [results, clipSort]);
+
+  const visibleClips = useMemo(() => {
+    if (!Array.isArray(sortedClips)) return [];
+    if (clipFilter === 'all') return sortedClips;
+    return sortedClips.filter((clip) => clip.score_band === clipFilter);
+  }, [sortedClips, clipFilter]);
 
   // --- UI Components ---
 
@@ -579,7 +589,7 @@ function App() {
                   Generated Shorts
                   {sortedClips.length > 0 && (
                     <span className="text-xs bg-white/10 text-white px-2 py-0.5 rounded-full ml-auto">
-                      {sortedClips.length} Clips
+                      {visibleClips.length}/{sortedClips.length} Clips
                     </span>
                   )}
                   {results?.cost_analysis && (
@@ -589,8 +599,8 @@ function App() {
                   )}
                 </h2>
 
-                {sortedClips.length > 1 && (
-                  <div className="mb-4 shrink-0 flex items-center gap-2">
+                {sortedClips.length > 0 && (
+                  <div className="mb-4 shrink-0 flex flex-wrap items-center gap-2">
                     <span className="text-xs text-zinc-500">Order:</span>
                     <select
                       value={clipSort}
@@ -601,13 +611,24 @@ function App() {
                       <option value="balanced">Timeline</option>
                       <option value="safe">Safe Bets</option>
                     </select>
+                    <span className="text-xs text-zinc-500 ml-1">Filter:</span>
+                    <select
+                      value={clipFilter}
+                      onChange={(e) => setClipFilter(e.target.value)}
+                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                    >
+                      <option value="all">All</option>
+                      <option value="top">Top (80+)</option>
+                      <option value="medium">Medium (65-79)</option>
+                      <option value="low">Low (&lt;65)</option>
+                    </select>
                   </div>
                 )}
 
                  <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
-                    {sortedClips.length > 0 ? (
+                    {visibleClips.length > 0 ? (
                        <div className={`grid gap-4 pb-10 ${status === 'complete' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
-                           {sortedClips.map((clip, i) => (
+                           {visibleClips.map((clip, i) => (
                           <ResultCard
                                key={`${clip.clip_index}-${clip.video_url || i}`}
                                clip={clip}
@@ -627,6 +648,10 @@ function App() {
                       <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-4 opacity-50">
                         <div className="w-12 h-12 rounded-full border-2 border-zinc-800 border-t-primary animate-spin" />
                         <p className="text-sm">Waiting for clips...</p>
+                      </div>
+                    ) : sortedClips.length > 0 ? (
+                      <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-2">
+                        <p>No clips match this filter.</p>
                       </div>
                     ) : status === 'error' ? (
                       <div className="h-full flex flex-col items-center justify-center text-red-400 space-y-2">
