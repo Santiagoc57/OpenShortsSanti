@@ -8,6 +8,9 @@ import glob
 import time
 import asyncio
 import re
+import csv
+import io
+import zipfile
 from dotenv import load_dotenv
 from typing import Dict, Optional, List
 from contextlib import asynccontextmanager
@@ -849,6 +852,125 @@ async def recut_clip(req: RecutRequest):
         job['result']['clips'][req.clip_index]['end'] = req.end
 
     return {"success": True, "new_video_url": f"/videos/{req.job_id}/{out_name}"}
+
+class ExportPackRequest(BaseModel):
+    job_id: str
+    include_video_files: bool = True
+    include_srt_files: bool = True
+
+@app.post("/api/export/pack")
+async def export_pack(req: ExportPackRequest):
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    if not os.path.isdir(output_dir):
+        raise HTTPException(status_code=404, detail="Job output directory not found")
+
+    metadata_files = sorted(glob.glob(os.path.join(output_dir, "*_metadata.json")))
+    metadata_path = metadata_files[0] if metadata_files else None
+    metadata = {}
+    if metadata_path:
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+        except Exception:
+            metadata = {}
+
+    job = jobs[req.job_id]
+    clips = []
+    if isinstance(job.get("result"), dict):
+        clips = job["result"].get("clips", []) or []
+    if not clips:
+        clips = metadata.get("shorts", []) if isinstance(metadata, dict) else []
+
+    normalized_clips = []
+    for i, clip in enumerate(clips):
+        normalized = _normalize_clip_payload(dict(clip) if isinstance(clip, dict) else {}, i)
+        if not normalized.get("video_url"):
+            clip_filename = f"{req.job_id}_clip_{i+1}.mp4"
+            # Best effort fallback if current naming is unknown.
+            candidates = sorted(glob.glob(os.path.join(output_dir, f"*_clip_{i+1}.mp4")))
+            if candidates:
+                clip_filename = os.path.basename(candidates[0])
+            normalized["video_url"] = f"/videos/{req.job_id}/{clip_filename}"
+        normalized_clips.append(normalized)
+
+    manifest = {
+        "job_id": req.job_id,
+        "generated_at": int(time.time()),
+        "clips": normalized_clips
+    }
+
+    csv_buf = io.StringIO()
+    writer = csv.writer(csv_buf)
+    writer.writerow([
+        "clip_number",
+        "clip_index",
+        "virality_score",
+        "score_band",
+        "selection_confidence",
+        "start_seconds",
+        "end_seconds",
+        "youtube_title",
+        "caption_tiktok",
+        "caption_instagram",
+        "topic_tags"
+    ])
+    for i, clip in enumerate(normalized_clips):
+        writer.writerow([
+            i + 1,
+            clip.get("clip_index", i),
+            clip.get("virality_score", ""),
+            clip.get("score_band", ""),
+            clip.get("selection_confidence", ""),
+            clip.get("start", ""),
+            clip.get("end", ""),
+            clip.get("video_title_for_youtube_short", ""),
+            clip.get("video_description_for_tiktok", ""),
+            clip.get("video_description_for_instagram", ""),
+            ",".join(clip.get("topic_tags", []) or [])
+        ])
+
+    zip_name = f"agency_pack_{req.job_id}_{int(time.time())}.zip"
+    zip_path = os.path.join(output_dir, zip_name)
+    clip_files_added = 0
+    srt_files_added = 0
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        zf.writestr("copies.csv", csv_buf.getvalue())
+
+        if metadata_path and os.path.exists(metadata_path):
+            zf.write(metadata_path, arcname=f"metadata/{os.path.basename(metadata_path)}")
+
+        if req.include_video_files:
+            seen = set()
+            for clip in normalized_clips:
+                video_url = clip.get("video_url", "")
+                filename = os.path.basename(video_url)
+                if not filename:
+                    continue
+                file_path = os.path.join(output_dir, filename)
+                if file_path in seen or not os.path.exists(file_path):
+                    continue
+                seen.add(file_path)
+                zf.write(file_path, arcname=f"clips/{filename}")
+                clip_files_added += 1
+
+        if req.include_srt_files:
+            srt_paths = sorted(glob.glob(os.path.join(output_dir, "*.srt")))
+            for srt_path in srt_paths:
+                zf.write(srt_path, arcname=f"srt/{os.path.basename(srt_path)}")
+                srt_files_added += 1
+
+    return {
+        "success": True,
+        "pack_url": f"/videos/{req.job_id}/{zip_name}",
+        "clips_in_manifest": len(normalized_clips),
+        "video_files_added": clip_files_added,
+        "srt_files_added": srt_files_added
+    }
 
 class SocialPostRequest(BaseModel):
     job_id: str

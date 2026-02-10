@@ -4,7 +4,7 @@ import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
-import { apiFetch } from './config';
+import { apiFetch, getApiUrl } from './config';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -153,6 +153,10 @@ function App() {
     if (!Number.isFinite(stored)) return 60;
     return Math.max(5, Math.min(720, Math.round(stored)));
   };
+  const getInitialBatchScope = () => {
+    const stored = localStorage.getItem('batchScopePreset');
+    return ['visible', 'global'].includes(stored) ? stored : 'visible';
+  };
 
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
   // Social API State - Load encrypted or plain
@@ -173,8 +177,11 @@ function App() {
   const [batchTopCount, setBatchTopCount] = useState(getInitialBatchTopCount);
   const [batchStartDelayMinutes, setBatchStartDelayMinutes] = useState(getInitialBatchStartDelay);
   const [batchIntervalMinutes, setBatchIntervalMinutes] = useState(getInitialBatchInterval);
+  const [batchScope, setBatchScope] = useState(getInitialBatchScope); // visible | global
   const [isBatchScheduling, setIsBatchScheduling] = useState(false);
   const [batchScheduleReport, setBatchScheduleReport] = useState(null);
+  const [isExportingPack, setIsExportingPack] = useState(false);
+  const [packExportReport, setPackExportReport] = useState(null);
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
@@ -241,6 +248,10 @@ function App() {
   }, [batchIntervalMinutes]);
 
   useEffect(() => {
+    localStorage.setItem('batchScopePreset', batchScope);
+  }, [batchScope]);
+
+  useEffect(() => {
     let interval;
     if ((status === 'processing' || status === 'completed') && jobId) {
       interval = setInterval(async () => {
@@ -302,6 +313,7 @@ function App() {
     setLogs(["Starting process..."]);
     setResults(null);
     setBatchScheduleReport(null);
+    setPackExportReport(null);
     setProcessingMedia(data);
 
     try {
@@ -361,6 +373,7 @@ function App() {
     setJobId(null);
     setResults(null);
     setBatchScheduleReport(null);
+    setPackExportReport(null);
     setLogs([]);
     setProcessingMedia(null);
   };
@@ -435,7 +448,8 @@ function App() {
   }, [sortedClips, clipFilter, clipTagFilter]);
 
   const handleQueueTopClips = async () => {
-    if (!jobId || visibleClips.length === 0) return;
+    const candidatePool = batchScope === 'global' ? sortedClips : visibleClips;
+    if (!jobId || candidatePool.length === 0) return;
     if (!uploadPostKey || !uploadUserId) {
       alert("Configura Upload-Post API Key y User Profile en Settings para usar queue batch.");
       return;
@@ -445,7 +459,7 @@ function App() {
     const startDelay = Math.max(0, Math.min(180, Number(batchStartDelayMinutes) || 15));
     const interval = Math.max(5, Math.min(720, Number(batchIntervalMinutes) || 60));
 
-    const candidates = [...visibleClips]
+    const candidates = [...candidatePool]
       .sort((a, b) => b.virality_score - a.virality_score || a.clip_index - b.clip_index)
       .slice(0, topCount);
 
@@ -459,6 +473,7 @@ function App() {
 
     setIsBatchScheduling(true);
     setBatchScheduleReport(null);
+    setPackExportReport(null);
     setLogs((prev) => [...prev, `Queueing top ${candidates.length} clips (${platforms.join(', ')}) | start +${startDelay}m, every ${interval}m...`]);
 
     let success = 0;
@@ -510,6 +525,36 @@ function App() {
       setLogs((prev) => [...prev, `Batch queue completed with issues: ${success}/${candidates.length} scheduled.`]);
     }
     setIsBatchScheduling(false);
+  };
+
+  const handleExportPack = async () => {
+    if (!jobId) return;
+    setIsExportingPack(true);
+    setPackExportReport(null);
+    try {
+      const res = await apiFetch('/api/export/pack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: jobId, include_video_files: true, include_srt_files: true })
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setPackExportReport(data);
+
+      const href = getApiUrl(data.pack_url);
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = href.split('/').pop() || `agency_pack_${jobId}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setLogs((prev) => [...prev, `Export pack ready (${data.video_files_added} video files, ${data.srt_files_added} srt files).`]);
+    } catch (e) {
+      setPackExportReport({ success: false, error: e.message });
+      setLogs((prev) => [...prev, `Export pack failed: ${e.message}`]);
+    } finally {
+      setIsExportingPack(false);
+    }
   };
 
   // --- UI Components ---
@@ -829,13 +874,30 @@ function App() {
                       <option value={120}>120m</option>
                       <option value={240}>240m</option>
                     </select>
+                    <span className="text-xs text-zinc-500">Scope:</span>
+                    <select
+                      value={batchScope}
+                      onChange={(e) => setBatchScope(e.target.value)}
+                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                    >
+                      <option value="visible">Visible</option>
+                      <option value="global">Global</option>
+                    </select>
                     <button
                       onClick={handleQueueTopClips}
-                      disabled={isBatchScheduling || visibleClips.length === 0}
+                      disabled={isBatchScheduling || (batchScope === 'global' ? sortedClips.length === 0 : visibleClips.length === 0)}
                       className="ml-1 text-xs bg-primary/20 border border-primary/40 text-primary rounded-md px-2 py-1 hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
                       title="Batch schedule using current Top N and interval settings"
                     >
                       {isBatchScheduling ? 'Queueing...' : `Queue Top ${Math.max(1, Math.min(10, Number(batchTopCount) || 1))}`}
+                    </button>
+                    <button
+                      onClick={handleExportPack}
+                      disabled={isExportingPack || !jobId}
+                      className="text-xs bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 rounded-md px-2 py-1 hover:bg-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Export agency package (zip)"
+                    >
+                      {isExportingPack ? 'Exporting...' : 'Export Pack'}
                     </button>
                   </div>
                 )}
@@ -852,6 +914,17 @@ function App() {
                         {batchScheduleReport.failures[0]}
                       </p>
                     )}
+                  </div>
+                )}
+                {packExportReport && (
+                  <div className={`mb-4 text-xs rounded-lg border px-3 py-2 ${
+                    packExportReport.success === false
+                      ? 'bg-red-500/10 border-red-500/30 text-red-300'
+                      : 'bg-blue-500/10 border-blue-500/30 text-blue-300'
+                  }`}>
+                    {packExportReport.success === false
+                      ? <p>{`Pack export error: ${packExportReport.error}`}</p>
+                      : <p>{`Pack ready: ${packExportReport.video_files_added} videos, ${packExportReport.srt_files_added} SRT, ${packExportReport.clips_in_manifest} clips in manifest.`}</p>}
                   </div>
                 )}
 
