@@ -4,7 +4,7 @@ import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
-import { getApiUrl } from './config';
+import { getApiUrl, apiFetch } from './config';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -120,7 +120,7 @@ const UserProfileSelector = ({ profiles, selectedUserId, onSelect }) => {
 
 // Mock polling function
 const pollJob = async (jobId) => {
-  const res = await fetch(getApiUrl(`/api/status/${jobId}`));
+  const res = await apiFetch(`/api/status/${jobId}`);
   if (!res.ok) throw new Error('Status check failed');
   return res.json();
 };
@@ -217,7 +217,7 @@ function App() {
   const fetchUserProfiles = async () => {
     if (!uploadPostKey) return;
     try {
-      const res = await fetch(getApiUrl('/api/social/user'), {
+      const res = await apiFetch('/api/social/user', {
         headers: { 'X-Upload-Post-Key': uploadPostKey }
       });
       if (!res.ok) throw new Error("Failed to fetch");
@@ -279,7 +279,7 @@ function App() {
         body = formData;
       }
 
-      const res = await fetch(getApiUrl('/api/process'), {
+      const res = await apiFetch('/api/process', {
         method: 'POST',
         headers: data.type === 'url' ? headers : { 'X-Gemini-Key': apiKey },
         body

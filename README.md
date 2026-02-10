@@ -106,6 +106,70 @@ Open your browser and navigate to:
 
 ---
 
+## 🧭 Product Roadmap (Opus-like + Differentiation)
+
+This roadmap is based on the current codebase and benchmarked feature sets from Opus/Vizard/Flowjin/Descript-style products.
+
+### Status Snapshot
+
+#### ✅ Already implemented
+- Upload + YouTube URL ingestion.
+- AI highlight detection with ranked clip proposals.
+- Vertical reframing with face/speaker tracking.
+- Subtitle generation + preview + style controls.
+- Clip post-editing (`Auto Edit`, `Recut`) and social posting.
+- Scheduled publishing via Upload-Post.
+
+#### 🟡 Partially implemented
+- Virality ranking exists, but no explicit numeric `virality_score` in UI/API.
+- Social distribution works, but no unified content calendar UX.
+- Video-first flow is complete; audio-only podcast flow is not first-class.
+
+#### ⛔ Not implemented yet
+- Search-inside-video (`clip anything` by prompt/topic/moment intent).
+- Brand kit/templates per team (logo/fonts/safe margins/presets).
+- Auto B-roll + emoji packaging.
+- Multi-ratio output strategy (9:16 / 1:1 / 16:9 as a first-class option).
+- Agency export pack (clips + copies + hashtags + SRT + thumbnails + publish plan).
+- Full “suite” extras (filler-word removal, audio enhancement, translation workflow).
+
+### Phase Plan
+
+#### Phase 1 — Core Competitive (MVP hardening)
+1. Add `virality_score` per clip in backend metadata and dashboard card.
+2. Add clip sorting/filtering by score (`Top`, `Balanced`, `Safe`).
+3. Expose confidence/explanation metadata for clip selection.
+4. Add audio-only ingestion mode for podcasts.
+
+#### Phase 2 — Revenue Features (V1 paid)
+1. Brand kit and reusable templates.
+2. Better scheduling UX (calendar view + per-platform copy preview).
+3. Batch actions for teams (approve/schedule multiple clips).
+
+#### Phase 3 — Product Differentiation (V2)
+1. `Clip Anything`: natural-language search over transcript + timestamp retrieval.
+2. Long-VOD navigation (chapters, topic clusters, no-scrub exploration).
+3. Agency export package and optional human-QA workflow.
+
+### Suggested Engineering Track (Execution Order)
+
+1. API schema extension: `virality_score`, `score_reason`, `topic_tags`.
+2. Dashboard update: score badges + sorting controls + queue actions.
+3. Search layer: semantic index over transcript chunks.
+4. Packaging layer: template presets + brand assets + team exports.
+5. Post-production extras: audio cleanup + translation + style automation.
+
+### Open-Source / Integration Boosters
+
+- `kaixxx/noScribe`: local whisper + diarization ideas for speaker-aware workflows.
+- `tryvinci/vinci-clips`: reference architecture for long-form to short-form pipelines.
+- MCP stack in this project:
+  - GitHub code search patterns for feature implementation references.
+  - Context docs retrieval for FastAPI/video pipeline libraries.
+  - Browser automation for E2E validation of clip generation/publishing flows.
+
+---
+
 ## 🔒 Security & Performance
 
 *   **Non-Root Execution**: Containers run as a dedicated `appuser` for security.

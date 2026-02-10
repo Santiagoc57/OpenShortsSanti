@@ -10,3 +10,23 @@ export const getApiUrl = (path) => {
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
     return `${API_BASE_URL}${normalizedPath}`;
 };
+
+const isNgrokBaseUrl = () => {
+    if (!API_BASE_URL) return false;
+    return API_BASE_URL.includes('ngrok');
+};
+
+export const apiFetch = (path, options = {}) => {
+    const url = getApiUrl(path);
+    const headers = new Headers(options.headers || {});
+
+    // Avoid ngrok browser warning HTML page on XHR/fetch requests.
+    if (isNgrokBaseUrl()) {
+        headers.set('ngrok-skip-browser-warning', 'true');
+    }
+
+    return fetch(url, {
+        ...options,
+        headers
+    });
+};

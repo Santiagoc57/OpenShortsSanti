@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock, Scissors, Play, Pause } from 'lucide-react';
-import { getApiUrl } from '../config';
+import { getApiUrl, apiFetch } from '../config';
 import SubtitleModal from './SubtitleModal';
 
 export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, onPlay, onPause }) {
@@ -86,7 +86,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                  throw new Error("Gemini API Key is missing. Please set it in Settings.");
              }
 
-             const res = await fetch(getApiUrl('/api/edit'), {
+             const res = await apiFetch('/api/edit', {
                 method: 'POST',
                 headers: { 
                     'Content-Type': 'application/json',
@@ -134,7 +134,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         setIsSubtitling(true);
         setEditError(null);
         try {
-            const res = await fetch(getApiUrl('/api/subtitle'), {
+            const res = await apiFetch('/api/subtitle', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -185,7 +185,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         setIsRecutting(true);
         setEditError(null);
         try {
-            const res = await fetch(getApiUrl('/api/recut'), {
+            const res = await apiFetch('/api/recut', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -257,7 +257,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 payload.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
             }
 
-            const res = await fetch(getApiUrl('/api/social/post'), {
+            const res = await apiFetch('/api/social/post', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -571,7 +571,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 isProcessing={isSubtitling}
                 videoUrl={currentVideoUrl}
                 onLoadSrt={async () => {
-                    const res = await fetch(getApiUrl('/api/subtitle/preview'), {
+                    const res = await apiFetch('/api/subtitle/preview', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ job_id: jobId, clip_index: index })
