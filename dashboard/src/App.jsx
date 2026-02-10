@@ -134,6 +134,21 @@ function App() {
     const stored = localStorage.getItem('clipFilterPreset');
     return ['all', 'top', 'medium', 'low'].includes(stored) ? stored : 'all';
   };
+  const getInitialBatchTopCount = () => {
+    const stored = Number(localStorage.getItem('batchTopCountPreset'));
+    if (!Number.isFinite(stored)) return 3;
+    return Math.max(1, Math.min(10, Math.round(stored)));
+  };
+  const getInitialBatchStartDelay = () => {
+    const stored = Number(localStorage.getItem('batchStartDelayPreset'));
+    if (!Number.isFinite(stored)) return 15;
+    return Math.max(0, Math.min(180, Math.round(stored)));
+  };
+  const getInitialBatchInterval = () => {
+    const stored = Number(localStorage.getItem('batchIntervalPreset'));
+    if (!Number.isFinite(stored)) return 60;
+    return Math.max(5, Math.min(720, Math.round(stored)));
+  };
 
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
   // Social API State - Load encrypted or plain
@@ -150,6 +165,9 @@ function App() {
   const [results, setResults] = useState(null);
   const [clipSort, setClipSort] = useState(getInitialClipSort); // top, balanced, safe
   const [clipFilter, setClipFilter] = useState(getInitialClipFilter); // all, top, medium, low
+  const [batchTopCount, setBatchTopCount] = useState(getInitialBatchTopCount);
+  const [batchStartDelayMinutes, setBatchStartDelayMinutes] = useState(getInitialBatchStartDelay);
+  const [batchIntervalMinutes, setBatchIntervalMinutes] = useState(getInitialBatchInterval);
   const [isBatchScheduling, setIsBatchScheduling] = useState(false);
   const [batchScheduleReport, setBatchScheduleReport] = useState(null);
   const [logs, setLogs] = useState([]);
@@ -200,6 +218,18 @@ function App() {
   useEffect(() => {
     localStorage.setItem('clipFilterPreset', clipFilter);
   }, [clipFilter]);
+
+  useEffect(() => {
+    localStorage.setItem('batchTopCountPreset', String(batchTopCount));
+  }, [batchTopCount]);
+
+  useEffect(() => {
+    localStorage.setItem('batchStartDelayPreset', String(batchStartDelayMinutes));
+  }, [batchStartDelayMinutes]);
+
+  useEffect(() => {
+    localStorage.setItem('batchIntervalPreset', String(batchIntervalMinutes));
+  }, [batchIntervalMinutes]);
 
   useEffect(() => {
     let interval;
@@ -367,15 +397,19 @@ function App() {
   }, [sortedClips, clipFilter]);
 
   const handleQueueTopClips = async () => {
-    if (!jobId || sortedClips.length === 0) return;
+    if (!jobId || visibleClips.length === 0) return;
     if (!uploadPostKey || !uploadUserId) {
-      alert("Configura Upload-Post API Key y User Profile en Settings para usar Queue Top 3.");
+      alert("Configura Upload-Post API Key y User Profile en Settings para usar queue batch.");
       return;
     }
 
-    const candidates = [...sortedClips]
+    const topCount = Math.max(1, Math.min(10, Number(batchTopCount) || 3));
+    const startDelay = Math.max(0, Math.min(180, Number(batchStartDelayMinutes) || 15));
+    const interval = Math.max(5, Math.min(720, Number(batchIntervalMinutes) || 60));
+
+    const candidates = [...visibleClips]
       .sort((a, b) => b.virality_score - a.virality_score || a.clip_index - b.clip_index)
-      .slice(0, 3);
+      .slice(0, topCount);
 
     if (candidates.length === 0) return;
 
@@ -387,7 +421,7 @@ function App() {
 
     setIsBatchScheduling(true);
     setBatchScheduleReport(null);
-    setLogs((prev) => [...prev, `Queueing top ${candidates.length} clips (${platforms.join(', ')})...`]);
+    setLogs((prev) => [...prev, `Queueing top ${candidates.length} clips (${platforms.join(', ')}) | start +${startDelay}m, every ${interval}m...`]);
 
     let success = 0;
     const failures = [];
@@ -395,8 +429,7 @@ function App() {
 
     for (let i = 0; i < candidates.length; i += 1) {
       const clip = candidates[i];
-      // Start 15 minutes from now, then every +60 minutes.
-      const scheduledAt = new Date(Date.now() + (15 + (i * 60)) * 60 * 1000).toISOString();
+      const scheduledAt = new Date(Date.now() + (startDelay + (i * interval)) * 60 * 1000).toISOString();
       try {
         const payload = {
           job_id: jobId,
@@ -434,9 +467,9 @@ function App() {
     };
     setBatchScheduleReport(report);
     if (failures.length === 0) {
-      setLogs((prev) => [...prev, `Queue Top 3 completed: ${success}/${candidates.length} scheduled.`]);
+      setLogs((prev) => [...prev, `Batch queue completed: ${success}/${candidates.length} scheduled.`]);
     } else {
-      setLogs((prev) => [...prev, `Queue Top 3 completed with issues: ${success}/${candidates.length} scheduled.`]);
+      setLogs((prev) => [...prev, `Batch queue completed with issues: ${success}/${candidates.length} scheduled.`]);
     }
     setIsBatchScheduling(false);
   };
@@ -714,13 +747,46 @@ function App() {
                       <option value="medium">Medium (65-79)</option>
                       <option value="low">Low (&lt;65)</option>
                     </select>
+                    <span className="text-xs text-zinc-500 ml-1">Top N:</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="10"
+                      value={batchTopCount}
+                      onChange={(e) => setBatchTopCount(Math.max(1, Math.min(10, Number(e.target.value || 1))))}
+                      className="w-16 text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                    />
+                    <span className="text-xs text-zinc-500">Start in:</span>
+                    <select
+                      value={batchStartDelayMinutes}
+                      onChange={(e) => setBatchStartDelayMinutes(Number(e.target.value))}
+                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                    >
+                      <option value={0}>now</option>
+                      <option value={5}>5m</option>
+                      <option value={15}>15m</option>
+                      <option value={30}>30m</option>
+                      <option value={60}>60m</option>
+                    </select>
+                    <span className="text-xs text-zinc-500">Every:</span>
+                    <select
+                      value={batchIntervalMinutes}
+                      onChange={(e) => setBatchIntervalMinutes(Number(e.target.value))}
+                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                    >
+                      <option value={15}>15m</option>
+                      <option value={30}>30m</option>
+                      <option value={60}>60m</option>
+                      <option value={120}>120m</option>
+                      <option value={240}>240m</option>
+                    </select>
                     <button
                       onClick={handleQueueTopClips}
-                      disabled={isBatchScheduling || sortedClips.length === 0}
+                      disabled={isBatchScheduling || visibleClips.length === 0}
                       className="ml-1 text-xs bg-primary/20 border border-primary/40 text-primary rounded-md px-2 py-1 hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                      title="Schedule top 3 clips with 60-minute spacing"
+                      title="Batch schedule using current Top N and interval settings"
                     >
-                      {isBatchScheduling ? 'Queueing...' : 'Queue Top 3'}
+                      {isBatchScheduling ? 'Queueing...' : `Queue Top ${Math.max(1, Math.min(10, Number(batchTopCount) || 1))}`}
                     </button>
                   </div>
                 )}
