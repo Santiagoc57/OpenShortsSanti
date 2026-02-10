@@ -7,6 +7,7 @@ import shutil
 import glob
 import time
 import asyncio
+import re
 from dotenv import load_dotenv
 from typing import Dict, Optional, List
 from contextlib import asynccontextmanager
@@ -87,6 +88,56 @@ def _score_band(score: int) -> str:
         return "medium"
     return "low"
 
+def _normalize_confidence(raw_confidence, score: int) -> float:
+    try:
+        conf = float(raw_confidence)
+    except (TypeError, ValueError):
+        conf = score / 100.0
+    return round(max(0.0, min(1.0, conf)), 2)
+
+def _normalize_topic_tags(raw_tags) -> List[str]:
+    if isinstance(raw_tags, str):
+        raw_tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+    if not isinstance(raw_tags, list):
+        return []
+
+    out: List[str] = []
+    seen = set()
+    for tag in raw_tags:
+        if not isinstance(tag, str):
+            continue
+        clean = tag.strip().lstrip("#").lower()[:24]
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        out.append(clean)
+        if len(out) >= 5:
+            break
+    return out
+
+def _default_topic_tags(clip: Dict) -> List[str]:
+    text = " ".join([
+        str(clip.get("video_title_for_youtube_short", "")),
+        str(clip.get("video_description_for_tiktok", "")),
+        str(clip.get("video_description_for_instagram", "")),
+    ]).lower()
+    words = re.findall(r"[a-zA-ZÀ-ÿ0-9]{4,}", text)
+    stop = {
+        "this", "that", "with", "para", "como", "este", "esta", "from",
+        "about", "your", "have", "will", "they", "porque", "cuando",
+        "donde", "video", "viral", "short", "shorts", "follow", "comment"
+    }
+    tags: List[str] = []
+    seen = set()
+    for w in words:
+        if w in stop or w in seen:
+            continue
+        seen.add(w)
+        tags.append(w[:24])
+        if len(tags) >= 3:
+            break
+    return tags
+
 def _normalize_clip_payload(clip: Dict, rank: int) -> Dict:
     """
     Ensure clip carries stable metadata used by the dashboard:
@@ -106,11 +157,17 @@ def _normalize_clip_payload(clip: Dict, rank: int) -> Dict:
         score = _default_score_by_rank(rank)
     clip['virality_score'] = max(0, min(100, score))
     clip['score_band'] = _score_band(clip['virality_score'])
+    clip['selection_confidence'] = _normalize_confidence(clip.get('selection_confidence'), clip['virality_score'])
 
     reason = clip.get('score_reason')
     if not reason:
         reason = f"AI ranking position #{rank+1} based on hook and retention potential."
     clip['score_reason'] = str(reason).strip()[:220]
+
+    tags = _normalize_topic_tags(clip.get('topic_tags'))
+    if not tags:
+        tags = _default_topic_tags(clip)
+    clip['topic_tags'] = tags
 
     return clip
 

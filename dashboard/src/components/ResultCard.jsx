@@ -35,6 +35,9 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
     };
     const rawScore = Number(clip?.virality_score);
     const clipScore = Number.isFinite(rawScore) ? Math.max(0, Math.min(100, Math.round(rawScore))) : 0;
+    const rawConfidence = Number(clip?.selection_confidence);
+    const clipConfidence = Number.isFinite(rawConfidence) ? Math.max(0, Math.min(1, rawConfidence)) : clipScore / 100;
+    const topicTags = Array.isArray(clip?.topic_tags) ? clip.topic_tags.filter((t) => typeof t === 'string' && t.trim() !== '') : [];
     const scoreBadgeClass = clipScore >= 80
         ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
         : clipScore >= 65
@@ -341,6 +344,9 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                         <span className={`px-1.5 py-0.5 rounded border shrink-0 ${scoreBadgeClass}`} title={clip.score_reason || 'Predicted performance score'}>
                             Score {clipScore}/100
                         </span>
+                        <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0" title="Selection confidence">
+                            Conf {Math.round(clipConfidence * 100)}%
+                        </span>
                         <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">{Math.floor(clip.end - clip.start)}s</span>
                         <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">
                             {formatTime(clip.start)} - {formatTime(clip.end)}
@@ -352,6 +358,15 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                         <p className="mt-2 text-[10px] text-zinc-500 line-clamp-2" title={clip.score_reason}>
                             {clip.score_reason}
                         </p>
+                    )}
+                    {topicTags.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                            {topicTags.slice(0, 5).map((tag) => (
+                                <span key={tag} className="text-[10px] bg-white/5 border border-white/10 rounded px-1.5 py-0.5 text-zinc-300">
+                                    #{tag}
+                                </span>
+                            ))}
+                        </div>
                     )}
                     {subtitledVideoUrl && (
                         <div className="mt-2 flex items-center gap-2 text-[10px] text-zinc-400">

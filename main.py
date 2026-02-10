@@ -60,7 +60,9 @@ OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by pre
       "start": <number in seconds, e.g., 12.340>,
       "end": <number in seconds, e.g., 37.900>,
       "virality_score": <integer 0-100, where 100 is highest predicted performance>,
+      "selection_confidence": <number between 0 and 1 indicating confidence in this selection>,
       "score_reason": "<one short reason why this clip should perform>",
+      "topic_tags": ["<up to 5 short tags, no #, e.g., politics, debate, economy>"],
       "video_description_for_tiktok": "<description for TikTok oriented to get views>",
       "video_description_for_instagram": "<description for Instagram oriented to get views>",
       "video_title_for_youtube_short": "<title for YouTube Short oriented to get views 100 chars max>"
@@ -88,6 +90,60 @@ def _score_band(score):
         return "medium"
     return "low"
 
+def _normalize_confidence(raw_confidence, score):
+    try:
+        conf = float(raw_confidence)
+    except (TypeError, ValueError):
+        conf = score / 100.0
+    return round(max(0.0, min(1.0, conf)), 2)
+
+def _normalize_topic_tags(raw_tags):
+    if isinstance(raw_tags, str):
+        raw_tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+    if not isinstance(raw_tags, list):
+        return []
+
+    out = []
+    seen = set()
+    for tag in raw_tags:
+        if not isinstance(tag, str):
+            continue
+        clean = tag.strip().lstrip("#").lower()
+        if not clean:
+            continue
+        # Keep tags short and UI-friendly.
+        clean = clean[:24]
+        if clean in seen:
+            continue
+        seen.add(clean)
+        out.append(clean)
+        if len(out) >= 5:
+            break
+    return out
+
+def _default_topic_tags(clip):
+    text = " ".join([
+        str(clip.get("video_title_for_youtube_short", "")),
+        str(clip.get("video_description_for_tiktok", "")),
+        str(clip.get("video_description_for_instagram", "")),
+    ]).lower()
+    words = re.findall(r"[a-zA-ZÀ-ÿ0-9]{4,}", text)
+    stop = {
+        "this", "that", "with", "para", "como", "este", "esta", "from",
+        "about", "your", "have", "will", "they", "porque", "cuando",
+        "donde", "video", "viral", "short", "shorts", "follow", "comment"
+    }
+    tags = []
+    seen = set()
+    for w in words:
+        if w in stop or w in seen:
+            continue
+        seen.add(w)
+        tags.append(w[:24])
+        if len(tags) >= 3:
+            break
+    return tags
+
 def normalize_shorts_payload(result_json):
     """
     Ensures each clip has stable scoring metadata for UI sorting:
@@ -107,10 +163,15 @@ def normalize_shorts_payload(result_json):
             continue
         clip['virality_score'] = _normalize_clip_score(clip.get('virality_score'), i)
         clip['score_band'] = _score_band(clip['virality_score'])
+        clip['selection_confidence'] = _normalize_confidence(clip.get('selection_confidence'), clip['virality_score'])
         reason = clip.get('score_reason')
         if not reason:
             reason = f"AI ranking position #{i+1} based on hook and retention potential."
         clip['score_reason'] = str(reason).strip()[:220]
+        tags = _normalize_topic_tags(clip.get('topic_tags'))
+        if not tags:
+            tags = _default_topic_tags(clip)
+        clip['topic_tags'] = tags
         normalized.append(clip)
 
     result_json['shorts'] = normalized
@@ -496,6 +557,44 @@ def sanitize_filename(filename):
     filename = re.sub(r'[<>:"/\\|?*]', '', filename)
     filename = filename.replace(' ', '_')
     return filename[:100]
+
+def is_audio_input(path):
+    audio_exts = {'.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma'}
+    return os.path.splitext(path.lower())[1] in audio_exts
+
+def build_audio_canvas_video(input_audio, output_video, ffmpeg_preset="fast", ffmpeg_crf=23):
+    """
+    Creates a vertical visual canvas from an audio file using ffmpeg waveform rendering.
+    This allows reusing the same clipping + vertical pipeline for audio-only podcasts.
+    """
+    command = [
+        'ffmpeg', '-y',
+        '-i', input_audio,
+        '-filter_complex',
+        (
+            "color=c=0x0f1117:s=1080x1920[bg];"
+            "[0:a]showwaves=s=980x520:mode=line:colors=0x3b82f6,format=rgba[sw];"
+            "[bg][sw]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]"
+        ),
+        '-map', '[v]',
+        '-map', '0:a',
+        '-c:v', 'libx264',
+        '-preset', str(ffmpeg_preset),
+        '-crf', str(ffmpeg_crf),
+        '-c:a', 'aac',
+        '-shortest',
+        '-movflags', '+faststart',
+        output_video
+    ]
+    res = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if res.returncode != 0:
+        print("❌ Failed to generate audio canvas video.")
+        try:
+            print(res.stderr.decode())
+        except Exception:
+            pass
+        return False
+    return True
 
 
 def download_youtube_video(url, output_dir="."):
@@ -1030,7 +1129,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="AutoCrop-Vertical with Viral Clip Detection.")
     
     input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument('-i', '--input', type=str, help="Path to the input video file.")
+    input_group.add_argument('-i', '--input', type=str, help="Path to the input video/audio file.")
     input_group.add_argument('-u', '--url', type=str, help="YouTube URL to download and process.")
     
     parser.add_argument('-o', '--output', type=str, help="Output directory or file (if processing whole video).")
@@ -1093,6 +1192,23 @@ if __name__ == '__main__':
     if not os.path.exists(input_video):
         print(f"❌ Input file not found: {input_video}")
         exit(1)
+
+    generated_audio_canvas = False
+    if is_audio_input(input_video):
+        print("🎧 Audio-only input detected. Generating visual canvas...")
+        audio_base = sanitize_filename(os.path.splitext(os.path.basename(input_video))[0])
+        canvas_video = os.path.join(output_dir, f"{audio_base}_audio_canvas.mp4")
+        ok = build_audio_canvas_video(
+            input_video,
+            canvas_video,
+            ffmpeg_preset=args.ffmpeg_preset,
+            ffmpeg_crf=args.ffmpeg_crf
+        )
+        if not ok:
+            exit(1)
+        input_video = canvas_video
+        video_title = audio_base
+        generated_audio_canvas = True
 
     # 2. Decision: Analyze clips or process whole?
     if args.skip_analysis:
@@ -1173,6 +1289,9 @@ if __name__ == '__main__':
     if args.url and not args.keep_original and os.path.exists(input_video):
         os.remove(input_video)
         print(f"🗑️  Cleaned up downloaded video.")
+    elif generated_audio_canvas and os.path.exists(input_video):
+        os.remove(input_video)
+        print("🗑️  Cleaned up temporary audio canvas video.")
 
     total_time = time.time() - script_start_time
     print(f"\n⏱️  Total execution time: {total_time:.2f}s")

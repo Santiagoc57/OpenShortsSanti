@@ -110,13 +110,13 @@ export default function MediaInput({ onProcess, isProcessing }) {
                             <label className="cursor-pointer block">
                                 <input
                                     type="file"
-                                    accept="video/*"
+                                    accept="video/*,audio/*"
                                     onChange={(e) => setFile(e.target.files?.[0] || null)}
                                     className="hidden"
                                 />
                                 <Upload className="mx-auto mb-3 text-zinc-500" size={24} />
                                 <p className="text-zinc-400">Click to upload or drag and drop</p>
-                                <p className="text-xs text-zinc-600 mt-1">MP4, MOV up to 500MB</p>
+                                <p className="text-xs text-zinc-600 mt-1">MP4, MOV, MP3, WAV, M4A up to 500MB</p>
                             </label>
                         )}
                     </div>

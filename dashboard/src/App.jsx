@@ -134,6 +134,10 @@ function App() {
     const stored = localStorage.getItem('clipFilterPreset');
     return ['all', 'top', 'medium', 'low'].includes(stored) ? stored : 'all';
   };
+  const getInitialTagFilter = () => {
+    const stored = localStorage.getItem('clipTagFilterPreset');
+    return stored || 'all';
+  };
   const getInitialBatchTopCount = () => {
     const stored = Number(localStorage.getItem('batchTopCountPreset'));
     if (!Number.isFinite(stored)) return 3;
@@ -165,6 +169,7 @@ function App() {
   const [results, setResults] = useState(null);
   const [clipSort, setClipSort] = useState(getInitialClipSort); // top, balanced, safe
   const [clipFilter, setClipFilter] = useState(getInitialClipFilter); // all, top, medium, low
+  const [clipTagFilter, setClipTagFilter] = useState(getInitialTagFilter); // all | tag
   const [batchTopCount, setBatchTopCount] = useState(getInitialBatchTopCount);
   const [batchStartDelayMinutes, setBatchStartDelayMinutes] = useState(getInitialBatchStartDelay);
   const [batchIntervalMinutes, setBatchIntervalMinutes] = useState(getInitialBatchInterval);
@@ -218,6 +223,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem('clipFilterPreset', clipFilter);
   }, [clipFilter]);
+
+  useEffect(() => {
+    localStorage.setItem('clipTagFilterPreset', clipTagFilter);
+  }, [clipTagFilter]);
 
   useEffect(() => {
     localStorage.setItem('batchTopCountPreset', String(batchTopCount));
@@ -370,7 +379,14 @@ function App() {
 
       const duration = Math.max(0, Number(clip?.end ?? 0) - Number(clip?.start ?? 0));
       const band = clip?.score_band || (score >= 80 ? 'top' : score >= 65 ? 'medium' : 'low');
-      return { ...clip, virality_score: score, score_band: band, clip_index: clipIndex, _duration: duration };
+      const rawConfidence = Number(clip?.selection_confidence);
+      const confidence = Number.isFinite(rawConfidence)
+        ? Math.max(0, Math.min(1, rawConfidence))
+        : Number((score / 100).toFixed(2));
+      const topicTags = Array.isArray(clip?.topic_tags)
+        ? clip.topic_tags.filter((t) => typeof t === 'string' && t.trim() !== '').map((t) => t.trim().toLowerCase())
+        : [];
+      return { ...clip, virality_score: score, score_band: band, selection_confidence: confidence, topic_tags: topicTags, clip_index: clipIndex, _duration: duration };
     });
 
     const sorted = [...normalized];
@@ -390,11 +406,33 @@ function App() {
     return sorted;
   }, [results, clipSort]);
 
+  const availableTags = useMemo(() => {
+    const counts = new Map();
+    sortedClips.forEach((clip) => {
+      (clip.topic_tags || []).forEach((tag) => {
+        counts.set(tag, (counts.get(tag) || 0) + 1);
+      });
+    });
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 20)
+      .map(([tag]) => tag);
+  }, [sortedClips]);
+
+  useEffect(() => {
+    if (clipTagFilter !== 'all' && !availableTags.includes(clipTagFilter)) {
+      setClipTagFilter('all');
+    }
+  }, [clipTagFilter, availableTags]);
+
   const visibleClips = useMemo(() => {
     if (!Array.isArray(sortedClips)) return [];
-    if (clipFilter === 'all') return sortedClips;
-    return sortedClips.filter((clip) => clip.score_band === clipFilter);
-  }, [sortedClips, clipFilter]);
+    return sortedClips.filter((clip) => {
+      const matchBand = clipFilter === 'all' ? true : clip.score_band === clipFilter;
+      const matchTag = clipTagFilter === 'all' ? true : (clip.topic_tags || []).includes(clipTagFilter);
+      return matchBand && matchTag;
+    });
+  }, [sortedClips, clipFilter, clipTagFilter]);
 
   const handleQueueTopClips = async () => {
     if (!jobId || visibleClips.length === 0) return;
@@ -746,6 +784,17 @@ function App() {
                       <option value="top">Top (80+)</option>
                       <option value="medium">Medium (65-79)</option>
                       <option value="low">Low (&lt;65)</option>
+                    </select>
+                    <span className="text-xs text-zinc-500">Tag:</span>
+                    <select
+                      value={clipTagFilter}
+                      onChange={(e) => setClipTagFilter(e.target.value)}
+                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                    >
+                      <option value="all">All</option>
+                      {availableTags.map((tag) => (
+                        <option key={tag} value={tag}>{tag}</option>
+                      ))}
                     </select>
                     <span className="text-xs text-zinc-500 ml-1">Top N:</span>
                     <input
