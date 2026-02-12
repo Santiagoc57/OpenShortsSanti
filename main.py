@@ -5,6 +5,8 @@ import subprocess
 import argparse
 import re
 import sys
+import math
+import zlib
 from scenedetect import VideoManager, SceneManager
 from scenedetect.detectors import ContentDetector
 from ultralytics import YOLO
@@ -18,6 +20,7 @@ import mediapipe as mp
 from google import genai
 from dotenv import load_dotenv
 import json
+from typing import List, Dict, Any, Optional, Tuple
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
@@ -26,11 +29,41 @@ warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf'
 load_dotenv()
 
 # --- Constants ---
-ASPECT_RATIO = 9 / 16
+ASPECT_RATIO_PRESETS = {
+    "9:16": 9 / 16,
+    "16:9": 16 / 9,
+}
+DEFAULT_ASPECT_RATIO = "9:16"
+
+
+def normalize_aspect_ratio(raw_aspect_ratio):
+    value = str(raw_aspect_ratio or DEFAULT_ASPECT_RATIO).strip().replace("/", ":")
+    if value not in ASPECT_RATIO_PRESETS:
+        raise ValueError(f"Invalid aspect ratio '{raw_aspect_ratio}'. Allowed values: 9:16, 16:9")
+    return value, ASPECT_RATIO_PRESETS[value]
+
+
+def _make_even(value):
+    rounded = int(round(value))
+    if rounded < 2:
+        return 2
+    return rounded if rounded % 2 == 0 else rounded - 1
+
+
+def compute_output_dimensions(input_width, input_height, target_ratio):
+    source_ratio = input_width / input_height
+    if source_ratio >= target_ratio:
+        out_height = input_height
+        out_width = out_height * target_ratio
+    else:
+        out_width = input_width
+        out_height = out_width / target_ratio
+    return _make_even(out_width), _make_even(out_height)
 
 GEMINI_PROMPT_TEMPLATE = """
 You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 15 and 60 seconds long.
 {max_clips_rule}
+{clip_length_rule}
 
 ⚠️ FFMPEG TIME CONTRACT — STRICT REQUIREMENTS:
 - Return timestamps in ABSOLUTE SECONDS from the start of the video (usable in: ffmpeg -ss <start> -to <end> -i <input> ...).
@@ -53,7 +86,9 @@ STRICT EXCLUSIONS:
 - No generic intros/outros or purely sponsorship segments unless they contain the hook.
 - No clips < 15 s or > 60 s.
 
-OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst). In the descriptions, ALWAYS include a CTA like "Follow me and comment X and I'll send you the workflow" (especially if discussing an n8n workflow):
+OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst).
+LANGUAGE RULE (STRICT): all textual fields MUST be in Spanish (español neutro): score_reason, topic_tags, video_description_for_tiktok, video_description_for_instagram, video_title_for_youtube_short.
+In the descriptions, ALWAYS include a CTA in Spanish like "Sígueme y comenta X y te envío el workflow" (especially if discussing an n8n workflow):
 {{
   "shorts": [
     {{
@@ -61,15 +96,25 @@ OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by pre
       "end": <number in seconds, e.g., 37.900>,
       "virality_score": <integer 0-100, where 100 is highest predicted performance>,
       "selection_confidence": <number between 0 and 1 indicating confidence in this selection>,
-      "score_reason": "<one short reason why this clip should perform>",
-      "topic_tags": ["<up to 5 short tags, no #, e.g., politics, debate, economy>"],
-      "video_description_for_tiktok": "<description for TikTok oriented to get views>",
-      "video_description_for_instagram": "<description for Instagram oriented to get views>",
-      "video_title_for_youtube_short": "<title for YouTube Short oriented to get views 100 chars max>"
+      "score_reason": "<razón corta en español de por qué este clip puede rendir>",
+      "topic_tags": ["<hasta 5 etiquetas cortas en español, sin #, ej: politica, debate, economia>"],
+      "video_description_for_tiktok": "<descripción en español orientada a views para TikTok>",
+      "video_description_for_instagram": "<descripción en español orientada a views para Instagram>",
+      "video_title_for_youtube_short": "<título en español para YouTube Short orientado a views, máximo 100 caracteres>"
     }}
   ]
 }}
 """
+
+def clip_length_guidance(target):
+    t = str(target or "").strip().lower()
+    if t == "short":
+        return "CLIP LENGTH PRIORITY: Prefer short, punchy clips in the 18-30s range whenever possible."
+    if t == "long":
+        return "CLIP LENGTH PRIORITY: Prefer contextual clips in the 40-60s range whenever possible."
+    if t == "balanced":
+        return "CLIP LENGTH PRIORITY: Prefer balanced clips in the 25-45s range."
+    return ""
 
 def _default_score_by_rank(rank):
     """Fallback score when model does not provide virality_score."""
@@ -166,7 +211,7 @@ def normalize_shorts_payload(result_json):
         clip['selection_confidence'] = _normalize_confidence(clip.get('selection_confidence'), clip['virality_score'])
         reason = clip.get('score_reason')
         if not reason:
-            reason = f"AI ranking position #{i+1} based on hook and retention potential."
+            reason = f"Ranking IA #{i+1}: buen gancho inicial y alto potencial de retención."
         clip['score_reason'] = str(reason).strip()[:220]
         tags = _normalize_topic_tags(clip.get('topic_tags'))
         if not tags:
@@ -176,6 +221,486 @@ def normalize_shorts_payload(result_json):
 
     result_json['shorts'] = normalized
     return result_json
+
+
+# --- Clip Post-Processing (Smart Boundaries + Semantic De-duplication) ---
+DEFAULT_MIN_CLIP_SECONDS = 15.0
+DEFAULT_MAX_CLIP_SECONDS = 60.0
+SMART_START_PAD = 0.25
+SMART_END_PAD = 0.30
+SMART_LOOKBACK_SECONDS = 2.0
+SMART_LOOKAHEAD_SECONDS = 2.0
+SMART_PAUSE_GAP_SECONDS = 0.22
+LOCAL_EMBED_DIM = 192
+SEMANTIC_DEDUPE_SIM_THRESHOLD = 0.93
+SEMANTIC_DEDUPE_OVERLAP_THRESHOLD = 0.35
+SEMANTIC_DEDUPE_CENTER_WINDOW_SECONDS = 18.0
+
+
+def _length_bounds_from_target(target: Optional[str]) -> Tuple[float, float]:
+    t = str(target or "").strip().lower()
+    if t == "short":
+        return 18.0, 32.0
+    if t == "long":
+        return 38.0, 60.0
+    if t == "balanced":
+        return 24.0, 46.0
+    return DEFAULT_MIN_CLIP_SECONDS, DEFAULT_MAX_CLIP_SECONDS
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_space(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _vector_norm(vec: List[float]) -> float:
+    return math.sqrt(sum(v * v for v in vec))
+
+
+def _normalize_vector(vec: List[float]) -> List[float]:
+    norm = _vector_norm(vec)
+    if norm <= 0.0:
+        return [0.0 for _ in vec]
+    return [v / norm for v in vec]
+
+
+def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    if not a or not b:
+        return 0.0
+    n = min(len(a), len(b))
+    if n <= 0:
+        return 0.0
+    dot = sum(a[i] * b[i] for i in range(n))
+    na = math.sqrt(sum(a[i] * a[i] for i in range(n)))
+    nb = math.sqrt(sum(b[i] * b[i] for i in range(n)))
+    if na <= 0 or nb <= 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _local_semantic_embedding(text: str, dim: int = LOCAL_EMBED_DIM) -> List[float]:
+    words = re.findall(r"[a-zA-ZÀ-ÿ0-9]{2,}", str(text or "").lower())
+    vec = [0.0] * dim
+    if not words:
+        return vec
+
+    for w in words:
+        weight = 1.0 + min(1.5, len(w) / 10.0)
+        token_idx = zlib.crc32(w.encode("utf-8")) % dim
+        vec[token_idx] += 0.8 * weight
+
+        for n in (3, 4):
+            if len(w) < n:
+                continue
+            for i in range(len(w) - n + 1):
+                gram = w[i:i + n]
+                idx = zlib.crc32(gram.encode("utf-8")) % dim
+                vec[idx] += weight
+
+    for i in range(len(words) - 1):
+        bigram = f"{words[i]}_{words[i+1]}"
+        idx = zlib.crc32(bigram.encode("utf-8")) % dim
+        vec[idx] += 0.7
+
+    return _normalize_vector(vec)
+
+
+def _extract_transcript_words(transcript: Dict[str, Any]) -> List[Dict[str, Any]]:
+    words: List[Dict[str, Any]] = []
+    segments = transcript.get("segments", []) if isinstance(transcript, dict) else []
+    if not isinstance(segments, list):
+        return words
+
+    for seg_idx, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            continue
+        seg_start = max(0.0, _safe_float(segment.get("start", 0.0), 0.0))
+        seg_end = max(seg_start, _safe_float(segment.get("end", seg_start), seg_start))
+        seg_text = _normalize_space(segment.get("text", ""))
+        seg_words = segment.get("words", []) if isinstance(segment.get("words"), list) else []
+
+        if seg_words:
+            for w in seg_words:
+                if not isinstance(w, dict):
+                    continue
+                token = _normalize_space(w.get("word", ""))
+                if not token:
+                    continue
+                ws = max(0.0, _safe_float(w.get("start", seg_start), seg_start))
+                we = max(ws, _safe_float(w.get("end", ws), ws))
+                words.append({
+                    "word": token,
+                    "start": ws,
+                    "end": we,
+                    "segment_index": seg_idx
+                })
+            continue
+
+        # Fallback if no word timestamps were produced.
+        tokens = re.findall(r"\S+", seg_text)
+        if not tokens:
+            continue
+        seg_duration = max(0.001, seg_end - seg_start)
+        slot = seg_duration / max(1, len(tokens))
+        for token_idx, token in enumerate(tokens):
+            ws = seg_start + (token_idx * slot)
+            we = min(seg_end, ws + slot)
+            words.append({
+                "word": token,
+                "start": ws,
+                "end": we,
+                "segment_index": seg_idx
+            })
+
+    words.sort(key=lambda x: (x["start"], x["end"]))
+    return words
+
+
+def _build_boundary_points(words: List[Dict[str, Any]], duration: float) -> List[float]:
+    points = {0.0}
+    if duration > 0:
+        points.add(float(duration))
+
+    for i, w in enumerate(words):
+        ws = max(0.0, _safe_float(w.get("start", 0.0), 0.0))
+        we = max(ws, _safe_float(w.get("end", ws), ws))
+        points.add(ws)
+        points.add(we)
+        token = str(w.get("word", ""))
+        if re.search(r"[.!?;:]\s*$", token):
+            points.add(we)
+
+        if i < len(words) - 1:
+            nw = words[i + 1]
+            ns = max(0.0, _safe_float(nw.get("start", we), we))
+            gap = ns - we
+            if gap >= SMART_PAUSE_GAP_SECONDS:
+                points.add(we + (gap / 2.0))
+
+    out = sorted(max(0.0, min(duration, p)) if duration > 0 else max(0.0, p) for p in points)
+    return [round(p, 3) for p in out]
+
+
+def _closest_boundary(
+    anchor: float,
+    points: List[float],
+    lower: float,
+    upper: float,
+    prefer: str
+) -> float:
+    lower = min(lower, upper)
+    upper = max(lower, upper)
+    candidates = [p for p in points if lower <= p <= upper]
+    if not candidates:
+        return max(lower, min(upper, anchor))
+
+    best = candidates[0]
+    best_score = float("inf")
+    for p in candidates:
+        score = abs(p - anchor)
+        if prefer == "earlier" and p > anchor:
+            score += 0.18
+        elif prefer == "later" and p < anchor:
+            score += 0.18
+        if score < best_score:
+            best = p
+            best_score = score
+    return best
+
+
+def _enforce_clip_duration(
+    start: float,
+    end: float,
+    duration: float,
+    points: List[float],
+    min_clip_seconds: float,
+    max_clip_seconds: float
+) -> Tuple[float, float]:
+    start = max(0.0, start)
+    end = max(start + 0.01, end)
+    if duration > 0:
+        end = min(duration, end)
+
+    current = end - start
+    if current < min_clip_seconds:
+        target_end = start + min_clip_seconds
+        if duration > 0:
+            target_end = min(duration, target_end)
+        end = _closest_boundary(
+            anchor=target_end,
+            points=points,
+            lower=max(start + min_clip_seconds, target_end - 0.4),
+            upper=min(duration if duration > 0 else target_end + 2.0, target_end + 2.0),
+            prefer="later"
+        )
+        if end - start < min_clip_seconds:
+            end = max(start + min_clip_seconds, end)
+            if duration > 0:
+                end = min(duration, end)
+
+    current = end - start
+    if current > max_clip_seconds:
+        target_end = start + max_clip_seconds
+        end = _closest_boundary(
+            anchor=target_end,
+            points=points,
+            lower=max(start + min_clip_seconds, target_end - 2.0),
+            upper=min(duration if duration > 0 else target_end, target_end),
+            prefer="earlier"
+        )
+        if end - start > max_clip_seconds:
+            end = start + max_clip_seconds
+            if duration > 0:
+                end = min(duration, end)
+
+    if duration > 0 and end > duration:
+        end = duration
+    if end - start < min_clip_seconds:
+        # Last-resort correction near tail of video.
+        if duration > 0:
+            start = max(0.0, duration - min_clip_seconds)
+            end = duration
+        else:
+            end = start + min_clip_seconds
+
+    return start, end
+
+
+def _smart_refine_clip_range(
+    start: float,
+    end: float,
+    duration: float,
+    points: List[float],
+    min_clip_seconds: float,
+    max_clip_seconds: float
+) -> Tuple[float, float]:
+    start = max(0.0, _safe_float(start, 0.0))
+    end = max(start + 0.01, _safe_float(end, start + min_clip_seconds))
+    if duration > 0:
+        end = min(duration, end)
+
+    anchor_start = max(0.0, start - SMART_START_PAD)
+    anchor_end = end + SMART_END_PAD
+    if duration > 0:
+        anchor_end = min(duration, anchor_end)
+
+    refined_start = _closest_boundary(
+        anchor=anchor_start,
+        points=points,
+        lower=max(0.0, anchor_start - SMART_LOOKBACK_SECONDS),
+        upper=min(anchor_start + 1.0, duration if duration > 0 else anchor_start + 1.0),
+        prefer="earlier"
+    )
+    refined_end = _closest_boundary(
+        anchor=anchor_end,
+        points=points,
+        lower=max(refined_start + 0.5, anchor_end - 1.0),
+        upper=min(anchor_end + SMART_LOOKAHEAD_SECONDS, duration if duration > 0 else anchor_end + SMART_LOOKAHEAD_SECONDS),
+        prefer="later"
+    )
+
+    refined_start, refined_end = _enforce_clip_duration(
+        refined_start,
+        refined_end,
+        duration,
+        points,
+        min_clip_seconds=min_clip_seconds,
+        max_clip_seconds=max_clip_seconds
+    )
+    return round(refined_start, 3), round(refined_end, 3)
+
+
+def _clip_overlap_ratio(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+    a_len = max(0.001, a_end - a_start)
+    b_len = max(0.001, b_end - b_start)
+    inter = max(0.0, min(a_end, b_end) - max(a_start, b_start))
+    if inter <= 0:
+        return 0.0
+    return inter / min(a_len, b_len)
+
+
+def _extract_clip_text_for_embedding(clip: Dict[str, Any], transcript: Dict[str, Any]) -> str:
+    start = _safe_float(clip.get("start", 0.0), 0.0)
+    end = _safe_float(clip.get("end", start), start)
+    pieces: List[str] = []
+
+    segments = transcript.get("segments", []) if isinstance(transcript, dict) else []
+    if isinstance(segments, list):
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            ss = _safe_float(seg.get("start", 0.0), 0.0)
+            se = _safe_float(seg.get("end", ss), ss)
+            if se <= start or ss >= end:
+                continue
+            text = _normalize_space(seg.get("text", ""))
+            if text:
+                pieces.append(text)
+
+    if not pieces:
+        pieces = [
+            _normalize_space(clip.get("video_title_for_youtube_short", "")),
+            _normalize_space(clip.get("video_description_for_tiktok", "")),
+            _normalize_space(clip.get("video_description_for_instagram", "")),
+            " ".join(clip.get("topic_tags", []) or [])
+        ]
+    return _normalize_space(" ".join(pieces))
+
+
+def _semantic_deduplicate_shorts(shorts: List[Dict[str, Any]], transcript: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if not shorts:
+        return [], {"removed": 0, "kept": 0}
+
+    ranked = list(shorts)
+    ranked.sort(
+        key=lambda c: (
+            int(_safe_float(c.get("virality_score", 0.0), 0.0)),
+            _safe_float(c.get("selection_confidence", 0.0), 0.0),
+            -_safe_float(c.get("_original_rank", 0.0), 0.0)
+        ),
+        reverse=True
+    )
+
+    kept: List[Dict[str, Any]] = []
+    removed_items: List[Dict[str, Any]] = []
+
+    for clip in ranked:
+        text = _extract_clip_text_for_embedding(clip, transcript)
+        vec = _local_semantic_embedding(text)
+
+        c_start = _safe_float(clip.get("start", 0.0), 0.0)
+        c_end = _safe_float(clip.get("end", c_start), c_start)
+        c_center = (c_start + c_end) / 2.0
+
+        is_duplicate = False
+        duplicate_of = None
+        for kept_clip in kept:
+            k_start = _safe_float(kept_clip.get("start", 0.0), 0.0)
+            k_end = _safe_float(kept_clip.get("end", k_start), k_start)
+            k_center = (k_start + k_end) / 2.0
+            overlap = _clip_overlap_ratio(c_start, c_end, k_start, k_end)
+            center_dist = abs(c_center - k_center)
+            sim = _cosine_similarity(vec, kept_clip.get("_semantic_vec", []))
+
+            if sim >= SEMANTIC_DEDUPE_SIM_THRESHOLD and (
+                overlap >= SEMANTIC_DEDUPE_OVERLAP_THRESHOLD or center_dist <= SEMANTIC_DEDUPE_CENTER_WINDOW_SECONDS
+            ):
+                is_duplicate = True
+                duplicate_of = int(kept_clip.get("_original_rank", 0)) + 1
+                break
+
+        clip["_semantic_vec"] = vec
+        if is_duplicate:
+            removed_items.append({
+                "clip_rank": int(clip.get("_original_rank", 0)) + 1,
+                "duplicate_of": duplicate_of
+            })
+            continue
+
+        kept.append(clip)
+
+    for clip in kept:
+        clip.pop("_semantic_vec", None)
+    return kept, {
+        "removed": len(removed_items),
+        "kept": len(kept),
+        "removed_items": removed_items[:20]
+    }
+
+
+def postprocess_shorts_with_transcript(
+    clips_data: Dict[str, Any],
+    transcript: Dict[str, Any],
+    duration: float,
+    max_clips: Optional[int] = None,
+    clip_length_target: Optional[str] = None
+) -> Dict[str, Any]:
+    if not isinstance(clips_data, dict):
+        return clips_data
+    shorts = clips_data.get("shorts", [])
+    if not isinstance(shorts, list) or not shorts:
+        return clips_data
+
+    words = _extract_transcript_words(transcript or {})
+    points = _build_boundary_points(words, duration)
+    if not points:
+        points = [0.0, round(max(0.0, duration), 3)]
+    min_clip_seconds, max_clip_seconds = _length_bounds_from_target(clip_length_target)
+
+    prepared: List[Dict[str, Any]] = []
+    refined_count = 0
+    for i, clip in enumerate(shorts):
+        if not isinstance(clip, dict):
+            continue
+        item = dict(clip)
+        item["_original_rank"] = i
+
+        raw_start = max(0.0, _safe_float(item.get("start", 0.0), 0.0))
+        raw_end = _safe_float(item.get("end", raw_start + min_clip_seconds), raw_start + min_clip_seconds)
+        if duration > 0:
+            raw_end = min(duration, raw_end)
+        if raw_end <= raw_start:
+            raw_end = raw_start + min_clip_seconds
+            if duration > 0:
+                raw_end = min(duration, raw_end)
+
+        refined_start, refined_end = _smart_refine_clip_range(
+            raw_start,
+            raw_end,
+            duration,
+            points,
+            min_clip_seconds=min_clip_seconds,
+            max_clip_seconds=max_clip_seconds
+        )
+        if abs(refined_start - raw_start) >= 0.05 or abs(refined_end - raw_end) >= 0.05:
+            refined_count += 1
+
+        item["start"] = refined_start
+        item["end"] = refined_end
+        prepared.append(item)
+
+    deduped, dedupe_report = _semantic_deduplicate_shorts(prepared, transcript or {})
+    deduped.sort(
+        key=lambda c: (
+            int(_safe_float(c.get("virality_score", 0.0), 0.0)),
+            _safe_float(c.get("selection_confidence", 0.0), 0.0),
+            -_safe_float(c.get("_original_rank", 0.0), 0.0)
+        ),
+        reverse=True
+    )
+
+    if max_clips:
+        deduped = deduped[:max(1, int(max_clips))]
+
+    for item in deduped:
+        item.pop("_original_rank", None)
+
+    out = dict(clips_data)
+    out["shorts"] = deduped
+    out["postprocess"] = {
+        "smart_boundaries": {
+            "enabled": True,
+            "clips_refined": refined_count,
+            "boundary_points": len(points),
+            "word_timestamps": len(words),
+            "target_profile": clip_length_target or "default",
+            "target_min_seconds": round(min_clip_seconds, 2),
+            "target_max_seconds": round(max_clip_seconds, 2)
+        },
+        "semantic_dedupe": {
+            "enabled": True,
+            "removed_duplicates": int(dedupe_report.get("removed", 0)),
+            "kept_clips": int(dedupe_report.get("kept", len(deduped))),
+            "similarity_threshold": SEMANTIC_DEDUPE_SIM_THRESHOLD
+        }
+    }
+    return out
 
 # Load the YOLO model once (Keep for backup or scene analysis if needed)
 model = YOLO('yolov8n.pt')
@@ -192,11 +717,12 @@ class SmoothedCameraman:
     Only moves if the subject leaves the center safe zone.
     Moves slowly and linearly.
     """
-    def __init__(self, output_width, output_height, video_width, video_height):
+    def __init__(self, output_width, output_height, video_width, video_height, aspect_ratio=ASPECT_RATIO_PRESETS[DEFAULT_ASPECT_RATIO]):
         self.output_width = output_width
         self.output_height = output_height
         self.video_width = video_width
         self.video_height = video_height
+        self.aspect_ratio = aspect_ratio
         
         # Initial State
         self.current_center_x = video_width / 2
@@ -204,10 +730,10 @@ class SmoothedCameraman:
         
         # Calculate crop dimensions once
         self.crop_height = video_height
-        self.crop_width = int(self.crop_height * ASPECT_RATIO)
+        self.crop_width = int(round(self.crop_height * self.aspect_ratio))
         if self.crop_width > video_width:
              self.crop_width = video_width
-             self.crop_height = int(self.crop_width / ASPECT_RATIO)
+             self.crop_height = int(round(self.crop_width / self.aspect_ratio))
              
         # Safe Zone: 20% of the video width
         # As long as the target is within this zone relative to current center, DO NOT MOVE.
@@ -267,9 +793,9 @@ class SmoothedCameraman:
         x1 = max(0, x1)
         x2 = min(self.video_width, x2)
         
-        y1 = 0
-        y2 = self.video_height
-        
+        y1 = int((self.video_height - self.crop_height) / 2)
+        y2 = y1 + self.crop_height
+
         return x1, y1, x2, y2
 
 class SpeakerTracker:
@@ -452,34 +978,38 @@ def create_general_frame(frame, output_width, output_height):
     """
     orig_h, orig_w = frame.shape[:2]
     
-    # 1. Background (Fill Height)
-    # Crop center to aspect ratio
-    bg_scale = output_height / orig_h
+    # 1. Background (Cover target canvas and crop center)
+    bg_scale = max(output_width / orig_w, output_height / orig_h)
     bg_w = int(orig_w * bg_scale)
-    bg_resized = cv2.resize(frame, (bg_w, output_height))
-    
+    bg_h = int(orig_h * bg_scale)
+    bg_resized = cv2.resize(frame, (bg_w, bg_h))
+
     # Crop center of background
     start_x = (bg_w - output_width) // 2
+    start_y = (bg_h - output_height) // 2
     if start_x < 0: start_x = 0
-    background = bg_resized[:, start_x:start_x+output_width]
-    if background.shape[1] != output_width:
+    if start_y < 0: start_y = 0
+    background = bg_resized[start_y:start_y+output_height, start_x:start_x+output_width]
+    if background.shape[0] != output_height or background.shape[1] != output_width:
         background = cv2.resize(background, (output_width, output_height))
         
     # Blur background
     background = cv2.GaussianBlur(background, (51, 51), 0)
     
-    # 2. Foreground (Fit Width)
-    scale = output_width / orig_w
+    # 2. Foreground (Contain)
+    scale = min(output_width / orig_w, output_height / orig_h)
+    fg_w = int(orig_w * scale)
     fg_h = int(orig_h * scale)
-    foreground = cv2.resize(frame, (output_width, fg_h))
+    foreground = cv2.resize(frame, (fg_w, fg_h))
     
     # 3. Overlay
+    x_offset = (output_width - fg_w) // 2
     y_offset = (output_height - fg_h) // 2
-    
+
     # Clone background to avoid modifying it
     final_frame = background.copy()
-    final_frame[y_offset:y_offset+fg_h, :] = foreground
-    
+    final_frame[y_offset:y_offset+fg_h, x_offset:x_offset+fg_w] = foreground
+
     return final_frame
 
 def analyze_scenes_strategy(video_path, scenes):
@@ -562,20 +1092,29 @@ def is_audio_input(path):
     audio_exts = {'.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma'}
     return os.path.splitext(path.lower())[1] in audio_exts
 
-def build_audio_canvas_video(input_audio, output_video, ffmpeg_preset="fast", ffmpeg_crf=23):
+def build_audio_canvas_video(input_audio, output_video, ffmpeg_preset="fast", ffmpeg_crf=23, aspect_ratio=DEFAULT_ASPECT_RATIO):
     """
     Creates a vertical visual canvas from an audio file using ffmpeg waveform rendering.
     This allows reusing the same clipping + vertical pipeline for audio-only podcasts.
     """
+    aspect_label, _ = normalize_aspect_ratio(aspect_ratio)
+    if aspect_label == "16:9":
+        canvas_w, canvas_h = 1920, 1080
+    else:
+        canvas_w, canvas_h = 1080, 1920
+
+    wave_w = _make_even(max(360, int(canvas_w * 0.9)))
+    wave_h = _make_even(max(180, int(canvas_h * 0.27)))
+    filter_complex = (
+        f"color=c=0x0f1117:s={canvas_w}x{canvas_h}[bg];"
+        f"[0:a]showwaves=s={wave_w}x{wave_h}:mode=line:colors=0x3b82f6,format=rgba[sw];"
+        "[bg][sw]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]"
+    )
+
     command = [
         'ffmpeg', '-y',
         '-i', input_audio,
-        '-filter_complex',
-        (
-            "color=c=0x0f1117:s=1080x1920[bg];"
-            "[0:a]showwaves=s=980x520:mode=line:colors=0x3b82f6,format=rgba[sw];"
-            "[bg][sw]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]"
-        ),
+        '-filter_complex', filter_complex,
         '-map', '[v]',
         '-map', '0:a',
         '-c:v', 'libx264',
@@ -755,9 +1294,10 @@ Technical Details: {str(e)}
     
     return downloaded_file, sanitized_title
 
-def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fast", ffmpeg_crf=23):
+def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fast", ffmpeg_crf=23, aspect_ratio=DEFAULT_ASPECT_RATIO):
     """
-    Core logic to convert horizontal video to vertical using scene detection and Active Speaker Tracking (MediaPipe).
+    Core logic to process video using scene detection and Active Speaker Tracking (MediaPipe)
+    targeting a configurable aspect ratio.
     """
     script_start_time = time.time()
     
@@ -788,14 +1328,12 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
 
     print("\n   🧠 Step 2: Preparing Active Tracking...")
     original_width, original_height = get_video_resolution(input_video)
-    
-    OUTPUT_HEIGHT = original_height
-    OUTPUT_WIDTH = int(OUTPUT_HEIGHT * ASPECT_RATIO)
-    if OUTPUT_WIDTH % 2 != 0:
-        OUTPUT_WIDTH += 1
+    aspect_label, target_ratio = normalize_aspect_ratio(aspect_ratio)
+    OUTPUT_WIDTH, OUTPUT_HEIGHT = compute_output_dimensions(original_width, original_height, target_ratio)
+    print(f"   Target aspect ratio: {aspect_label} ({OUTPUT_WIDTH}x{OUTPUT_HEIGHT})")
 
     # Initialize Cameraman
-    cameraman = SmoothedCameraman(OUTPUT_WIDTH, OUTPUT_HEIGHT, original_width, original_height)
+    cameraman = SmoothedCameraman(OUTPUT_WIDTH, OUTPUT_HEIGHT, original_width, original_height, aspect_ratio=target_ratio)
     
     # --- New Strategy: Per-Scene Analysis ---
     print("\n   🤖 Step 3: Analyzing Scenes for Strategy (Single vs Group)...")
@@ -970,10 +1508,25 @@ def transcribe_video(video_path, language=None, backend=None, model_name=None, w
             'language': result.get("language", "unknown")
         }
 
-    print(f"🎙️  Transcribing video with Faster-Whisper (model={model_name}, CPU)...")
+    requested_device = (os.getenv("WHISPER_DEVICE", "auto") or "auto").lower().strip()
+    if requested_device in ("auto", ""):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    elif requested_device in ("cuda", "gpu") and not torch.cuda.is_available():
+        print("⚠️ WHISPER_DEVICE=cuda solicitado pero CUDA no está disponible. Fallback a CPU.")
+        device = "cpu"
+    elif requested_device in ("mps", "metal"):
+        # faster-whisper usa principalmente cpu/cuda. En Mac usamos CPU.
+        device = "cpu"
+    else:
+        device = "cpu" if requested_device not in ("cuda", "cpu") else requested_device
+
+    if not compute_type:
+        # Valores seguros por dispositivo
+        compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "float16" if device == "cuda" else "int8")
+
+    print(f"🎙️  Transcribing video with Faster-Whisper (model={model_name}, device={device}, compute={compute_type})...")
     from faster_whisper import WhisperModel
 
-    compute_type = compute_type or os.getenv("WHISPER_COMPUTE_TYPE", "int8")
     cpu_threads_env = os.getenv("WHISPER_CPU_THREADS", "").strip()
     num_workers_env = os.getenv("WHISPER_NUM_WORKERS", "").strip()
     if cpu_threads_env and not cpu_threads:
@@ -983,7 +1536,7 @@ def transcribe_video(video_path, language=None, backend=None, model_name=None, w
 
     model = WhisperModel(
         model_name,
-        device="cpu",
+        device=device,
         compute_type=compute_type,
         cpu_threads=cpu_threads,
         num_workers=num_workers
@@ -1023,7 +1576,7 @@ def transcribe_video(video_path, language=None, backend=None, model_name=None, w
         'language': info.language
     }
 
-def get_viral_clips(transcript_result, video_duration, max_clips=None):
+def get_viral_clips(transcript_result, video_duration, max_clips=None, clip_length_target=None):
     print("🤖  Analyzing with Gemini...")
     
     api_key = os.getenv("GEMINI_API_KEY")
@@ -1052,12 +1605,14 @@ def get_viral_clips(transcript_result, video_duration, max_clips=None):
     max_clips_rule = ""
     if max_clips:
         max_clips_rule = f"IMPORTANT: Return at most {max_clips} clips."
+    length_rule = clip_length_guidance(clip_length_target)
 
     prompt = GEMINI_PROMPT_TEMPLATE.format(
         video_duration=video_duration,
         transcript_text=json.dumps(transcript_result['text']),
         words_json=json.dumps(words),
-        max_clips_rule=max_clips_rule
+        max_clips_rule=max_clips_rule,
+        clip_length_rule=length_rule
     )
 
     try:
@@ -1126,7 +1681,7 @@ def get_viral_clips(transcript_result, video_duration, max_clips=None):
         return None
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="AutoCrop-Vertical with Viral Clip Detection.")
+    parser = argparse.ArgumentParser(description="AutoCrop with Viral Clip Detection.")
     
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument('-i', '--input', type=str, help="Path to the input video/audio file.")
@@ -1138,10 +1693,14 @@ if __name__ == '__main__':
     parser.add_argument('--language', type=str, default=None, help="Force transcription language (e.g., 'es', 'en').")
     parser.add_argument('--max-clips', type=int, default=None, help="Max number of clips to generate (1-15).")
     parser.add_argument('--whisper-backend', type=str, default=None, help="Whisper backend: openai|faster.")
-    parser.add_argument('--whisper-model', type=str, default=None, help="Whisper model: tiny|base|small|medium.")
+    parser.add_argument('--whisper-model', type=str, default=None, help="Whisper model: tiny|base|small|medium|large|large-v3.")
     parser.add_argument('--word-timestamps', type=str, default="true", help="true/false for word-level timestamps.")
     parser.add_argument('--ffmpeg-preset', type=str, default="fast", help="FFmpeg preset: ultrafast|fast|medium.")
     parser.add_argument('--ffmpeg-crf', type=int, default=23, help="FFmpeg CRF quality (lower=better).")
+    parser.add_argument('--aspect-ratio', type=str, default=DEFAULT_ASPECT_RATIO, help="Output aspect ratio: 9:16 or 16:9.")
+    parser.add_argument('--clip-length-target', type=str, default=None, help="Preferred clip length profile: short|balanced|long.")
+    parser.add_argument('--style-template', type=str, default=None, help="UI template id used for this generation (metadata only).")
+    parser.add_argument('--content-profile', type=str, default=None, help="Content profile selected in UI (metadata only).")
     
     args = parser.parse_args()
 
@@ -1150,6 +1709,16 @@ if __name__ == '__main__':
     if args.max_clips:
         args.max_clips = max(1, min(15, args.max_clips))
     args.word_timestamps = str(args.word_timestamps).lower() in ("1", "true", "yes", "y")
+    if args.clip_length_target:
+        args.clip_length_target = str(args.clip_length_target).strip().lower()
+        if args.clip_length_target not in ("short", "balanced", "long"):
+            print("⚠️ Invalid --clip-length-target. Using default behavior.")
+            args.clip_length_target = None
+    try:
+        args.aspect_ratio, _ = normalize_aspect_ratio(args.aspect_ratio)
+    except ValueError as e:
+        print(f"❌ {e}")
+        exit(1)
     
     def _ensure_dir(path: str) -> str:
         """Create directory if missing and return the same path."""
@@ -1202,7 +1771,8 @@ if __name__ == '__main__':
             input_video,
             canvas_video,
             ffmpeg_preset=args.ffmpeg_preset,
-            ffmpeg_crf=args.ffmpeg_crf
+            ffmpeg_crf=args.ffmpeg_crf,
+            aspect_ratio=args.aspect_ratio
         )
         if not ok:
             exit(1)
@@ -1214,7 +1784,7 @@ if __name__ == '__main__':
     if args.skip_analysis:
         print("⏩ Skipping analysis, processing entire video...")
         output_file = args.output if args.output else os.path.join(output_dir, f"{video_title}_vertical.mp4")
-        process_video_to_vertical(input_video, output_file, args.ffmpeg_preset, args.ffmpeg_crf)
+        process_video_to_vertical(input_video, output_file, args.ffmpeg_preset, args.ffmpeg_crf, args.aspect_ratio)
     else:
         # 3. Transcribe
         transcript = transcribe_video(
@@ -1233,14 +1803,51 @@ if __name__ == '__main__':
         cap.release()
 
         # 4. Gemini Analysis
-        clips_data = get_viral_clips(transcript, duration, max_clips=args.max_clips)
+        clips_data = get_viral_clips(
+            transcript,
+            duration,
+            max_clips=args.max_clips,
+            clip_length_target=args.clip_length_target
+        )
         
         if not clips_data or 'shorts' not in clips_data:
             print("❌ Failed to identify clips. Converting whole video as fallback.")
             output_file = os.path.join(output_dir, f"{video_title}_vertical.mp4")
-            process_video_to_vertical(input_video, output_file, args.ffmpeg_preset, args.ffmpeg_crf)
+            process_video_to_vertical(input_video, output_file, args.ffmpeg_preset, args.ffmpeg_crf, args.aspect_ratio)
         else:
+            clips_data = postprocess_shorts_with_transcript(
+                clips_data=clips_data,
+                transcript=transcript,
+                duration=duration,
+                max_clips=args.max_clips,
+                clip_length_target=args.clip_length_target
+            )
+            clips_data = normalize_shorts_payload(clips_data)
+            clips_data["generation_profile"] = {
+                "clip_length_target": args.clip_length_target or "default",
+                "style_template": (str(args.style_template).strip() if args.style_template else None),
+                "content_profile": (str(args.content_profile).strip() if args.content_profile else None)
+            }
+            post = clips_data.get("postprocess", {}) if isinstance(clips_data, dict) else {}
+            smart_meta = post.get("smart_boundaries", {}) if isinstance(post, dict) else {}
+            dedupe_meta = post.get("semantic_dedupe", {}) if isinstance(post, dict) else {}
+            if smart_meta:
+                print(
+                    "✂️ Smart boundaries:",
+                    f"{smart_meta.get('clips_refined', 0)} clips refined,"
+                    f" {smart_meta.get('boundary_points', 0)} boundary points"
+                )
+            if dedupe_meta:
+                print(
+                    "🧠 Semantic dedupe:",
+                    f"{dedupe_meta.get('removed_duplicates', 0)} duplicates removed,"
+                    f" {dedupe_meta.get('kept_clips', len(clips_data.get('shorts', [])))} kept"
+                )
+
             print(f"🔥 Found {len(clips_data['shorts'])} viral clips!")
+            for clip in clips_data['shorts']:
+                if isinstance(clip, dict):
+                    clip['aspect_ratio'] = args.aspect_ratio
             
             # Save metadata
             clips_data['transcript'] = transcript # Save full transcript for subtitles
@@ -1276,7 +1883,7 @@ if __name__ == '__main__':
                 subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 
                 # Process vertical
-                success = process_video_to_vertical(clip_temp_path, clip_final_path, args.ffmpeg_preset, args.ffmpeg_crf)
+                success = process_video_to_vertical(clip_temp_path, clip_final_path, args.ffmpeg_preset, args.ffmpeg_crf, args.aspect_ratio)
                 
                 if success:
                     print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
