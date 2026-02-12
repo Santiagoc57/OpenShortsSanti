@@ -202,6 +202,7 @@ export default function ClipStudioModal({
   const [bold, setBold] = useState(true);
   const [boxColor, setBoxColor] = useState('#000000');
   const [boxOpacity, setBoxOpacity] = useState(20);
+  const [karaokeMode, setKaraokeMode] = useState(false);
 
   const [subtitleEntries, setSubtitleEntries] = useState([]);
   const [subtitleSearch, setSubtitleSearch] = useState('');
@@ -246,6 +247,23 @@ export default function ClipStudioModal({
     }
     return '';
   }, [activeSubtitleEntry, subtitleEntries, previewCurrentTime, previewPlaying]);
+
+  const karaokePreview = useMemo(() => {
+    if (!karaokeMode || !activeSubtitleEntry) return null;
+    const rawText = String(activeSubtitleEntry.text || '').trim();
+    if (!rawText) return null;
+    const words = rawText.split(/\s+/).filter(Boolean);
+    if (words.length === 0) return null;
+    const start = Number(activeSubtitleEntry.start || 0);
+    const end = Number(activeSubtitleEntry.end || start);
+    const duration = Math.max(0.2, end - start);
+    const progress = Math.max(0, Math.min(0.9999, (Number(previewCurrentTime || 0) - start) / duration));
+    const activeIndex = Math.min(words.length - 1, Math.floor(progress * words.length));
+    return {
+      words: activeSubtitleEntry.emphasize ? words.map((w) => w.toUpperCase()) : words,
+      activeIndex
+    };
+  }, [karaokeMode, activeSubtitleEntry, previewCurrentTime]);
 
   const filteredTranscript = useMemo(() => {
     const q = String(transcriptQuery || '').trim().toLowerCase();
@@ -612,10 +630,16 @@ export default function ClipStudioModal({
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <h3 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100">Subtítulos</h3>
-                    <label className="inline-flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-300">
-                      <span>{captionsOn ? 'Activos' : 'Pausados'}</span>
-                      <input type="checkbox" checked={captionsOn} onChange={(e) => setCaptionsOn(e.target.checked)} />
-                    </label>
+                    <div className="flex items-center gap-4">
+                      <label className="inline-flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-300">
+                        <span>{captionsOn ? 'Activos' : 'Pausados'}</span>
+                        <input type="checkbox" checked={captionsOn} onChange={(e) => setCaptionsOn(e.target.checked)} />
+                      </label>
+                      <label className="inline-flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-300">
+                        <span>Karaoke</span>
+                        <input type="checkbox" checked={karaokeMode} onChange={(e) => setKaraokeMode(e.target.checked)} />
+                      </label>
+                    </div>
                   </div>
 
                   <div>
@@ -864,7 +888,20 @@ export default function ClipStudioModal({
                           backgroundColor: boxOpacity > 0 ? toRgba(boxColor, boxOpacity) : 'transparent'
                         }}
                       >
-                        {previewText}
+                        {karaokeMode && karaokePreview ? (
+                          karaokePreview.words.map((word, idx) => (
+                            <span
+                              key={`${word}-${idx}`}
+                              className={idx === karaokePreview.activeIndex ? 'text-amber-300' : ''}
+                              style={idx === karaokePreview.activeIndex ? { textDecoration: 'underline' } : undefined}
+                            >
+                              {word}
+                              {idx < karaokePreview.words.length - 1 ? ' ' : ''}
+                            </span>
+                          ))
+                        ) : (
+                          previewText
+                        )}
                       </span>
                     </div>
                   )}
