@@ -14,6 +14,7 @@ import io
 import zipfile
 import math
 import zlib
+from urllib.parse import unquote
 from dotenv import load_dotenv
 from typing import Dict, Optional, List, Any, Tuple
 from collections import Counter
@@ -61,6 +62,17 @@ def normalize_aspect_ratio(raw_value: Optional[str], default: Optional[str] = No
     if value not in ALLOWED_ASPECT_RATIOS:
         raise HTTPException(status_code=400, detail="Invalid aspect_ratio. Allowed values: 9:16, 16:9")
     return value
+
+def _safe_input_filename(value: Optional[str]) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    # Handles full URLs and encoded names from frontend (e.g. %20).
+    filename = os.path.basename(raw)
+    filename = unquote(filename)
+    # In case it arrives double-encoded from chained transformations.
+    filename = unquote(filename)
+    return os.path.basename(filename)
 
 def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     """
@@ -1761,13 +1773,13 @@ async def edit_clip(
         # Resolve Input Path: Prefer explict input_filename from frontend (chaining edits)
         if req.input_filename:
             # Security: Ensure just a filename, no paths
-            safe_name = os.path.basename(req.input_filename)
+            safe_name = _safe_input_filename(req.input_filename)
             input_path = os.path.join(OUTPUT_DIR, req.job_id, safe_name)
             filename = safe_name
         else:
             # Fallback to original clip
             clip = job['result']['clips'][req.clip_index]
-            filename = clip['video_url'].split('/')[-1]
+            filename = _safe_input_filename(clip.get('video_url', ''))
             input_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
         
         if not os.path.exists(input_path):
@@ -1909,10 +1921,10 @@ async def add_subtitles(req: SubtitleRequest):
     # Video Path
     if req.input_filename:
         # Use chained file
-        filename = os.path.basename(req.input_filename)
+        filename = _safe_input_filename(req.input_filename)
     else:
         # Fallback to standard naming
-        filename = clip_data.get('video_url', '').split('/')[-1]
+        filename = _safe_input_filename(clip_data.get('video_url', ''))
         if not filename:
              base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
@@ -2137,9 +2149,9 @@ async def add_background_music(
 
     clip_data = clips[clip_index]
     if input_filename:
-        source_name = os.path.basename(input_filename)
+        source_name = _safe_input_filename(input_filename)
     else:
-        source_name = os.path.basename(str(clip_data.get("video_url", "")))
+        source_name = _safe_input_filename(clip_data.get("video_url", ""))
         if not source_name:
             base_name = os.path.basename(json_files[0]).replace("_metadata.json", "")
             source_name = f"{base_name}_clip_{clip_index + 1}.mp4"

@@ -165,10 +165,20 @@ const extractFilename = (urlOrPath) => {
   try {
     const url = new URL(raw);
     const cleanPath = url.pathname || '';
-    return cleanPath.split('/').pop() || '';
+    const last = cleanPath.split('/').pop() || '';
+    try {
+      return decodeURIComponent(last);
+    } catch (_) {
+      return last;
+    }
   } catch (_) {
     const clean = raw.split('?')[0].split('#')[0];
-    return clean.split('/').pop() || '';
+    const last = clean.split('/').pop() || '';
+    try {
+      return decodeURIComponent(last);
+    } catch (__){
+      return last;
+    }
   }
 };
 
