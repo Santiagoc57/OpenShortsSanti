@@ -216,16 +216,36 @@ export default function ClipStudioModal({
   const [duckVoice, setDuckVoice] = useState(true);
 
   const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [previewCurrentTime, setPreviewCurrentTime] = useState(0);
   const [previewVideoUrl, setPreviewVideoUrl] = useState(String(currentVideoUrl || ''));
   const [videoLoadError, setVideoLoadError] = useState('');
   const previewVideoRef = useRef(null);
   const previewBlobUrlRef = useRef(null);
 
+  const activeSubtitleEntry = useMemo(() => {
+    const t = Number(previewCurrentTime || 0);
+    if (!Array.isArray(subtitleEntries) || subtitleEntries.length === 0) return null;
+    return subtitleEntries.find((entry) => {
+      const start = Number(entry?.start || 0);
+      const end = Number(entry?.end || start);
+      const hasText = String(entry?.text || '').trim().length > 0;
+      return hasText && t >= start && t <= (end + 0.05);
+    }) || null;
+  }, [subtitleEntries, previewCurrentTime]);
+
   const previewText = useMemo(() => {
-    const first = subtitleEntries.find((entry) => String(entry?.text || '').trim());
-    if (first) return first.emphasize ? String(first.text).toUpperCase() : String(first.text);
-    return 'Así se verán tus subtítulos';
-  }, [subtitleEntries]);
+    if (activeSubtitleEntry) {
+      return activeSubtitleEntry.emphasize
+        ? String(activeSubtitleEntry.text).toUpperCase()
+        : String(activeSubtitleEntry.text);
+    }
+    // Estado inicial: mostrar una muestra breve antes de reproducir.
+    if (!previewPlaying && previewCurrentTime <= 0.05) {
+      const first = subtitleEntries.find((entry) => String(entry?.text || '').trim());
+      if (first) return first.emphasize ? String(first.text).toUpperCase() : String(first.text);
+    }
+    return '';
+  }, [activeSubtitleEntry, subtitleEntries, previewCurrentTime, previewPlaying]);
 
   const filteredTranscript = useMemo(() => {
     const q = String(transcriptQuery || '').trim().toLowerCase();
@@ -808,12 +828,28 @@ export default function ClipStudioModal({
                     playsInline
                     onPlay={() => setPreviewPlaying(true)}
                     onPause={() => setPreviewPlaying(false)}
+                    onTimeUpdate={(e) => {
+                      const nextTime = Number(e?.currentTarget?.currentTime || 0);
+                      setPreviewCurrentTime(nextTime);
+                    }}
+                    onSeeked={(e) => {
+                      const nextTime = Number(e?.currentTarget?.currentTime || 0);
+                      setPreviewCurrentTime(nextTime);
+                    }}
+                    onLoadedMetadata={(e) => {
+                      const nextTime = Number(e?.currentTarget?.currentTime || 0);
+                      setPreviewCurrentTime(nextTime);
+                    }}
+                    onEnded={() => {
+                      setPreviewPlaying(false);
+                      setPreviewCurrentTime(0);
+                    }}
                     onError={() => {
                       setVideoLoadError('El navegador no pudo reproducir este archivo en la vista previa.');
                     }}
                   />
 
-                  {captionsOn && (
+                  {captionsOn && Boolean(previewText) && (
                     <div
                       className={`absolute left-0 right-0 px-6 text-center pointer-events-none ${position === 'top' ? 'top-8' : position === 'middle' ? 'top-1/2 -translate-y-1/2' : 'bottom-8'}`}
                     >
