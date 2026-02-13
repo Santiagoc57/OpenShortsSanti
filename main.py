@@ -1469,7 +1469,7 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
 
 def transcribe_video(video_path, language=None, backend=None, model_name=None, word_timestamps=True, compute_type=None, cpu_threads=0, num_workers=1):
     backend = (backend or os.getenv("WHISPER_BACKEND", "faster")).lower()
-    model_name = model_name or os.getenv("WHISPER_MODEL", "base")
+    model_name = model_name or os.getenv("WHISPER_MODEL", "large-v3")
 
     if backend == "openai":
         print(f"🎙️  Transcribing video with OpenAI Whisper (model={model_name})...")
@@ -1693,7 +1693,7 @@ if __name__ == '__main__':
     parser.add_argument('--language', type=str, default=None, help="Force transcription language (e.g., 'es', 'en').")
     parser.add_argument('--max-clips', type=int, default=None, help="Max number of clips to generate (1-15).")
     parser.add_argument('--whisper-backend', type=str, default=None, help="Whisper backend: openai|faster.")
-    parser.add_argument('--whisper-model', type=str, default=None, help="Whisper model: tiny|base|small|medium|large|large-v3.")
+    parser.add_argument('--whisper-model', type=str, default=None, help="Whisper model: tiny|base|small|medium|large|large-v2|large-v3.")
     parser.add_argument('--word-timestamps', type=str, default="true", help="true/false for word-level timestamps.")
     parser.add_argument('--ffmpeg-preset', type=str, default="fast", help="FFmpeg preset: ultrafast|fast|medium.")
     parser.add_argument('--ffmpeg-crf', type=int, default=23, help="FFmpeg CRF quality (lower=better).")

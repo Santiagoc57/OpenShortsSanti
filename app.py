@@ -13,6 +13,7 @@ import csv
 import io
 import zipfile
 import math
+import struct
 import zlib
 from urllib.parse import unquote
 from dotenv import load_dotenv
@@ -73,6 +74,166 @@ def _safe_input_filename(value: Optional[str]) -> str:
     # In case it arrives double-encoded from chained transformations.
     filename = unquote(filename)
     return os.path.basename(filename)
+
+def _probe_media_duration_seconds(media_path: str) -> float:
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        media_path
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        return 0.0
+    try:
+        return max(0.0, float((proc.stdout or "").strip() or 0.0))
+    except Exception:
+        return 0.0
+
+def _probe_video_dimensions(media_path: str) -> Tuple[int, int]:
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0:s=x",
+        media_path
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        return 0, 0
+    raw = str(proc.stdout or "").strip()
+    if "x" not in raw:
+        return 0, 0
+    try:
+        w_raw, h_raw = raw.split("x", 1)
+        w = int(float(w_raw))
+        h = int(float(h_raw))
+        return max(0, w), max(0, h)
+    except Exception:
+        return 0, 0
+
+def _even_int(value: float) -> int:
+    iv = int(round(float(value)))
+    if iv < 2:
+        iv = 2
+    if iv % 2 != 0:
+        iv -= 1
+    return max(2, iv)
+
+# Keep manual pan intensity aligned with editor preview (ClipStudioModal.jsx).
+_LAYOUT_OFFSET_FACTOR = 0.35
+
+def _build_manual_layout_filter(
+    in_w: int,
+    in_h: int,
+    aspect_ratio: str,
+    fit_mode: str = "cover",
+    zoom: float = 1.0,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0
+) -> Tuple[str, int, int]:
+    ratio_map = {"9:16": 9.0 / 16.0, "16:9": 16.0 / 9.0}
+    target_ratio = ratio_map.get(aspect_ratio, 9.0 / 16.0)
+    source_ratio = (in_w / in_h) if in_w > 0 and in_h > 0 else target_ratio
+
+    if source_ratio >= target_ratio:
+        out_h = _even_int(in_h)
+        out_w = _even_int(out_h * target_ratio)
+    else:
+        out_w = _even_int(in_w)
+        out_h = _even_int(out_w / target_ratio)
+
+    fit = str(fit_mode or "cover").strip().lower()
+    if fit not in {"cover", "contain"}:
+        fit = "cover"
+    z = max(0.5, min(2.5, _safe_float(zoom, 1.0)))
+    ox_raw = max(-100.0, min(100.0, _safe_float(offset_x, 0.0))) / 100.0
+    oy_raw = max(-100.0, min(100.0, _safe_float(offset_y, 0.0))) / 100.0
+    ox = ox_raw * _LAYOUT_OFFSET_FACTOR
+    oy = oy_raw * _LAYOUT_OFFSET_FACTOR
+
+    if fit == "cover":
+        base_scale = max(out_w / max(1, in_w), out_h / max(1, in_h))
+    else:
+        base_scale = min(out_w / max(1, in_w), out_h / max(1, in_h))
+
+    scale_factor = max(0.1, base_scale * z)
+    scaled_w = _even_int(in_w * scale_factor)
+    scaled_h = _even_int(in_h * scale_factor)
+
+    filters = [f"scale={scaled_w}:{scaled_h}"]
+    stage_w = scaled_w
+    stage_h = scaled_h
+
+    crop_w = min(stage_w, out_w)
+    crop_h = min(stage_h, out_h)
+    if crop_w < stage_w or crop_h < stage_h:
+        max_crop_x = max(0, stage_w - crop_w)
+        max_crop_y = max(0, stage_h - crop_h)
+        crop_x = int(round((max_crop_x / 2.0) + (ox * (max_crop_x / 2.0))))
+        crop_y = int(round((max_crop_y / 2.0) + (oy * (max_crop_y / 2.0))))
+        crop_x = max(0, min(max_crop_x, crop_x))
+        crop_y = max(0, min(max_crop_y, crop_y))
+        filters.append(f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y}")
+        stage_w, stage_h = crop_w, crop_h
+
+    if stage_w < out_w or stage_h < out_h:
+        max_pad_x = max(0, out_w - stage_w)
+        max_pad_y = max(0, out_h - stage_h)
+        pad_x = int(round((max_pad_x / 2.0) + (ox * (max_pad_x / 2.0))))
+        pad_y = int(round((max_pad_y / 2.0) + (oy * (max_pad_y / 2.0))))
+        pad_x = max(0, min(max_pad_x, pad_x))
+        pad_y = max(0, min(max_pad_y, pad_y))
+        filters.append(f"pad={out_w}:{out_h}:{pad_x}:{pad_y}:black")
+
+    return ",".join(filters), out_w, out_h
+
+def _extract_waveform_peaks(media_path: str, buckets: int = 240, sample_rate: int = 11025) -> List[float]:
+    safe_buckets = max(32, min(2000, int(buckets)))
+    safe_rate = max(2000, min(48000, int(sample_rate)))
+
+    cmd = [
+        "ffmpeg",
+        "-v", "error",
+        "-i", media_path,
+        "-ac", "1",
+        "-ar", str(safe_rate),
+        "-vn",
+        "-f", "f32le",
+        "pipe:1"
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.decode(errors="ignore") or "ffmpeg waveform extraction failed")
+
+    raw = proc.stdout or b""
+    sample_count = len(raw) // 4
+    if sample_count <= 0:
+        return [0.0] * safe_buckets
+
+    floats = struct.unpack(f"<{sample_count}f", raw[:sample_count * 4])
+    chunk_size = max(1, int(math.ceil(sample_count / safe_buckets)))
+    peaks: List[float] = []
+
+    for i in range(safe_buckets):
+        start = i * chunk_size
+        if start >= sample_count:
+            peaks.append(0.0)
+            continue
+        end = min(sample_count, start + chunk_size)
+        peak = 0.0
+        for value in floats[start:end]:
+            amp = abs(float(value))
+            if amp > peak:
+                peak = amp
+        peaks.append(peak)
+
+    max_peak = max(peaks) if peaks else 0.0
+    if max_peak <= 0:
+        return [0.0] * len(peaks)
+    return [round(min(1.0, p / max_peak), 4) for p in peaks]
 
 def _relocate_root_job_artifacts(job_id: str, job_output_dir: str) -> bool:
     """
@@ -1743,7 +1904,7 @@ async def retry_job(job_id: str):
     }
 
 from editor import VideoEditor
-from subtitles import generate_srt, burn_subtitles
+from subtitles import generate_srt, burn_subtitles, generate_karaoke_ass_from_srt, generate_styled_ass_from_srt
 
 class EditRequest(BaseModel):
     job_id: str
@@ -1879,14 +2040,17 @@ class SubtitleRequest(BaseModel):
     job_id: str
     clip_index: int
     position: str = "bottom" # top, middle, bottom
-    font_size: int = 16
-    font_family: str = "Verdana"
+    font_size: int = 34
+    font_family: str = "Montserrat"
     font_color: str = "#FFFFFF"
     stroke_color: str = "#000000"
-    stroke_width: int = 2
+    stroke_width: int = 5
     bold: bool = True
     box_color: str = "#000000"
-    box_opacity: int = 60
+    box_opacity: int = 0
+    karaoke_mode: bool = False
+    caption_offset_x: float = 0.0  # -100..100
+    caption_offset_y: float = 0.0  # -100..100
     srt_content: Optional[str] = None
     input_filename: Optional[str] = None
 
@@ -1935,9 +2099,13 @@ async def add_subtitles(req: SubtitleRequest):
         # Just fail if not found.
         raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
         
+    caption_offset_x = max(-100.0, min(100.0, _safe_float(req.caption_offset_x, 0.0)))
+    caption_offset_y = max(-100.0, min(100.0, _safe_float(req.caption_offset_y, 0.0)))
+
     # Define outputs
-    srt_filename = f"subs_{req.clip_index}_{int(time.time())}.srt"
-    srt_path = os.path.join(output_dir, srt_filename)
+    subtitle_ext = "ass"
+    subtitle_filename = f"subs_{req.clip_index}_{int(time.time())}.{subtitle_ext}"
+    subtitle_path = os.path.join(output_dir, subtitle_filename)
     
     # Output video
     # We create a new file "subtitled_..."
@@ -1948,19 +2116,65 @@ async def add_subtitles(req: SubtitleRequest):
     try:
         # 1. Generate or use provided SRT
         if req.srt_content:
-             with open(srt_path, 'w', encoding='utf-8') as f:
-                  f.write(req.srt_content)
+            raw_srt_content = req.srt_content
         else:
-             success = generate_srt(transcript, clip_data['start'], clip_data['end'], srt_path)
-             if not success:
-                  raise HTTPException(status_code=400, detail="No words found for this clip range.")
+            temp_srt_name = f"subs_tmp_{req.clip_index}_{int(time.time())}.srt"
+            temp_srt_path = os.path.join(output_dir, temp_srt_name)
+            try:
+                success = generate_srt(transcript, clip_data['start'], clip_data['end'], temp_srt_path)
+                if not success:
+                    raise HTTPException(status_code=400, detail="No words found for this clip range.")
+                with open(temp_srt_path, "r", encoding="utf-8") as f:
+                    raw_srt_content = f.read()
+            finally:
+                if os.path.exists(temp_srt_path):
+                    os.remove(temp_srt_path)
+
+        if req.karaoke_mode:
+            success = generate_karaoke_ass_from_srt(
+                raw_srt_content,
+                subtitle_path,
+                alignment=req.position,
+                font_size=req.font_size,
+                font_name=req.font_family,
+                font_color=req.font_color,
+                active_word_color="auto",
+                stroke_color=req.stroke_color,
+                stroke_width=req.stroke_width,
+                bold=req.bold,
+                box_color=req.box_color,
+                box_opacity=req.box_opacity,
+                pop_scale=118,
+                offset_x=caption_offset_x,
+                offset_y=caption_offset_y
+            )
+            if not success:
+                raise HTTPException(status_code=400, detail="No se pudo generar karaoke para este clip.")
+        else:
+            success = generate_styled_ass_from_srt(
+                raw_srt_content,
+                subtitle_path,
+                alignment=req.position,
+                font_size=req.font_size,
+                font_name=req.font_family,
+                font_color=req.font_color,
+                stroke_color=req.stroke_color,
+                stroke_width=req.stroke_width,
+                bold=req.bold,
+                box_color=req.box_color,
+                box_opacity=req.box_opacity,
+                offset_x=caption_offset_x,
+                offset_y=caption_offset_y
+            )
+            if not success:
+                raise HTTPException(status_code=400, detail="No se pudo generar subtítulos para este clip.")
              
         # 2. Burn Subtitles
         # Run in thread pool
         def run_burn():
              burn_subtitles(
                  input_path,
-                 srt_path,
+                 subtitle_path,
                  output_path,
                  alignment=req.position,
                  fontsize=req.font_size,
@@ -1980,9 +2194,26 @@ async def add_subtitles(req: SubtitleRequest):
         # We return the new URL.
         new_video_url = f"/videos/{req.job_id}/{output_filename}"
         
+        try:
+            clips[req.clip_index]['caption_position'] = req.position
+            clips[req.clip_index]['caption_offset_x'] = round(caption_offset_x, 3)
+            clips[req.clip_index]['caption_offset_y'] = round(caption_offset_y, 3)
+            with open(json_files[0], 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+        if 'result' in job and 'clips' in job['result'] and req.clip_index < len(job['result']['clips']):
+            job['result']['clips'][req.clip_index]['caption_position'] = req.position
+            job['result']['clips'][req.clip_index]['caption_offset_x'] = round(caption_offset_x, 3)
+            job['result']['clips'][req.clip_index]['caption_offset_y'] = round(caption_offset_y, 3)
+
         return {
             "success": True,
-            "new_video_url": new_video_url
+            "new_video_url": new_video_url,
+            "caption_position": req.position,
+            "caption_offset_x": round(caption_offset_x, 3),
+            "caption_offset_y": round(caption_offset_y, 3)
         }
         
     except Exception as e:
@@ -2036,6 +2267,10 @@ class RecutRequest(BaseModel):
     start: float
     end: float
     aspect_ratio: Optional[str] = None
+    fit_mode: Optional[str] = "cover"  # cover | contain
+    zoom: Optional[float] = 1.0        # 0.5 .. 2.5
+    offset_x: Optional[float] = 0.0    # -100 .. 100
+    offset_y: Optional[float] = 0.0    # -100 .. 100
 
 def _parse_form_bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -2062,6 +2297,12 @@ async def recut_clip(req: RecutRequest):
     if req.start < 0 or req.end <= req.start:
         raise HTTPException(status_code=400, detail="Invalid start/end times.")
     aspect_ratio = normalize_aspect_ratio(req.aspect_ratio, default="9:16")
+    fit_mode = str(req.fit_mode or "cover").strip().lower()
+    if fit_mode not in {"cover", "contain"}:
+        fit_mode = "cover"
+    zoom = max(0.5, min(2.5, _safe_float(req.zoom, 1.0)))
+    offset_x = max(-100.0, min(100.0, _safe_float(req.offset_x, 0.0)))
+    offset_y = max(-100.0, min(100.0, _safe_float(req.offset_y, 0.0)))
 
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -2085,12 +2326,33 @@ async def recut_clip(req: RecutRequest):
     if res.returncode != 0:
         raise HTTPException(status_code=500, detail=res.stderr.decode())
 
-    # Re-process with target aspect ratio
+    # Re-process with target aspect ratio + optional manual layout transform
     try:
-        from main import process_video_to_vertical
-        success = process_video_to_vertical(temp_cut, out_path, "fast", 23, aspect_ratio)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to process recut video.")
+        in_w, in_h = _probe_video_dimensions(temp_cut)
+        if in_w <= 0 or in_h <= 0:
+            raise HTTPException(status_code=500, detail="Could not inspect recut dimensions.")
+
+        vf_filter, out_w, out_h = _build_manual_layout_filter(
+            in_w=in_w,
+            in_h=in_h,
+            aspect_ratio=aspect_ratio,
+            fit_mode=fit_mode,
+            zoom=zoom,
+            offset_x=offset_x,
+            offset_y=offset_y
+        )
+        recut_cmd = [
+            "ffmpeg", "-y",
+            "-i", temp_cut,
+            "-vf", vf_filter,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            out_path
+        ]
+        recut_run = subprocess.run(recut_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if recut_run.returncode != 0:
+            raise HTTPException(status_code=500, detail=recut_run.stderr.decode() or "Failed to apply manual layout recut.")
     finally:
         if os.path.exists(temp_cut):
             os.remove(temp_cut)
@@ -2106,6 +2368,10 @@ async def recut_clip(req: RecutRequest):
                 clips[req.clip_index]['start'] = req.start
                 clips[req.clip_index]['end'] = req.end
                 clips[req.clip_index]['aspect_ratio'] = aspect_ratio
+                clips[req.clip_index]['layout_fit_mode'] = fit_mode
+                clips[req.clip_index]['layout_zoom'] = round(zoom, 3)
+                clips[req.clip_index]['layout_offset_x'] = round(offset_x, 3)
+                clips[req.clip_index]['layout_offset_y'] = round(offset_y, 3)
                 with open(json_files[0], 'w') as f:
                     json.dump(data, f, indent=2)
         except Exception:
@@ -2117,6 +2383,10 @@ async def recut_clip(req: RecutRequest):
         job['result']['clips'][req.clip_index]['start'] = req.start
         job['result']['clips'][req.clip_index]['end'] = req.end
         job['result']['clips'][req.clip_index]['aspect_ratio'] = aspect_ratio
+        job['result']['clips'][req.clip_index]['layout_fit_mode'] = fit_mode
+        job['result']['clips'][req.clip_index]['layout_zoom'] = round(zoom, 3)
+        job['result']['clips'][req.clip_index]['layout_offset_x'] = round(offset_x, 3)
+        job['result']['clips'][req.clip_index]['layout_offset_y'] = round(offset_y, 3)
 
     return {"success": True, "new_video_url": f"/videos/{req.job_id}/{out_name}"}
 
@@ -2595,7 +2865,8 @@ async def get_transcript_segments(
     job_id: str,
     q: Optional[str] = None,
     limit: int = 800,
-    offset: int = 0
+    offset: int = 0,
+    include_words: bool = False
 ):
     output_dir = os.path.join(OUTPUT_DIR, job_id)
     if not os.path.isdir(output_dir):
@@ -2640,7 +2911,7 @@ async def get_transcript_segments(
                 continue
 
         words = seg.get("words") if isinstance(seg.get("words"), list) else []
-        normalized.append({
+        row = {
             "segment_index": idx,
             "start": round(start, 3),
             "end": round(end, 3),
@@ -2648,7 +2919,24 @@ async def get_transcript_segments(
             "speaker": speaker or None,
             "word_count": len(words),
             "text": text
-        })
+        }
+        if include_words:
+            safe_words: List[Dict[str, Any]] = []
+            for word_item in words:
+                if not isinstance(word_item, dict):
+                    continue
+                ws = max(0.0, _safe_float(word_item.get("start", start), start))
+                we = _safe_float(word_item.get("end", ws), ws)
+                if we < ws:
+                    we = ws
+                wt = _normalize_space(word_item.get("word", "")) or _normalize_space(word_item.get("text", ""))
+                safe_words.append({
+                    "start": round(ws, 3),
+                    "end": round(we, 3),
+                    "word": wt
+                })
+            row["words"] = safe_words
+        normalized.append(row)
 
     total = len(normalized)
     safe_offset = max(0, int(offset))
@@ -2662,8 +2950,63 @@ async def get_transcript_segments(
         "limit": safe_limit,
         "returned": len(paged),
         "query": query or None,
+        "include_words": bool(include_words),
         "has_speaker_labels": has_speaker_labels,
         "segments": paged
+    }
+
+@app.get("/api/waveform/{job_id}/{clip_index}")
+async def get_clip_waveform(
+    job_id: str,
+    clip_index: int,
+    input_filename: Optional[str] = None,
+    buckets: int = 240
+):
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    if not os.path.isdir(output_dir):
+        raise HTTPException(status_code=404, detail="Job output not found")
+
+    json_files = sorted(glob.glob(os.path.join(output_dir, "*_metadata.json")))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+
+    try:
+        with open(json_files[0], "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read metadata: {e}")
+
+    clips = data.get("shorts", [])
+    if not isinstance(clips, list) or clip_index < 0 or clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip_data = clips[clip_index] or {}
+    if input_filename:
+        filename = _safe_input_filename(input_filename)
+    else:
+        filename = _safe_input_filename(clip_data.get("video_url", ""))
+        if not filename:
+            base_name = os.path.basename(json_files[0]).replace("_metadata.json", "")
+            filename = f"{base_name}_clip_{clip_index + 1}.mp4"
+
+    media_path = os.path.join(output_dir, filename)
+    if not os.path.exists(media_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {media_path}")
+
+    safe_buckets = max(60, min(1200, int(buckets)))
+    try:
+        peaks = _extract_waveform_peaks(media_path, buckets=safe_buckets, sample_rate=11025)
+        duration = _probe_media_duration_seconds(media_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Waveform extraction failed: {e}")
+
+    return {
+        "job_id": job_id,
+        "clip_index": clip_index,
+        "filename": filename,
+        "duration": round(duration, 3),
+        "buckets": len(peaks),
+        "peaks": peaks
     }
 
 class ClipSearchRequest(BaseModel):

@@ -9,8 +9,8 @@ export default {
       colors: {
         background: "#09090b",
         surface: "#18181b",
-        primary: "#3b82f6",
-        accent: "#8b5cf6",
+        primary: "#7c3aed",
+        accent: "#a78bfa",
       },
       animation: {
         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',

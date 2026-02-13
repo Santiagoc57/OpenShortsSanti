@@ -18,12 +18,12 @@ export default function KeyInput({ onKeySet, savedKey }) {
     };
 
     return (
-        <div className="bg-surface border border-white/5 rounded-2xl p-6 mb-8 animate-[fadeIn_0.5s_ease-out]">
+        <div className="bg-white/85 dark:bg-surface border border-slate-200 dark:border-white/10 rounded-2xl p-6 mb-8 shadow-sm animate-[fadeIn_0.5s_ease-out]">
             <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 bg-accent/20 rounded-lg text-accent">
+                <div className="p-2 bg-primary/10 rounded-lg text-primary">
                     <Key size={20} />
                 </div>
-                <h2 className="text-lg font-semibold">Gemini API Key</h2>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-white">API Key de Gemini</h2>
             </div>
 
             <div className="flex gap-3">
@@ -40,7 +40,7 @@ export default function KeyInput({ onKeySet, savedKey }) {
                     />
                     <button
                         onClick={() => setIsVisible(!isVisible)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white transition-colors"
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-slate-900 dark:hover:text-white transition-colors"
                     >
                         {isVisible ? <EyeOff size={18} /> : <Eye size={18} />}
                     </button>
@@ -49,15 +49,15 @@ export default function KeyInput({ onKeySet, savedKey }) {
                     onClick={handleSave}
                     disabled={!key || isSaved}
                     className={`px-6 rounded-xl font-medium transition-all flex items-center gap-2 ${isSaved
-                        ? 'bg-green-500/20 text-green-400 cursor-default'
-                        : 'bg-primary hover:bg-blue-600 text-white shadow-lg shadow-primary/20'
+                        ? 'bg-emerald-100 dark:bg-green-500/20 text-emerald-700 dark:text-green-400 cursor-default'
+                        : 'bg-gradient-to-r from-primary to-indigo-500 hover:from-primary hover:to-indigo-600 text-white shadow-lg shadow-primary/20'
                         }`}
                 >
-                    {isSaved ? <><Check size={18} /> Ready</> : 'Set Key'}
+                    {isSaved ? <><Check size={18} /> Lista</> : 'Guardar clave'}
                 </button>
             </div>
-            <p className="mt-3 text-xs text-zinc-500">
-                Your key is stored locally in your browser for convenience.
+            <p className="mt-3 text-xs text-slate-500 dark:text-zinc-500">
+                Tu clave se guarda localmente en tu navegador para mayor comodidad.
                 <br />
                 <a
                     href="https://aistudio.google.com/app/apikey"
@@ -65,7 +65,7 @@ export default function KeyInput({ onKeySet, savedKey }) {
                     rel="noopener noreferrer"
                     className="text-primary hover:underline mt-1 inline-block"
                 >
-                    Get your free Gemini API Key here →
+                    Obtén tu API Key gratuita de Gemini aquí →
                 </a>
             </p>
         </div>

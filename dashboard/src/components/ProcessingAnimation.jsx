@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Scan, Scissors, Activity, Radio, CheckCircle, Play } from 'lucide-react';
 
-const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, syncTrigger }) => {
+const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, syncTrigger, theme = 'dark' }) => {
   const [videoSrc, setVideoSrc] = useState(null);
   const [isYouTube, setIsYouTube] = useState(false);
   const videoRef = useRef(null);
@@ -130,13 +130,13 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
   };
 
   const containerClasses = `relative w-full aspect-video rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl mb-8 group animate-[fadeIn_0.5s_ease-out] transition-all duration-500 
-    ${isComplete && !isSyncedPlaying ? 'grayscale brightness-50' : ''} 
-    ${isSyncedPlaying ? 'ring-2 ring-primary ring-offset-2 ring-offset-black shadow-primary/20' : ''}`;
+    ${isComplete && !isSyncedPlaying ? (theme === 'light' ? 'brightness-90 saturate-125' : 'grayscale brightness-50') : ''} 
+    ${isSyncedPlaying ? `ring-2 ring-primary ring-offset-2 ${theme === 'light' ? 'ring-offset-slate-100' : 'ring-offset-black'} shadow-primary/20` : ''}`;
 
   const getVideoOpacityClass = () => {
     if (isSyncedPlaying) return 'opacity-100'; // Playing: Full visibility
-    if (isComplete) return 'opacity-30';       // Idle Result: Darker
-    return 'opacity-40 grayscale group-hover:grayscale-0'; // Processing: Dark + Grayscale effect
+    if (isComplete) return theme === 'light' ? 'opacity-60' : 'opacity-30'; // Idle Result
+    return theme === 'light' ? 'opacity-70 group-hover:opacity-90' : 'opacity-40 grayscale group-hover:grayscale-0';
   };
 
   return (
@@ -149,7 +149,7 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
             className={`w-full h-full ${isSyncedPlaying ? '' : 'pointer-events-none scale-110'}`}
             // Add enablejsapi=1 for postMessage control
             src={`https://www.youtube.com/embed/${videoSrc}?autoplay=1&mute=1&controls=0&loop=1&playlist=${videoSrc}&modestbranding=1&showinfo=0&rel=0&enablejsapi=1`}
-            title="Processing Video"
+            title="Procesando video"
             frameBorder="0"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
           />
@@ -184,11 +184,11 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
           <div className={`absolute top-4 left-4 z-30 flex items-center gap-2 px-3 py-1.5 backdrop-blur-md rounded-lg border text-xs font-mono font-bold uppercase transition-all duration-500 ${isComplete ? 'bg-green-500/10 border-green-500/20 text-green-400' : 'bg-black/60 border-primary/30 text-primary animate-pulse'}`}>
             {isComplete ? (
                 <>
-                    <CheckCircle size={14} /> Analysis Complete
+                    <CheckCircle size={14} /> Análisis completado
                 </>
             ) : (
                 <>
-                    <Scan size={14} /> Scanning Content...
+                    <Scan size={14} /> Analizando contenido...
                 </>
             )}
           </div>
@@ -217,7 +217,7 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
        {/* Synced Playing Indicator */}
        {isSyncedPlaying && (
            <div className="absolute top-4 right-4 z-30 flex items-center gap-2 px-3 py-1.5 bg-red-600/90 backdrop-blur text-white rounded-lg shadow-lg animate-pulse font-bold text-[10px] uppercase tracking-wider border border-white/20">
-               <Activity size={12} /> Live Sync
+               <Activity size={12} /> Sincronización en vivo
            </div>
        )}
       
@@ -225,8 +225,8 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
       {!isSyncedPlaying && !isComplete && (
           <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/90 to-transparent z-30 flex justify-between items-end border-t border-white/5">
               <div className="font-mono text-[10px] text-primary/80 space-y-1">
-                 <div className="flex items-center gap-2"><Activity size={10} className="animate-bounce" /> {'>'} ANALYSIS_THREAD_01: ACTIVE</div>
-                 <div className="flex items-center gap-2"><Radio size={10} /> {'>'} AUDIO_TRANSCRIPT: PROCESSING</div>
+                 <div className="flex items-center gap-2"><Activity size={10} className="animate-bounce" /> {'>'} HILO_ANALISIS_01: ACTIVO</div>
+                 <div className="flex items-center gap-2"><Radio size={10} /> {'>'} TRANSCRIPCION_AUDIO: PROCESANDO</div>
               </div>
               <div className="flex gap-1">
                  <div className="w-1 h-3 bg-primary/40 animate-[pulse_0.5s_infinite]"></div>

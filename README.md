@@ -112,6 +112,19 @@ La hoja de ruta se mantiene en un documento separado para evitar mezclarla con l
 
 - **`ROADMAP_ES.md`** (estado, sprints completados, próximos sprints y prioridades)
 
+### QA rápido de Clip Anything (relevancia)
+Puedes evaluar búsquedas semánticas contra casos etiquetados:
+
+```bash
+python3 scripts/eval_clip_search.py \
+  --api-base http://localhost:8000 \
+  --job-id <JOB_ID> \
+  --cases scripts/clip_search_cases.example.json \
+  --search-mode balanced
+```
+
+También puedes enviar directamente `POST /api/search/clips/eval`.
+
 ---
 
 ## 🔒 Security & Performance

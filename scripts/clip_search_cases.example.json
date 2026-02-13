@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "query": "momento donde explica la deuda",
+      "expected_start": 120.0,
+      "expected_end": 165.0
+    },
+    {
+      "query": "frase polémica sobre impuestos",
+      "expected_start": 312.0,
+      "expected_end": 350.0,
+      "speaker": "Speaker 1"
+    },
+    {
+      "query": "resumen final con llamado a la acción",
+      "min_match_score": 0.14
+    }
+  ]
+}

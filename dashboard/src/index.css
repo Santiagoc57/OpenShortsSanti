@@ -1,11 +1,182 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@700;800&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/Montserrat-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 @layer base {
   body {
     @apply bg-background text-white antialiased;
+    font-family: 'Inter', sans-serif;
   }
+}
+
+.theme-light body {
+  background: radial-gradient(circle at top right, #ede9fe 0%, #f8fafc 42%, #f1f5f9 100%);
+  color: #0f172a;
+}
+
+.theme-light .bg-background {
+  background-color: #f4f8fd !important;
+}
+
+.theme-light .bg-background\/50 {
+  background-color: rgba(248, 250, 252, 0.9) !important;
+}
+
+.theme-light .bg-surface {
+  background-color: #ffffff !important;
+}
+
+.theme-light .bg-white\/\[0\.02\] {
+  background-color: rgba(15, 23, 42, 0.04) !important;
+}
+
+.theme-light .bg-black\/20,
+.theme-light .bg-black\/30,
+.theme-light .bg-\[\#0c0c0e\],
+.theme-light .bg-\[\#1a1a1a\],
+.theme-light .bg-\[\#121214\] {
+  background-color: #fdfefe !important;
+}
+
+.theme-light .bg-black {
+  background-color: #f1f5f9 !important;
+}
+
+.theme-light .bg-white\/5 {
+  background-color: rgba(15, 23, 42, 0.06) !important;
+}
+
+.theme-light .bg-white\/10 {
+  background-color: rgba(15, 23, 42, 0.1) !important;
+}
+
+.theme-light .bg-white\/15 {
+  background-color: rgba(15, 23, 42, 0.14) !important;
+}
+
+.theme-light .border-white\/5 {
+  border-color: rgba(15, 23, 42, 0.1) !important;
+}
+
+.theme-light .border-white\/10 {
+  border-color: rgba(15, 23, 42, 0.14) !important;
+}
+
+.theme-light .border-white\/20 {
+  border-color: rgba(15, 23, 42, 0.22) !important;
+}
+
+.theme-light .text-white {
+  color: #0f172a !important;
+}
+
+.theme-light .text-zinc-200 {
+  color: #1f2937 !important;
+}
+
+.theme-light .text-zinc-300 {
+  color: #374151 !important;
+}
+
+.theme-light .text-zinc-400 {
+  color: #4b5563 !important;
+}
+
+.theme-light .text-zinc-500 {
+  color: #41566f !important;
+}
+
+.theme-light .text-zinc-600,
+.theme-light .text-zinc-700 {
+  color: #6b7280 !important;
+}
+
+.theme-light .text-white\/50 {
+  color: #5f6f82 !important;
+}
+
+.theme-light .text-white\/20 {
+  color: #8392a5 !important;
+}
+
+.theme-light .hover\:text-white:hover {
+  color: #0f172a !important;
+}
+
+.theme-light .text-primary {
+  color: #6d28d9 !important;
+}
+
+.theme-light .bg-primary\/10 {
+  background-color: rgba(109, 40, 217, 0.12) !important;
+}
+
+.theme-light .bg-primary\/15 {
+  background-color: rgba(109, 40, 217, 0.16) !important;
+}
+
+.theme-light .bg-primary\/20 {
+  background-color: rgba(109, 40, 217, 0.18) !important;
+}
+
+.theme-light .border-primary\/20 {
+  border-color: rgba(109, 40, 217, 0.24) !important;
+}
+
+.theme-light .border-primary\/30 {
+  border-color: rgba(109, 40, 217, 0.3) !important;
+}
+
+.theme-light .border-primary\/40 {
+  border-color: rgba(109, 40, 217, 0.36) !important;
+}
+
+.theme-light .hover\:bg-white\/15:hover {
+  background-color: rgba(15, 23, 42, 0.12) !important;
+}
+
+.theme-light .input-field {
+  background: #ffffff !important;
+  border-color: rgba(15, 23, 42, 0.18) !important;
+  color: #0f172a !important;
+}
+
+.theme-light .input-field::placeholder {
+  color: #7b8794 !important;
+}
+
+.theme-light .glass-panel {
+  background: rgba(255, 255, 255, 0.85) !important;
+  border-color: rgba(15, 23, 42, 0.12) !important;
+}
+
+.theme-light .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.2);
+}
+
+.theme-light .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.32);
+}
+
+.theme-light .shadow-2xl,
+.theme-light .shadow-xl {
+  box-shadow: 0 16px 28px rgba(15, 23, 42, 0.08) !important;
+}
+
+.theme-light .btn-primary {
+  background: linear-gradient(135deg, #7c3aed 0%, #6366f1 100%) !important;
+  color: #ffffff !important;
+  box-shadow: 0 10px 24px rgba(109, 40, 217, 0.24) !important;
 }
 
 .glass-panel {
@@ -17,7 +188,7 @@
 }
 
 .btn-primary {
-  @apply bg-primary hover:bg-blue-600 text-white px-6 py-3 rounded-xl font-medium transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-primary/20;
+  @apply bg-gradient-to-r from-primary to-indigo-500 hover:from-primary hover:to-indigo-600 text-white px-6 py-3 rounded-xl font-medium transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-primary/20;
 }
 
 /* Custom Scrollbar */
@@ -50,4 +221,15 @@
 @keyframes scan-overlay {
   0% { top: -20%; }
   100% { top: 100%; }
+}
+
+@keyframes subtitleWordIn {
+  0% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.9);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1.16);
+  }
 }

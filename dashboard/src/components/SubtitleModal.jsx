@@ -1,18 +1,133 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, Type, Loader2 } from 'lucide-react';
 
-export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, onLoadSrt }) {
-    const [position, setPosition] = useState('bottom'); // bottom, middle, top
-    const [fontSize, setFontSize] = useState(24);
-    const [fontFamily, setFontFamily] = useState('Impact');
-    const [fontColor, setFontColor] = useState('#FFFFFF');
-    const [strokeColor, setStrokeColor] = useState('#000000');
-    const [strokeWidth, setStrokeWidth] = useState(3);
-    const [bold, setBold] = useState(true);
-    const [boxColor, setBoxColor] = useState('#000000');
-    const [boxOpacity, setBoxOpacity] = useState(60);
+const BRAND_KIT_STORAGE_KEY = 'brandKitV1';
+const DEFAULT_SUBTITLE_STYLE = {
+    name: 'Predeterminado',
+    subtitle_position: 'bottom',
+    subtitle_font_size: 24,
+    subtitle_font_family: 'Impact',
+    subtitle_font_color: '#FFFFFF',
+    subtitle_stroke_color: '#000000',
+    subtitle_stroke_width: 3,
+    subtitle_bold: true,
+    subtitle_box_color: '#000000',
+    subtitle_box_opacity: 60
+};
+
+const CAPTION_STYLE_PRESETS = [
+    {
+        id: 'bold_center',
+        name: 'Negrita Centro',
+        subtitle_position: 'middle',
+        subtitle_font_size: 32,
+        subtitle_font_family: 'Impact',
+        subtitle_font_color: '#FFFFFF',
+        subtitle_stroke_color: '#000000',
+        subtitle_stroke_width: 4,
+        subtitle_bold: true,
+        subtitle_box_color: '#000000',
+        subtitle_box_opacity: 45
+    },
+    {
+        id: 'neon_pop',
+        name: 'Neon Pop',
+        subtitle_position: 'bottom',
+        subtitle_font_size: 30,
+        subtitle_font_family: 'Arial Black',
+        subtitle_font_color: '#00F5FF',
+        subtitle_stroke_color: '#091933',
+        subtitle_stroke_width: 3,
+        subtitle_bold: true,
+        subtitle_box_color: '#0B1020',
+        subtitle_box_opacity: 35
+    },
+    {
+        id: 'typewriter',
+        name: 'Máquina de escribir',
+        subtitle_position: 'bottom',
+        subtitle_font_size: 24,
+        subtitle_font_family: 'Verdana',
+        subtitle_font_color: '#F8FAFC',
+        subtitle_stroke_color: '#111827',
+        subtitle_stroke_width: 2,
+        subtitle_bold: false,
+        subtitle_box_color: '#111827',
+        subtitle_box_opacity: 25
+    },
+    {
+        id: 'bubble',
+        name: 'Burbuja',
+        subtitle_position: 'middle',
+        subtitle_font_size: 30,
+        subtitle_font_family: 'Arial Black',
+        subtitle_font_color: '#111827',
+        subtitle_stroke_color: '#FFFFFF',
+        subtitle_stroke_width: 4,
+        subtitle_bold: true,
+        subtitle_box_color: '#FDE047',
+        subtitle_box_opacity: 75
+    },
+    {
+        id: 'minimal_clean',
+        name: 'Minimal limpio',
+        subtitle_position: 'bottom',
+        subtitle_font_size: 22,
+        subtitle_font_family: 'Arial',
+        subtitle_font_color: '#FFFFFF',
+        subtitle_stroke_color: '#000000',
+        subtitle_stroke_width: 1,
+        subtitle_bold: false,
+        subtitle_box_color: '#000000',
+        subtitle_box_opacity: 20
+    }
+];
+
+const normalizeBrandKitStyle = (raw) => {
+    const src = raw && typeof raw === 'object' ? raw : {};
+    const asNum = (v, fallback, min, max) => {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.max(min, Math.min(max, Math.round(n)));
+    };
+    return {
+        name: String(src.name || DEFAULT_SUBTITLE_STYLE.name).slice(0, 48),
+        subtitle_position: ['top', 'middle', 'bottom'].includes(src.subtitle_position) ? src.subtitle_position : DEFAULT_SUBTITLE_STYLE.subtitle_position,
+        subtitle_font_size: asNum(src.subtitle_font_size, DEFAULT_SUBTITLE_STYLE.subtitle_font_size, 12, 84),
+        subtitle_font_family: String(src.subtitle_font_family || DEFAULT_SUBTITLE_STYLE.subtitle_font_family).slice(0, 48),
+        subtitle_font_color: String(src.subtitle_font_color || DEFAULT_SUBTITLE_STYLE.subtitle_font_color),
+        subtitle_stroke_color: String(src.subtitle_stroke_color || DEFAULT_SUBTITLE_STYLE.subtitle_stroke_color),
+        subtitle_stroke_width: asNum(src.subtitle_stroke_width, DEFAULT_SUBTITLE_STYLE.subtitle_stroke_width, 0, 8),
+        subtitle_bold: typeof src.subtitle_bold === 'boolean' ? src.subtitle_bold : DEFAULT_SUBTITLE_STYLE.subtitle_bold,
+        subtitle_box_color: String(src.subtitle_box_color || DEFAULT_SUBTITLE_STYLE.subtitle_box_color),
+        subtitle_box_opacity: asNum(src.subtitle_box_opacity, DEFAULT_SUBTITLE_STYLE.subtitle_box_opacity, 0, 100)
+    };
+};
+
+const loadBrandKitStyle = () => {
+    try {
+        const raw = localStorage.getItem(BRAND_KIT_STORAGE_KEY);
+        if (!raw) return DEFAULT_SUBTITLE_STYLE;
+        return normalizeBrandKitStyle(JSON.parse(raw));
+    } catch (_) {
+        return DEFAULT_SUBTITLE_STYLE;
+    }
+};
+
+export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, aspectRatio = '9:16', onLoadSrt }) {
+    const [position, setPosition] = useState(DEFAULT_SUBTITLE_STYLE.subtitle_position); // bottom, middle, top
+    const [fontSize, setFontSize] = useState(DEFAULT_SUBTITLE_STYLE.subtitle_font_size);
+    const [fontFamily, setFontFamily] = useState(DEFAULT_SUBTITLE_STYLE.subtitle_font_family);
+    const [fontColor, setFontColor] = useState(DEFAULT_SUBTITLE_STYLE.subtitle_font_color);
+    const [strokeColor, setStrokeColor] = useState(DEFAULT_SUBTITLE_STYLE.subtitle_stroke_color);
+    const [strokeWidth, setStrokeWidth] = useState(DEFAULT_SUBTITLE_STYLE.subtitle_stroke_width);
+    const [bold, setBold] = useState(DEFAULT_SUBTITLE_STYLE.subtitle_bold);
+    const [boxColor, setBoxColor] = useState(DEFAULT_SUBTITLE_STYLE.subtitle_box_color);
+    const [boxOpacity, setBoxOpacity] = useState(DEFAULT_SUBTITLE_STYLE.subtitle_box_opacity);
+    const [brandKitName, setBrandKitName] = useState(DEFAULT_SUBTITLE_STYLE.name);
     const [srtText, setSrtText] = useState('');
     const [loadingSrt, setLoadingSrt] = useState(false);
+    const isLandscape = aspectRatio === '16:9';
 
     const toRgba = (hex, opacity) => {
         const clean = (hex || '#000000').replace('#', '');
@@ -21,6 +136,42 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
         const b = parseInt(clean.substring(4, 6), 16);
         return `rgba(${r}, ${g}, ${b}, ${opacity / 100})`;
     };
+
+    const applyBrandKit = (kitRaw) => {
+        const kit = normalizeBrandKitStyle(kitRaw);
+        setPosition(kit.subtitle_position);
+        setFontSize(kit.subtitle_font_size);
+        setFontFamily(kit.subtitle_font_family);
+        setFontColor(kit.subtitle_font_color);
+        setStrokeColor(kit.subtitle_stroke_color);
+        setStrokeWidth(kit.subtitle_stroke_width);
+        setBold(kit.subtitle_bold);
+        setBoxColor(kit.subtitle_box_color);
+        setBoxOpacity(kit.subtitle_box_opacity);
+        setBrandKitName(kit.name || 'Predeterminado');
+    };
+
+    const applyCaptionPreset = (presetId) => {
+        const preset = CAPTION_STYLE_PRESETS.find((p) => p.id === presetId);
+        if (!preset) return;
+        applyBrandKit({
+            name: preset.name,
+            subtitle_position: preset.subtitle_position,
+            subtitle_font_size: preset.subtitle_font_size,
+            subtitle_font_family: preset.subtitle_font_family,
+            subtitle_font_color: preset.subtitle_font_color,
+            subtitle_stroke_color: preset.subtitle_stroke_color,
+            subtitle_stroke_width: preset.subtitle_stroke_width,
+            subtitle_bold: preset.subtitle_bold,
+            subtitle_box_color: preset.subtitle_box_color,
+            subtitle_box_opacity: preset.subtitle_box_opacity
+        });
+    };
+
+    useEffect(() => {
+        if (!isOpen) return;
+        applyBrandKit(loadBrandKitStyle());
+    }, [isOpen]);
 
     if (!isOpen) return null;
 
@@ -35,7 +186,10 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                 </button>
 
                 {/* Left: Preview */}
-                <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] max-h-[600px]">
+                <div
+                    className={`flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative w-full mx-auto max-h-[600px] ${isLandscape ? 'max-w-[640px]' : 'max-w-[360px]'}`}
+                    style={{ aspectRatio: isLandscape ? '16 / 9' : '9 / 16' }}
+                >
                      <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
                      
                      {/* Subtitle Overlay Preview */}
@@ -56,21 +210,47 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 maxWidth: '80%' 
                             }} 
                         >
-                            This is how your subtitles<br/>will appear on the video
+                            Así se verán tus subtítulos<br/>en el video
                         </span>
                      </div>
                 </div>
 
                 {/* Right: Controls */}
                 <div className="w-full md:w-80 flex flex-col">
-                    <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
-                        <Type className="text-primary" /> Auto Subtitles
-                    </h3>
+                    <div className="flex items-start justify-between gap-3 mb-6">
+                        <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                            <Type className="text-primary" /> Subtítulos automáticos
+                        </h3>
+                        <button
+                            type="button"
+                            onClick={() => applyBrandKit(loadBrandKitStyle())}
+                            className="px-2 py-1 rounded-lg text-[10px] bg-white/10 border border-white/20 text-zinc-200 hover:bg-white/15 uppercase tracking-wider"
+                            title="Recargar estilo de subtítulos desde el kit de marca"
+                        >
+                            {`Kit: ${brandKitName}`}
+                        </button>
+                    </div>
 
                     <div className="space-y-6 flex-1">
+                        <div>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 block">Preajustes</label>
+                            <div className="grid grid-cols-2 gap-2">
+                                {CAPTION_STYLE_PRESETS.map((preset) => (
+                                    <button
+                                        key={preset.id}
+                                        type="button"
+                                        onClick={() => applyCaptionPreset(preset.id)}
+                                        className="text-[11px] px-2 py-2 rounded-lg border border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10 text-left"
+                                    >
+                                        {preset.name}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
                         {/* Position Selector */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Position</label>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Posición</label>
                             <div className="grid grid-cols-1 gap-2">
                                 <button 
                                     onClick={() => setPosition('top')}
@@ -79,7 +259,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     <div className="w-8 h-8 rounded-lg bg-black/50 border border-white/10 flex items-start justify-center pt-1">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
                                     </div>
-                                    <span className="font-medium">Top</span>
+                                    <span className="font-medium">Arriba</span>
                                 </button>
                                 
                                 <button 
@@ -89,7 +269,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     <div className="w-8 h-8 rounded-lg bg-black/50 border border-white/10 flex items-center justify-center">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
                                     </div>
-                                    <span className="font-medium">Center</span>
+                                    <span className="font-medium">Centro</span>
                                 </button>
                                 
                                 <button 
@@ -99,7 +279,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     <div className="w-8 h-8 rounded-lg bg-black/50 border border-white/10 flex items-end justify-center pb-1">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
                                     </div>
-                                    <span className="font-medium">Bottom</span>
+                                    <span className="font-medium">Abajo</span>
                                 </button>
                             </div>
                         </div>
@@ -245,11 +425,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         className="w-full py-4 mt-6 bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-400 hover:to-orange-400 text-black font-bold rounded-xl shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
                     >
                         {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Type size={20} />}
-                        {isProcessing ? 'Generating...' : 'Generate Subtitles'}
+                        {isProcessing ? 'Generando...' : 'Generar subtítulos'}
                     </button>
                     
                     <p className="text-[10px] text-zinc-500 text-center mt-3">
-                        Uses AI word-level timestamps to sync perfectly.
+                        Usa timestamps por palabra para sincronizar con precisión.
                     </p>
                 </div>
             </div>

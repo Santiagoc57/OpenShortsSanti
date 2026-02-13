@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Youtube, Upload, FileVideo, X, CheckCircle2, Settings2 } from 'lucide-react';
 
-const MEDIA_INPUT_STORAGE_KEY = 'mediaInputPresetV1';
+const MEDIA_INPUT_STORAGE_KEY = 'mediaInputPresetV2';
 
 const ALLOWED_VALUES = {
     language: ['auto', 'es', 'en', 'pt', 'fr', 'de', 'it'],
     whisperBackend: ['openai', 'faster'],
-    whisperModel: ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3', 'distil-large-v3'],
+    whisperModel: ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3'],
     ffmpegPreset: ['ultrafast', 'fast', 'medium'],
     aspectRatio: ['9:16', '16:9'],
     clipLengthTarget: ['short', 'balanced', 'long']
@@ -26,8 +26,7 @@ const MODEL_OPTIONS_BY_BACKEND = {
         { value: 'small', label: 'small (mejor precisión)' },
         { value: 'medium', label: 'medium (alta precisión)' },
         { value: 'large-v2', label: 'large-v2 (muy alta precisión)' },
-        { value: 'large-v3', label: 'large-v3 (recomendado Colab)' },
-        { value: 'distil-large-v3', label: 'distil-large-v3 (rápido + preciso)' }
+        { value: 'large-v3', label: 'large-v3 (recomendado Colab / Español)' }
     ]
 };
 
@@ -39,8 +38,8 @@ const CONTENT_PRESETS = [
         settings: {
             clipLengthTarget: 'balanced',
             clipCount: 6,
-            whisperBackend: 'openai',
-            whisperModel: 'base',
+            whisperBackend: 'faster',
+            whisperModel: 'large-v3',
             wordTimestamps: true
         }
     },
@@ -51,8 +50,8 @@ const CONTENT_PRESETS = [
         settings: {
             clipLengthTarget: 'long',
             clipCount: 5,
-            whisperBackend: 'openai',
-            whisperModel: 'small',
+            whisperBackend: 'faster',
+            whisperModel: 'large-v3',
             wordTimestamps: true,
             ffmpegPreset: 'medium',
             ffmpegCrf: 21
@@ -65,8 +64,8 @@ const CONTENT_PRESETS = [
         settings: {
             clipLengthTarget: 'balanced',
             clipCount: 6,
-            whisperBackend: 'openai',
-            whisperModel: 'small',
+            whisperBackend: 'faster',
+            whisperModel: 'large-v3',
             wordTimestamps: true,
             ffmpegPreset: 'medium',
             ffmpegCrf: 22
@@ -79,8 +78,8 @@ const CONTENT_PRESETS = [
         settings: {
             clipLengthTarget: 'balanced',
             clipCount: 7,
-            whisperBackend: 'openai',
-            whisperModel: 'base',
+            whisperBackend: 'faster',
+            whisperModel: 'large-v3',
             wordTimestamps: true,
             ffmpegPreset: 'fast',
             ffmpegCrf: 22
@@ -98,8 +97,8 @@ const TEMPLATE_PRESETS = [
             aspectRatio: '9:16',
             clipLengthTarget: 'balanced',
             clipCount: 6,
-            whisperBackend: 'openai',
-            whisperModel: 'base',
+            whisperBackend: 'faster',
+            whisperModel: 'large-v3',
             wordTimestamps: true,
             ffmpegPreset: 'fast',
             ffmpegCrf: 23
@@ -114,8 +113,8 @@ const TEMPLATE_PRESETS = [
             aspectRatio: '9:16',
             clipLengthTarget: 'short',
             clipCount: 7,
-            whisperBackend: 'openai',
-            whisperModel: 'small',
+            whisperBackend: 'faster',
+            whisperModel: 'large-v3',
             wordTimestamps: true,
             ffmpegPreset: 'medium',
             ffmpegCrf: 21
@@ -132,7 +131,7 @@ const TEMPLATE_PRESETS = [
             clipCount: 8,
             whisperBackend: 'faster',
             whisperModel: 'base',
-            wordTimestamps: false,
+            wordTimestamps: true,
             ffmpegPreset: 'fast',
             ffmpegCrf: 24
         }
@@ -146,8 +145,8 @@ const TEMPLATE_PRESETS = [
             aspectRatio: '9:16',
             clipLengthTarget: 'short',
             clipCount: 9,
-            whisperBackend: 'openai',
-            whisperModel: 'small',
+            whisperBackend: 'faster',
+            whisperModel: 'large-v3',
             wordTimestamps: true,
             ffmpegPreset: 'fast',
             ffmpegCrf: 20
@@ -162,8 +161,8 @@ const TEMPLATE_PRESETS = [
             aspectRatio: '16:9',
             clipLengthTarget: 'long',
             clipCount: 5,
-            whisperBackend: 'openai',
-            whisperModel: 'base',
+            whisperBackend: 'faster',
+            whisperModel: 'large-v3',
             wordTimestamps: true,
             ffmpegPreset: 'medium',
             ffmpegCrf: 21
@@ -172,6 +171,18 @@ const TEMPLATE_PRESETS = [
 ];
 
 const WHISPER_OPTION_PRESETS = [
+    {
+        id: 'faster_balanced',
+        name: 'Faster Balanced (Default)',
+        subtitle: 'faster + large-v3 + timestamps',
+        settings: {
+            whisperBackend: 'faster',
+            whisperModel: 'large-v3',
+            wordTimestamps: true,
+            ffmpegPreset: 'fast',
+            ffmpegCrf: 23
+        }
+    },
     {
         id: 'colab_pro',
         name: 'Colab Pro',
@@ -199,11 +210,11 @@ const WHISPER_OPTION_PRESETS = [
     {
         id: 'rapido',
         name: 'Rápido',
-        subtitle: 'faster + tiny + sin timestamps',
+        subtitle: 'faster + tiny + transcripción',
         settings: {
             whisperBackend: 'faster',
             whisperModel: 'tiny',
-            wordTimestamps: false,
+            wordTimestamps: true,
             ffmpegPreset: 'ultrafast',
             ffmpegCrf: 25
         }
@@ -266,7 +277,7 @@ function loadStoredMediaInputConfig() {
             selectedContentPreset: CONTENT_PRESETS.some((p) => p.id === parsed.selectedContentPreset) ? parsed.selectedContentPreset : 'general',
             selectedWhisperOption: (WHISPER_OPTION_PRESETS.some((p) => p.id === parsed.selectedWhisperOption) || parsed.selectedWhisperOption === 'custom')
                 ? parsed.selectedWhisperOption
-                : 'colab_pro'
+                : 'faster_balanced'
         };
     } catch (error) {
         console.warn('Failed to load media input config:', error);
@@ -290,7 +301,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [clipLengthTarget, setClipLengthTarget] = useState(initialConfig?.clipLengthTarget ?? 'balanced');
     const [selectedTemplate, setSelectedTemplate] = useState(initialConfig?.selectedTemplate ?? 'default');
     const [selectedContentPreset, setSelectedContentPreset] = useState(initialConfig?.selectedContentPreset ?? 'general');
-    const [selectedWhisperOption, setSelectedWhisperOption] = useState(initialConfig?.selectedWhisperOption ?? 'colab_pro');
+    const [selectedWhisperOption, setSelectedWhisperOption] = useState(initialConfig?.selectedWhisperOption ?? 'faster_balanced');
     const [showConfigModal, setShowConfigModal] = useState(false);
     const whisperModelOptions = MODEL_OPTIONS_BY_BACKEND[whisperBackend] || MODEL_OPTIONS_BY_BACKEND.openai;
 
@@ -707,8 +718,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                             }}
                                             className={modalInputClass}
                                         >
-                                            <option value="openai">openai-whisper (más estable)</option>
-                                            <option value="faster">faster-whisper (recomendado Colab)</option>
+                                            <option value="faster">faster-whisper (predeterminado)</option>
+                                            <option value="openai">openai-whisper (compatibilidad)</option>
                                         </select>
                                     </div>
                                     <div className="space-y-2">

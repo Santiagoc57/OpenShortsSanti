@@ -1,27 +1,73 @@
-// Configuration for API endpoints
-// If VITE_API_URL is set (e.g. in production), use it.
-// Otherwise, default to empty string which means relative paths (proxied in dev).
+const API_BASE_OVERRIDE_KEY = 'openshorts_api_base_url';
 
-export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+const extractFirstUrlCandidate = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const match = raw.match(/https?:\/\/[^\s"')]+/i);
+    if (match?.[0]) return match[0];
+    if (/^[a-z0-9.-]+\.[a-z]{2,}(\/.*)?$/i.test(raw)) return `https://${raw}`;
+    return raw;
+};
+
+export const normalizeApiBaseUrl = (value) => {
+    const candidate = extractFirstUrlCandidate(value);
+    if (!candidate) return '';
+    try {
+        const url = new URL(candidate);
+        const pathname = url.pathname === '/' ? '' : url.pathname.replace(/\/+$/, '');
+        return `${url.origin}${pathname}`;
+    } catch (_) {
+        if (/^https?:\/\//i.test(candidate)) {
+            return candidate.replace(/\/+$/, '');
+        }
+        return '';
+    }
+};
+
+const readStoredApiBaseUrl = () => {
+    if (typeof window === 'undefined') return '';
+    return normalizeApiBaseUrl(window.localStorage.getItem(API_BASE_OVERRIDE_KEY) || '');
+};
+
+const readEnvApiBaseUrl = () => normalizeApiBaseUrl(import.meta.env.VITE_API_URL || '');
+
+export const getApiBaseUrl = () => {
+    const stored = readStoredApiBaseUrl();
+    if (stored) return stored;
+    return readEnvApiBaseUrl();
+};
+
+export const setApiBaseUrl = (value) => {
+    const normalized = normalizeApiBaseUrl(value);
+    if (typeof window !== 'undefined') {
+        if (normalized) {
+            window.localStorage.setItem(API_BASE_OVERRIDE_KEY, normalized);
+        } else {
+            window.localStorage.removeItem(API_BASE_OVERRIDE_KEY);
+        }
+        window.dispatchEvent(new CustomEvent('openshorts-api-base-url-changed', { detail: { apiBaseUrl: normalized } }));
+    }
+    return normalized;
+};
 
 export const getApiUrl = (path) => {
     if (path.startsWith('http')) return path;
-    // Ensure path starts with / if not present
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-    return `${API_BASE_URL}${normalizedPath}`;
+    const apiBase = getApiBaseUrl();
+    return `${apiBase}${normalizedPath}`;
 };
 
-const isNgrokBaseUrl = () => {
-    if (!API_BASE_URL) return false;
-    return API_BASE_URL.includes('ngrok');
+const isNgrokBaseUrl = (apiBase) => {
+    if (!apiBase) return false;
+    return apiBase.includes('ngrok');
 };
 
 export const apiFetch = (path, options = {}) => {
     const url = getApiUrl(path);
     const headers = new Headers(options.headers || {});
+    const apiBase = getApiBaseUrl();
 
-    // Avoid ngrok browser warning HTML page on XHR/fetch requests.
-    if (isNgrokBaseUrl()) {
+    if (isNgrokBaseUrl(apiBase)) {
         headers.set('ngrok-skip-browser-warning', 'true');
     }
 
