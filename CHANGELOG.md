@@ -2,6 +2,24 @@
 
 ## 2026-02-16
 
+### Agregado: Highlight Reel compuesto (multi-momento viral)
+- Que cambiamos:
+  - Se agrego `POST /api/highlight/reel` en `app.py`.
+  - El backend ahora arma un reel unico con varios momentos top por `virality_score`.
+  - Se aplica diversidad temporal para evitar tomar solo momentos solapados o demasiado cercanos.
+  - Se ajusta la duracion de cada momento para cumplir una duracion objetivo del reel final.
+  - Se renderizan segmentos intermedios y luego se concatenan en un MP4 final.
+  - El resultado se persiste en metadata y en `job.result`:
+    - `highlight_reels`
+    - `latest_highlight_reel`
+  - En `dashboard/src/App.jsx` se agrego:
+    - Boton `Generar highlight reel`.
+    - Preview/reproduccion del reel generado.
+    - Atajos de `Abrir video` y `Descargar`.
+- Para que sirve:
+  - Convierte momentos aislados en una pieza teaser con narrativa de varios hooks.
+  - Ayuda a invitar a la audiencia a ver el podcast/video completo.
+
 ### Agregado: Layout multiple tipo Split (2 personas)
 - Que cambiamos:
   - Se agrego `layout_mode` con opcion `split` en `POST /api/recut`.

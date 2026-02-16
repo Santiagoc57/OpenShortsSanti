@@ -3243,6 +3243,170 @@ def _safe_slug(value: str, fallback: str = "asset") -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value or "")).strip("_")
     return cleaned or fallback
 
+def _ffmpeg_concat_escape(path: str) -> str:
+    return str(path or "").replace("\\", "\\\\").replace(" ", "\\ ").replace("'", "\\'")
+
+def _select_highlight_reel_segments(
+    normalized_clips: List[Dict[str, Any]],
+    output_dir: str,
+    max_segments: int,
+    target_duration: float,
+    min_segment_seconds: float,
+    max_segment_seconds: float,
+    min_gap_seconds: float
+) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    safe_max_segments = max(1, min(12, int(max_segments)))
+    safe_target_duration = max(8.0, min(240.0, _safe_float(target_duration, 50.0)))
+    safe_min_segment = max(1.0, min(20.0, _safe_float(min_segment_seconds, 4.5)))
+    safe_max_segment = max(safe_min_segment, min(35.0, _safe_float(max_segment_seconds, 11.0)))
+    safe_min_gap = max(0.0, min(80.0, _safe_float(min_gap_seconds, 7.0)))
+
+    for i, clip in enumerate(normalized_clips):
+        clip_index = int(_safe_float(clip.get("clip_index", i), i))
+        clip_path = _clip_file_path_from_payload(output_dir, clip, i + 1)
+        if not clip_path:
+            continue
+
+        timeline_start = max(0.0, _safe_float(clip.get("start", 0.0), 0.0))
+        timeline_end = max(timeline_start, _safe_float(clip.get("end", timeline_start), timeline_start))
+        timeline_duration = max(0.0, timeline_end - timeline_start)
+        source_duration = _probe_media_duration_seconds(clip_path)
+        if source_duration <= 0:
+            source_duration = timeline_duration
+        if source_duration <= 0.8:
+            continue
+
+        score = max(0.0, min(100.0, _safe_float(clip.get("virality_score", 0.0), 0.0)))
+        confidence = max(0.0, min(1.0, _safe_float(clip.get("selection_confidence", score / 100.0), score / 100.0)))
+        cap = min(safe_max_segment, source_duration)
+        if cap <= 0.8:
+            continue
+        floor = min(cap, safe_min_segment)
+        score_norm = score / 100.0
+        desired = min(
+            cap,
+            max(floor, safe_min_segment + ((safe_max_segment - safe_min_segment) * (0.45 + (score_norm * 0.55))))
+        )
+
+        local_start = 0.0
+        if source_duration - desired > 0.35:
+            # Avoid first-frame hard cuts but keep the hook very close to the start.
+            local_start = min(max(0.12, source_duration * 0.04), source_duration - desired)
+        local_end_cap = min(source_duration, local_start + cap)
+        desired = min(desired, max(0.8, local_end_cap - local_start))
+
+        candidates.append({
+            "clip_index": clip_index,
+            "score": score,
+            "confidence": confidence,
+            "timeline_start": timeline_start,
+            "timeline_end": timeline_end if timeline_end > timeline_start else timeline_start + source_duration,
+            "timeline_center": (timeline_start + (timeline_end if timeline_end > timeline_start else timeline_start + source_duration)) / 2.0,
+            "source_file_path": clip_path,
+            "source_duration": source_duration,
+            "segment_local_start": local_start,
+            "segment_local_end_cap": local_end_cap,
+            "segment_cap": cap,
+            "segment_floor": floor,
+            "desired": desired,
+            "title": _normalize_space(clip.get("video_title_for_youtube_short", "")) or f"Clip {clip_index + 1}",
+            "transcript_excerpt": _normalize_space(clip.get("transcript_excerpt", ""))[:260]
+        })
+
+    if not candidates:
+        return []
+
+    candidates.sort(
+        key=lambda c: (
+            c["score"],
+            c["confidence"],
+            -c["timeline_start"]
+        ),
+        reverse=True
+    )
+
+    selected: List[Dict[str, Any]] = []
+    selected_total = 0.0
+    for candidate in candidates:
+        if len(selected) >= safe_max_segments:
+            break
+
+        is_conflicting = False
+        for prev in selected:
+            overlap = _temporal_overlap_ratio(
+                candidate["timeline_start"],
+                candidate["timeline_end"],
+                prev["timeline_start"],
+                prev["timeline_end"]
+            )
+            centers_too_close = abs(candidate["timeline_center"] - prev["timeline_center"]) < safe_min_gap
+            if overlap >= 0.38 or centers_too_close:
+                is_conflicting = True
+                break
+        if is_conflicting:
+            continue
+
+        selected.append(dict(candidate))
+        selected_total += candidate["desired"]
+        if selected_total >= safe_target_duration:
+            break
+
+    if not selected:
+        selected = [dict(candidates[0])]
+        selected_total = selected[0]["desired"]
+
+    if len(selected) < safe_max_segments and selected_total < (safe_target_duration * 0.82):
+        selected_indexes = {int(item["clip_index"]) for item in selected}
+        for candidate in candidates:
+            if len(selected) >= safe_max_segments:
+                break
+            if int(candidate["clip_index"]) in selected_indexes:
+                continue
+            selected.append(dict(candidate))
+            selected_indexes.add(int(candidate["clip_index"]))
+            selected_total += candidate["desired"]
+            if selected_total >= safe_target_duration:
+                break
+
+    selected.sort(key=lambda item: item["timeline_start"])
+
+    planned: List[Dict[str, Any]] = []
+    remaining = safe_target_duration
+    for i, candidate in enumerate(selected):
+        if remaining <= 0.35:
+            break
+        reserve_for_rest = 0.0
+        for future in selected[i + 1:]:
+            reserve_for_rest += min(future["segment_floor"], future["segment_cap"])
+
+        max_for_this = min(candidate["segment_cap"], max(0.8, remaining - reserve_for_rest))
+        seg_duration = min(candidate["desired"], max_for_this)
+        floor = min(candidate["segment_floor"], candidate["segment_cap"])
+        if seg_duration < floor:
+            if planned:
+                if remaining - reserve_for_rest <= 0.8:
+                    continue
+                seg_duration = min(candidate["segment_cap"], max(0.8, remaining - reserve_for_rest))
+            else:
+                seg_duration = min(candidate["segment_cap"], max(0.8, remaining))
+
+        seg_duration = max(0.8, min(seg_duration, candidate["segment_cap"]))
+        local_start = max(0.0, min(candidate["segment_local_start"], candidate["source_duration"] - 0.8))
+        local_end = min(candidate["segment_local_end_cap"], local_start + seg_duration)
+        actual_duration = local_end - local_start
+        if actual_duration < 0.8:
+            continue
+
+        item = dict(candidate)
+        item["segment_local_start"] = round(local_start, 3)
+        item["segment_local_end"] = round(local_end, 3)
+        item["segment_duration"] = round(actual_duration, 3)
+        planned.append(item)
+        remaining -= actual_duration
+
+    return planned
+
 def _generate_clip_thumbnail(
     clip_path: str,
     output_dir: str,
@@ -3533,6 +3697,200 @@ async def export_pack(req: ExportPackRequest):
         "srt_files_added": srt_files_added,
         "thumbnail_files_added": thumbnail_files_added,
         "platform_variant_rows": len(platform_rows) if req.include_platform_variants else 0
+    }
+
+class HighlightReelRequest(BaseModel):
+    job_id: str
+    max_segments: int = 6
+    target_duration: float = 50.0
+    min_segment_seconds: float = 4.5
+    max_segment_seconds: float = 11.0
+    min_gap_seconds: float = 7.0
+
+@app.post("/api/highlight/reel")
+async def generate_highlight_reel(req: HighlightReelRequest):
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    if not os.path.isdir(output_dir):
+        raise HTTPException(status_code=404, detail="Job output directory not found")
+
+    metadata_files = sorted(glob.glob(os.path.join(output_dir, "*_metadata.json")))
+    if not metadata_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    metadata_path = metadata_files[0]
+
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read metadata: {e}")
+
+    job = jobs[req.job_id]
+    clips = []
+    if isinstance(job.get("result"), dict):
+        clips = job["result"].get("clips", []) or []
+    if not clips and isinstance(metadata, dict):
+        clips = metadata.get("shorts", []) or []
+    if not isinstance(clips, list) or not clips:
+        raise HTTPException(status_code=400, detail="No clips available to compose a highlight reel")
+
+    transcript_data = metadata.get("transcript") if isinstance(metadata, dict) else None
+    normalized_clips = [
+        _normalize_clip_payload(
+            dict(clip) if isinstance(clip, dict) else {},
+            i,
+            transcript=transcript_data
+        )
+        for i, clip in enumerate(clips)
+    ]
+
+    safe_max_segments = max(2, min(12, int(req.max_segments)))
+    safe_target_duration = max(12.0, min(240.0, _safe_float(req.target_duration, 50.0)))
+    safe_min_segment = max(1.0, min(20.0, _safe_float(req.min_segment_seconds, 4.5)))
+    safe_max_segment = max(safe_min_segment, min(35.0, _safe_float(req.max_segment_seconds, 11.0)))
+    safe_min_gap = max(0.0, min(80.0, _safe_float(req.min_gap_seconds, 7.0)))
+
+    planned_segments = _select_highlight_reel_segments(
+        normalized_clips=normalized_clips,
+        output_dir=output_dir,
+        max_segments=safe_max_segments,
+        target_duration=safe_target_duration,
+        min_segment_seconds=safe_min_segment,
+        max_segment_seconds=safe_max_segment,
+        min_gap_seconds=safe_min_gap
+    )
+    if len(planned_segments) < 2:
+        raise HTTPException(status_code=400, detail="Not enough diverse moments to compose a highlight reel")
+
+    ts = int(time.time())
+    reel_id = f"hl_{ts}_{uuid.uuid4().hex[:8]}"
+    out_name = f"highlight_reel_{ts}.mp4"
+    out_path = os.path.join(output_dir, out_name)
+    concat_file = os.path.join(output_dir, f"temp_highlight_concat_{ts}_{uuid.uuid4().hex[:6]}.txt")
+    temp_segments: List[str] = []
+    stitched_segments: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+
+    try:
+        for i, item in enumerate(planned_segments):
+            seg_path = os.path.join(output_dir, f"temp_highlight_seg_{ts}_{i+1}.mp4")
+            start_local = max(0.0, _safe_float(item.get("segment_local_start", 0.0), 0.0))
+            end_local = max(start_local + 0.08, _safe_float(item.get("segment_local_end", start_local + 0.08), start_local + 0.08))
+            cut_cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{start_local:.3f}",
+                "-to", f"{end_local:.3f}",
+                "-i", item["source_file_path"],
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
+                "-c:a", "aac",
+                "-movflags", "+faststart",
+                seg_path
+            ]
+            cut_run = subprocess.run(cut_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if cut_run.returncode != 0 or not os.path.exists(seg_path) or os.path.getsize(seg_path) <= 0:
+                warnings.append(f"Segmento {i + 1} no pudo renderizarse y se omitio.")
+                continue
+
+            dur = _probe_media_duration_seconds(seg_path)
+            if dur <= 0.4:
+                warnings.append(f"Segmento {i + 1} quedo demasiado corto y se omitio.")
+                try:
+                    os.remove(seg_path)
+                except Exception:
+                    pass
+                continue
+
+            temp_segments.append(seg_path)
+            stitched_segments.append({
+                "order": len(stitched_segments) + 1,
+                "clip_index": int(item["clip_index"]),
+                "virality_score": int(round(_safe_float(item.get("score", 0.0), 0.0))),
+                "clip_start": round(_safe_float(item.get("timeline_start", 0.0), 0.0), 3),
+                "clip_end": round(_safe_float(item.get("timeline_end", 0.0), 0.0), 3),
+                "segment_start_in_clip": round(start_local, 3),
+                "segment_end_in_clip": round(end_local, 3),
+                "duration": round(dur, 3),
+                "title": item.get("title", ""),
+                "transcript_excerpt": item.get("transcript_excerpt", "")
+            })
+
+        if len(temp_segments) < 2:
+            raise HTTPException(status_code=400, detail="No se pudieron renderizar suficientes segmentos para el highlight reel")
+
+        with open(concat_file, "w", encoding="utf-8") as f:
+            for path in temp_segments:
+                f.write(f"file {_ffmpeg_concat_escape(path)}\n")
+
+        concat_cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_file,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            out_path
+        ]
+        concat_run = subprocess.run(concat_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if concat_run.returncode != 0 or not os.path.exists(out_path):
+            raise HTTPException(status_code=500, detail=concat_run.stderr.decode("utf-8", errors="ignore") or "Failed to build highlight reel")
+    finally:
+        if os.path.exists(concat_file):
+            try:
+                os.remove(concat_file)
+            except Exception:
+                pass
+        for path in temp_segments:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+    final_duration = _probe_media_duration_seconds(out_path)
+    highlight_entry = {
+        "reel_id": reel_id,
+        "created_at": int(time.time()),
+        "video_url": f"/videos/{req.job_id}/{out_name}",
+        "duration": round(final_duration, 3),
+        "segments_count": len(stitched_segments),
+        "segments": stitched_segments,
+        "settings": {
+            "max_segments": safe_max_segments,
+            "target_duration": round(safe_target_duration, 3),
+            "min_segment_seconds": round(safe_min_segment, 3),
+            "max_segment_seconds": round(safe_max_segment, 3),
+            "min_gap_seconds": round(safe_min_gap, 3)
+        },
+        "warnings": warnings
+    }
+
+    if not isinstance(metadata.get("highlight_reels"), list):
+        metadata["highlight_reels"] = []
+    metadata["highlight_reels"].append(highlight_entry)
+    metadata["highlight_reels"] = metadata["highlight_reels"][-20:]
+    try:
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+    if not isinstance(job.get("result"), dict):
+        job["result"] = {"clips": normalized_clips}
+    result_payload = job["result"]
+    if not isinstance(result_payload.get("highlight_reels"), list):
+        result_payload["highlight_reels"] = []
+    result_payload["highlight_reels"].append(highlight_entry)
+    result_payload["highlight_reels"] = result_payload["highlight_reels"][-20:]
+    result_payload["latest_highlight_reel"] = highlight_entry
+
+    return {
+        "success": True,
+        "reel": highlight_entry,
+        "reel_url": highlight_entry["video_url"],
+        "warnings": warnings
     }
 
 @app.get("/api/transcript/{job_id}")

@@ -272,6 +272,7 @@ function App() {
   const [batchScheduleReport, setBatchScheduleReport] = useState(null);
   const [isExportingPack, setIsExportingPack] = useState(false);
   const [packExportReport, setPackExportReport] = useState(null);
+  const [isGeneratingHighlightReel, setIsGeneratingHighlightReel] = useState(false);
   const [clipSearchQuery, setClipSearchQuery] = useState('');
   const [isSearchingClips, setIsSearchingClips] = useState(false);
   const [clipSearchResults, setClipSearchResults] = useState([]);
@@ -655,6 +656,7 @@ function App() {
     setResults(null);
     setBatchScheduleReport(null);
     setPackExportReport(null);
+    setIsGeneratingHighlightReel(false);
     setClipSearchResults([]);
     setClipSearchKeywords([]);
     setClipSearchPhrases([]);
@@ -784,6 +786,7 @@ function App() {
     setResults(null);
     setBatchScheduleReport(null);
     setPackExportReport(null);
+    setIsGeneratingHighlightReel(false);
     setClipSearchResults([]);
     setClipSearchKeywords([]);
     setClipSearchPhrases([]);
@@ -825,6 +828,7 @@ function App() {
       setResults(null);
       setBatchScheduleReport(null);
       setPackExportReport(null);
+      setIsGeneratingHighlightReel(false);
       setStatus('processing');
       setProcessUiPhase('queued');
       setClipSearchResults([]);
@@ -952,6 +956,16 @@ function App() {
       return matchBand && matchTag;
     });
   }, [sortedClips, clipFilter, clipTagFilter]);
+
+  const latestHighlightReel = useMemo(() => {
+    if (results && typeof results.latest_highlight_reel === 'object' && results.latest_highlight_reel) {
+      return results.latest_highlight_reel;
+    }
+    if (Array.isArray(results?.highlight_reels) && results.highlight_reels.length > 0) {
+      return results.highlight_reels[results.highlight_reels.length - 1];
+    }
+    return null;
+  }, [results]);
 
   const applyBatchStrategy = (strategy) => {
     setBatchStrategy(strategy);
@@ -1164,6 +1178,52 @@ function App() {
       setLogs((prev) => [...prev, `Error exportando paquete: ${e.message}`]);
     } finally {
       setIsExportingPack(false);
+    }
+  };
+
+  const handleGenerateHighlightReel = async () => {
+    if (!jobId || !Array.isArray(sortedClips) || sortedClips.length < 2) return;
+    const suggestedSegments = Math.max(3, Math.min(8, Number(batchTopCount) || 5));
+    setIsGeneratingHighlightReel(true);
+    setLogs((prev) => [...prev, `Generando highlight reel (${suggestedSegments} momentos max)...`]);
+
+    try {
+      const res = await apiFetch('/api/highlight/reel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: jobId,
+          max_segments: suggestedSegments,
+          target_duration: 52,
+          min_segment_seconds: 4.5,
+          max_segment_seconds: 11,
+          min_gap_seconds: 7
+        })
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      const reel = data?.reel;
+      if (reel && typeof reel === 'object') {
+        setResults((prev) => {
+          const base = prev && typeof prev === 'object' ? prev : { clips: [] };
+          const existing = Array.isArray(base.highlight_reels) ? base.highlight_reels : [];
+          const deduped = reel.reel_id
+            ? existing.filter((item) => item?.reel_id !== reel.reel_id)
+            : existing;
+          return {
+            ...base,
+            highlight_reels: [...deduped, reel],
+            latest_highlight_reel: reel
+          };
+        });
+        setLogs((prev) => [...prev, `Highlight reel listo: ${reel.segments_count || '-'} momentos, ${reel.duration || '-'}s.`]);
+      } else {
+        setLogs((prev) => [...prev, 'Highlight reel generado, pero no se recibieron metadatos completos.']);
+      }
+    } catch (e) {
+      setLogs((prev) => [...prev, `Error generando highlight reel: ${e.message}`]);
+    } finally {
+      setIsGeneratingHighlightReel(false);
     }
   };
 
@@ -1617,6 +1677,7 @@ function App() {
     setIsPollingPaused(false);
     setProcessUiPhase('running');
     setResults(null);
+    setIsGeneratingHighlightReel(false);
     setLogs(['Cargando proyecto guardado...']);
     setProcessingMedia(null);
     try {
@@ -2796,6 +2857,14 @@ function App() {
                     >
                       {isExportingPack ? 'Exportando...' : 'Exportar paquete'}
                     </button>
+                    <button
+                      onClick={handleGenerateHighlightReel}
+                      disabled={isGeneratingHighlightReel || !jobId || status !== 'complete' || sortedClips.length < 2}
+                      className="text-xs bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 rounded-md px-2 py-1 hover:bg-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Compone un reel corto con varios momentos top para impulsar el video completo"
+                    >
+                      {isGeneratingHighlightReel ? 'Armando reel...' : 'Generar highlight reel'}
+                    </button>
                   </div>
                 )}
 
@@ -3118,6 +3187,47 @@ function App() {
                     {packExportReport.success === false
                       ? <p>{`Error exportando paquete: ${packExportReport.error}`}</p>
                       : <p>{`Paquete listo: ${packExportReport.video_files_added} videos, ${packExportReport.srt_files_added} SRT, ${packExportReport.thumbnail_files_added || 0} miniaturas, ${packExportReport.platform_variant_rows || 0} filas por plataforma, ${packExportReport.clips_in_manifest} clips en el manifiesto.`}</p>}
+                  </div>
+                )}
+                {latestHighlightReel?.video_url && (
+                  <div className="mb-4 rounded-lg border border-cyan-500/35 bg-cyan-500/10 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs text-cyan-200">
+                        {`Highlight reel: ${latestHighlightReel.segments_count || '-'} momentos | ${latestHighlightReel.duration || '-'}s`}
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <a
+                          href={getApiUrl(latestHighlightReel.video_url)}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[11px] bg-cyan-500/20 border border-cyan-400/40 text-cyan-200 rounded px-2 py-1 hover:bg-cyan-500/30"
+                        >
+                          Abrir video
+                        </a>
+                        <a
+                          href={getApiUrl(latestHighlightReel.video_url)}
+                          download
+                          className="text-[11px] bg-white/10 border border-white/20 text-zinc-100 rounded px-2 py-1 hover:bg-white/15"
+                        >
+                          Descargar
+                        </a>
+                      </div>
+                    </div>
+                    <video
+                      controls
+                      src={getApiUrl(latestHighlightReel.video_url)}
+                      className="mt-2 w-full max-h-[420px] rounded border border-white/10 bg-black/30"
+                    />
+                    {Array.isArray(latestHighlightReel.segments) && latestHighlightReel.segments.length > 0 && (
+                      <div className="mt-2 max-h-32 overflow-y-auto border border-white/10 rounded bg-black/20 divide-y divide-white/5">
+                        {latestHighlightReel.segments.slice(0, 8).map((segment, idx) => (
+                          <div key={`reel-segment-${segment.clip_index}-${idx}`} className="px-2 py-1.5 text-[11px] text-zinc-300 flex items-center justify-between gap-2">
+                            <span className="truncate">{segment.title || `Momento ${idx + 1}`}</span>
+                            <span className="shrink-0 text-zinc-500">{`${segment.duration || '-'}s | clip ${Number(segment.clip_index) + 1}`}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 
