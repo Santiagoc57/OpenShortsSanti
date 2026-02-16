@@ -52,6 +52,9 @@ LOCAL_EMBED_DIM = 256
 SEMANTIC_EMBED_MODEL = os.environ.get("SEMANTIC_EMBED_MODEL", "text-embedding-004")
 ALLOWED_ASPECT_RATIOS = {"9:16", "16:9"}
 ALLOWED_CLIP_LENGTH_TARGETS = {"short", "balanced", "long"}
+_SMART_REF_YOLO_MODEL = None
+_SMART_REF_YOLO_UNAVAILABLE = False
+_SMART_REF_FACE_CASCADE = None
 
 
 def normalize_aspect_ratio(raw_value: Optional[str], default: Optional[str] = None) -> Optional[str]:
@@ -125,34 +128,37 @@ def _even_int(value: float) -> int:
 # Keep manual pan intensity aligned with editor preview (ClipStudioModal.jsx).
 _LAYOUT_OFFSET_FACTOR = 0.35
 
-def _build_manual_layout_filter(
+def _normalize_layout_fit_mode(fit_mode: Optional[str]) -> str:
+    fit = str(fit_mode or "cover").strip().lower()
+    if fit not in {"cover", "contain"}:
+        fit = "cover"
+    return fit
+
+def _coerce_layout_zoom(value: Any, default: float = 1.0) -> float:
+    return max(0.5, min(2.5, _safe_float(value, default)))
+
+def _coerce_layout_offset(value: Any, default: float = 0.0) -> float:
+    return max(-100.0, min(100.0, _safe_float(value, default)))
+
+def _build_manual_layout_ops_for_target(
     in_w: int,
     in_h: int,
-    aspect_ratio: str,
+    out_w: int,
+    out_h: int,
     fit_mode: str = "cover",
     zoom: float = 1.0,
     offset_x: float = 0.0,
     offset_y: float = 0.0
-) -> Tuple[str, int, int]:
-    ratio_map = {"9:16": 9.0 / 16.0, "16:9": 16.0 / 9.0}
-    target_ratio = ratio_map.get(aspect_ratio, 9.0 / 16.0)
-    source_ratio = (in_w / in_h) if in_w > 0 and in_h > 0 else target_ratio
-
-    if source_ratio >= target_ratio:
-        out_h = _even_int(in_h)
-        out_w = _even_int(out_h * target_ratio)
-    else:
-        out_w = _even_int(in_w)
-        out_h = _even_int(out_w / target_ratio)
-
-    fit = str(fit_mode or "cover").strip().lower()
-    if fit not in {"cover", "contain"}:
-        fit = "cover"
-    z = max(0.5, min(2.5, _safe_float(zoom, 1.0)))
-    ox_raw = max(-100.0, min(100.0, _safe_float(offset_x, 0.0))) / 100.0
-    oy_raw = max(-100.0, min(100.0, _safe_float(offset_y, 0.0))) / 100.0
+) -> List[str]:
+    fit = _normalize_layout_fit_mode(fit_mode)
+    z = _coerce_layout_zoom(zoom, 1.0)
+    ox_raw = _coerce_layout_offset(offset_x, 0.0) / 100.0
+    oy_raw = _coerce_layout_offset(offset_y, 0.0) / 100.0
     ox = ox_raw * _LAYOUT_OFFSET_FACTOR
     oy = oy_raw * _LAYOUT_OFFSET_FACTOR
+
+    out_w = _even_int(out_w)
+    out_h = _even_int(out_h)
 
     if fit == "cover":
         base_scale = max(out_w / max(1, in_w), out_h / max(1, in_h))
@@ -188,7 +194,574 @@ def _build_manual_layout_filter(
         pad_y = max(0, min(max_pad_y, pad_y))
         filters.append(f"pad={out_w}:{out_h}:{pad_x}:{pad_y}:black")
 
+    return filters
+
+def _build_manual_layout_filter(
+    in_w: int,
+    in_h: int,
+    aspect_ratio: str,
+    fit_mode: str = "cover",
+    zoom: float = 1.0,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0
+) -> Tuple[str, int, int]:
+    ratio_map = {"9:16": 9.0 / 16.0, "16:9": 16.0 / 9.0}
+    target_ratio = ratio_map.get(aspect_ratio, 9.0 / 16.0)
+    source_ratio = (in_w / in_h) if in_w > 0 and in_h > 0 else target_ratio
+
+    if source_ratio >= target_ratio:
+        out_h = _even_int(in_h)
+        out_w = _even_int(out_h * target_ratio)
+    else:
+        out_w = _even_int(in_w)
+        out_h = _even_int(out_w / target_ratio)
+
+    filters = _build_manual_layout_ops_for_target(
+        in_w=in_w,
+        in_h=in_h,
+        out_w=out_w,
+        out_h=out_h,
+        fit_mode=fit_mode,
+        zoom=zoom,
+        offset_x=offset_x,
+        offset_y=offset_y
+    )
+
     return ",".join(filters), out_w, out_h
+
+def _build_split_layout_filter_complex(
+    in_w: int,
+    in_h: int,
+    aspect_ratio: str,
+    fit_mode: str = "cover",
+    zoom_a: float = 1.0,
+    offset_a_x: float = 0.0,
+    offset_a_y: float = 0.0,
+    zoom_b: float = 1.0,
+    offset_b_x: float = 0.0,
+    offset_b_y: float = 0.0
+) -> Tuple[str, int, int, str]:
+    target_ratio = _aspect_ratio_to_float(aspect_ratio)
+    out_w, out_h = _derive_output_dimensions(in_w, in_h, target_ratio)
+
+    split_stacked = str(aspect_ratio or "9:16") == "9:16"
+    if split_stacked:
+        pane_w = out_w
+        pane_h = _even_int(out_h / 2.0)
+        out_h = pane_h * 2
+        pane_a_ops = _build_manual_layout_ops_for_target(
+            in_w=in_w,
+            in_h=in_h,
+            out_w=pane_w,
+            out_h=pane_h,
+            fit_mode=fit_mode,
+            zoom=zoom_a,
+            offset_x=offset_a_x,
+            offset_y=offset_a_y
+        )
+        pane_b_ops = _build_manual_layout_ops_for_target(
+            in_w=in_w,
+            in_h=in_h,
+            out_w=pane_w,
+            out_h=pane_h,
+            fit_mode=fit_mode,
+            zoom=zoom_b,
+            offset_x=offset_b_x,
+            offset_y=offset_b_y
+        )
+        out_label = "vsplit_out"
+        filter_complex = (
+            f"[0:v]split=2[vsplit_a][vsplit_b];"
+            f"[vsplit_a]{','.join(pane_a_ops)}[vsplit_top];"
+            f"[vsplit_b]{','.join(pane_b_ops)}[vsplit_bottom];"
+            f"[vsplit_top][vsplit_bottom]vstack=inputs=2[{out_label}]"
+        )
+        return filter_complex, out_w, out_h, out_label
+
+    pane_w = _even_int(out_w / 2.0)
+    pane_h = out_h
+    out_w = pane_w * 2
+    pane_a_ops = _build_manual_layout_ops_for_target(
+        in_w=in_w,
+        in_h=in_h,
+        out_w=pane_w,
+        out_h=pane_h,
+        fit_mode=fit_mode,
+        zoom=zoom_a,
+        offset_x=offset_a_x,
+        offset_y=offset_a_y
+    )
+    pane_b_ops = _build_manual_layout_ops_for_target(
+        in_w=in_w,
+        in_h=in_h,
+        out_w=pane_w,
+        out_h=pane_h,
+        fit_mode=fit_mode,
+        zoom=zoom_b,
+        offset_x=offset_b_x,
+        offset_y=offset_b_y
+    )
+    out_label = "hsplit_out"
+    filter_complex = (
+        f"[0:v]split=2[hsplit_a][hsplit_b];"
+        f"[hsplit_a]{','.join(pane_a_ops)}[hsplit_left];"
+        f"[hsplit_b]{','.join(pane_b_ops)}[hsplit_right];"
+        f"[hsplit_left][hsplit_right]hstack=inputs=2[{out_label}]"
+    )
+    return filter_complex, out_w, out_h, out_label
+
+def _aspect_ratio_to_float(aspect_ratio: str) -> float:
+    ratio_map = {"9:16": 9.0 / 16.0, "16:9": 16.0 / 9.0}
+    return ratio_map.get(str(aspect_ratio or "9:16"), 9.0 / 16.0)
+
+def _derive_output_dimensions(in_w: int, in_h: int, target_ratio: float) -> Tuple[int, int]:
+    source_ratio = (in_w / in_h) if in_w > 0 and in_h > 0 else target_ratio
+    if source_ratio >= target_ratio:
+        out_h = _even_int(in_h)
+        out_w = _even_int(out_h * target_ratio)
+    else:
+        out_w = _even_int(in_w)
+        out_h = _even_int(out_w / max(1e-6, target_ratio))
+    return out_w, out_h
+
+def _smart_ref_get_yolo_model():
+    global _SMART_REF_YOLO_MODEL, _SMART_REF_YOLO_UNAVAILABLE
+    if _SMART_REF_YOLO_UNAVAILABLE:
+        return None
+    if _SMART_REF_YOLO_MODEL is None:
+        try:
+            from ultralytics import YOLO
+            _SMART_REF_YOLO_MODEL = YOLO("yolov8n.pt")
+        except Exception as e:
+            _SMART_REF_YOLO_UNAVAILABLE = True
+            _SMART_REF_YOLO_MODEL = None
+            print(f"⚠️ SmartReframe: YOLO unavailable ({e})")
+    return _SMART_REF_YOLO_MODEL
+
+def _smart_ref_get_face_cascade():
+    global _SMART_REF_FACE_CASCADE
+    if _SMART_REF_FACE_CASCADE is not None:
+        return _SMART_REF_FACE_CASCADE
+    try:
+        import cv2
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        if cascade.empty():
+            _SMART_REF_FACE_CASCADE = None
+        else:
+            _SMART_REF_FACE_CASCADE = cascade
+    except Exception:
+        _SMART_REF_FACE_CASCADE = None
+    return _SMART_REF_FACE_CASCADE
+
+def _smart_ref_enclosing_box(boxes: List[List[int]]) -> Optional[List[int]]:
+    if not boxes:
+        return None
+    min_x = min(int(b[0]) for b in boxes)
+    min_y = min(int(b[1]) for b in boxes)
+    max_x = max(int(b[2]) for b in boxes)
+    max_y = max(int(b[3]) for b in boxes)
+    return [min_x, min_y, max_x, max_y]
+
+def _smart_ref_detect_people(frame) -> List[Dict[str, Any]]:
+    detections: List[Dict[str, Any]] = []
+    try:
+        import cv2
+    except Exception:
+        return detections
+
+    frame_h, frame_w = frame.shape[:2]
+    face_cascade = _smart_ref_get_face_cascade()
+    model = _smart_ref_get_yolo_model()
+
+    if model is not None:
+        try:
+            results = model([frame], verbose=False)
+            for result in results:
+                boxes = getattr(result, "boxes", None)
+                if boxes is None:
+                    continue
+                for box in boxes:
+                    try:
+                        cls_id = int(float(box.cls[0]))
+                    except Exception:
+                        cls_id = -1
+                    if cls_id != 0:
+                        continue
+
+                    conf = 0.0
+                    try:
+                        conf = float(box.conf[0])
+                    except Exception:
+                        conf = 0.0
+                    if conf < 0.20:
+                        continue
+
+                    try:
+                        x1f, y1f, x2f, y2f = [float(v) for v in box.xyxy[0].tolist()]
+                    except Exception:
+                        continue
+
+                    x1 = max(0, min(frame_w - 1, int(round(x1f))))
+                    y1 = max(0, min(frame_h - 1, int(round(y1f))))
+                    x2 = max(x1 + 1, min(frame_w, int(round(x2f))))
+                    y2 = max(y1 + 1, min(frame_h, int(round(y2f))))
+                    person_box = [x1, y1, x2, y2]
+                    face_box = None
+
+                    if face_cascade is not None:
+                        try:
+                            roi = frame[y1:y2, x1:x2]
+                            if roi.size > 0:
+                                gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                                faces = face_cascade.detectMultiScale(
+                                    gray,
+                                    scaleFactor=1.1,
+                                    minNeighbors=5,
+                                    minSize=(24, 24)
+                                )
+                                if len(faces) > 0:
+                                    largest = sorted(faces, key=lambda f: int(f[2]) * int(f[3]), reverse=True)[0]
+                                    fx, fy, fw, fh = [int(v) for v in largest]
+                                    face_box = [x1 + fx, y1 + fy, x1 + fx + fw, y1 + fy + fh]
+                        except Exception:
+                            face_box = None
+
+                    detections.append({"person_box": person_box, "face_box": face_box})
+        except Exception as e:
+            print(f"⚠️ SmartReframe: YOLO inference failed ({e})")
+
+    if detections:
+        return detections
+
+    # Fallback: detect faces on full frame and synthesize person boxes.
+    if face_cascade is not None:
+        try:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24))
+            for fx, fy, fw, fh in faces[:4]:
+                fx, fy, fw, fh = int(fx), int(fy), int(fw), int(fh)
+                pad_x = int(round(fw * 0.70))
+                pad_y = int(round(fh * 1.30))
+                px1 = max(0, fx - pad_x)
+                py1 = max(0, fy - pad_y)
+                px2 = min(frame_w, fx + fw + pad_x)
+                py2 = min(frame_h, fy + fh + pad_y)
+                detections.append({
+                    "person_box": [px1, py1, px2, py2],
+                    "face_box": [fx, fy, fx + fw, fy + fh]
+                })
+        except Exception:
+            return []
+
+    return detections
+
+def _smart_ref_decide_strategy(
+    scene_analysis: List[Dict[str, Any]],
+    frame_w: int,
+    frame_h: int,
+    target_ratio: float
+) -> Tuple[str, Optional[List[int]]]:
+    count = len(scene_analysis)
+    if count == 0:
+        return "LETTERBOX", None
+    if count == 1:
+        chosen = scene_analysis[0].get("face_box") or scene_analysis[0].get("person_box")
+        return "TRACK", chosen
+
+    person_boxes = [obj.get("person_box") for obj in scene_analysis if isinstance(obj.get("person_box"), list)]
+    group_box = _smart_ref_enclosing_box(person_boxes)
+    if not group_box:
+        return "LETTERBOX", None
+
+    source_ratio = (frame_w / max(1, frame_h))
+    if source_ratio >= target_ratio:
+        max_crop_width = frame_h * target_ratio
+        group_width = max(1.0, float(group_box[2] - group_box[0]))
+        if group_width <= (max_crop_width * 1.02):
+            return "TRACK", group_box
+        return "LETTERBOX", None
+
+    max_crop_height = frame_w / max(1e-6, target_ratio)
+    group_height = max(1.0, float(group_box[3] - group_box[1]))
+    if group_height <= (max_crop_height * 1.02):
+        return "TRACK", group_box
+    return "LETTERBOX", None
+
+def _smart_ref_crop_box(
+    target_box: List[int],
+    frame_w: int,
+    frame_h: int,
+    target_ratio: float
+) -> Tuple[int, int, int, int]:
+    source_ratio = frame_w / max(1, frame_h)
+    if source_ratio >= target_ratio:
+        crop_h = frame_h
+        crop_w = _even_int(crop_h * target_ratio)
+    else:
+        crop_w = frame_w
+        crop_h = _even_int(crop_w / max(1e-6, target_ratio))
+
+    crop_w = max(2, min(frame_w, crop_w))
+    crop_h = max(2, min(frame_h, crop_h))
+
+    center_x = (float(target_box[0]) + float(target_box[2])) / 2.0
+    center_y = (float(target_box[1]) + float(target_box[3])) / 2.0
+
+    x1 = int(round(center_x - (crop_w / 2.0)))
+    y1 = int(round(center_y - (crop_h / 2.0)))
+
+    x1 = max(0, min(max(0, frame_w - crop_w), x1))
+    y1 = max(0, min(max(0, frame_h - crop_h), y1))
+    x2 = x1 + crop_w
+    y2 = y1 + crop_h
+    return x1, y1, x2, y2
+
+def _smart_ref_letterbox_frame(frame, out_w: int, out_h: int, np_mod):
+    import cv2
+    in_h, in_w = frame.shape[:2]
+    if in_w <= 0 or in_h <= 0:
+        return np_mod.zeros((out_h, out_w, 3), dtype=np_mod.uint8)
+
+    scale = min(out_w / max(1, in_w), out_h / max(1, in_h))
+    scaled_w = max(2, _even_int(in_w * scale))
+    scaled_h = max(2, _even_int(in_h * scale))
+    resized = cv2.resize(frame, (scaled_w, scaled_h))
+
+    canvas = np_mod.zeros((out_h, out_w, 3), dtype=np_mod.uint8)
+    pad_x = max(0, (out_w - scaled_w) // 2)
+    pad_y = max(0, (out_h - scaled_h) // 2)
+    canvas[pad_y:pad_y + scaled_h, pad_x:pad_x + scaled_w] = resized
+    return canvas
+
+def _smart_ref_detect_scene_ranges(
+    video_path: str,
+    total_frames: int,
+    frame_skip: int = 1,
+    downscale: int = 0
+) -> List[Tuple[int, int]]:
+    safe_total = max(1, int(total_frames or 1))
+    try:
+        from scenedetect import VideoManager, SceneManager
+        from scenedetect.detectors import ContentDetector
+
+        video_manager = VideoManager([video_path])
+        scene_manager = SceneManager()
+        scene_manager.add_detector(ContentDetector())
+        if int(downscale or 0) > 0:
+            video_manager.set_downscale_factor(max(1, int(downscale)))
+        else:
+            video_manager.set_downscale_factor()
+        video_manager.start()
+        scene_manager.detect_scenes(
+            frame_source=video_manager,
+            show_progress=False,
+            frame_skip=max(0, int(frame_skip or 0))
+        )
+        scene_list = scene_manager.get_scene_list()
+        video_manager.release()
+    except Exception as e:
+        print(f"⚠️ SmartReframe: scene detection fallback ({e})")
+        return [(0, safe_total)]
+
+    ranges: List[Tuple[int, int]] = []
+    for start_tc, end_tc in scene_list:
+        try:
+            start_f = max(0, int(start_tc.get_frames()))
+            end_f = max(start_f + 1, int(end_tc.get_frames()))
+            start_f = min(start_f, safe_total - 1)
+            end_f = min(safe_total, max(start_f + 1, end_f))
+            ranges.append((start_f, end_f))
+        except Exception:
+            continue
+
+    if not ranges:
+        return [(0, safe_total)]
+
+    ranges.sort(key=lambda item: item[0])
+    normalized: List[Tuple[int, int]] = []
+    cursor = 0
+    for start_f, end_f in ranges:
+        start = max(cursor, int(start_f))
+        end = min(safe_total, int(end_f))
+        if end <= start:
+            continue
+        normalized.append((start, end))
+        cursor = end
+
+    if not normalized:
+        return [(0, safe_total)]
+    if normalized[-1][1] < safe_total:
+        normalized.append((normalized[-1][1], safe_total))
+    return normalized
+
+def _smart_ref_analyze_scene(video_path: str, start_frame: int, end_frame: int) -> List[Dict[str, Any]]:
+    try:
+        import cv2
+    except Exception:
+        return []
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+    middle = max(0, int(start_frame + max(0, end_frame - start_frame) // 2))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, middle)
+    ok, frame = cap.read()
+    cap.release()
+    if not ok or frame is None:
+        return []
+    return _smart_ref_detect_people(frame)
+
+def _render_smart_reframe_video(
+    input_video_path: str,
+    output_path: str,
+    aspect_ratio: str,
+    scene_frame_skip: int = 1,
+    scene_downscale: int = 0
+) -> Dict[str, Any]:
+    try:
+        import cv2
+        import numpy as np
+    except Exception as e:
+        raise RuntimeError(f"OpenCV/Numpy unavailable for smart reframe: {e}") from e
+
+    cap = cv2.VideoCapture(input_video_path)
+    if not cap.isOpened():
+        raise RuntimeError("Could not open clipped video for smart reframe.")
+
+    in_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    in_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if in_w <= 0 or in_h <= 0:
+        cap.release()
+        raise RuntimeError("Invalid input dimensions for smart reframe.")
+    if fps <= 0:
+        fps = 30.0
+    if total_frames <= 0:
+        total_frames = max(1, int(round(_probe_media_duration_seconds(input_video_path) * fps)))
+
+    target_ratio = _aspect_ratio_to_float(aspect_ratio)
+    out_w, out_h = _derive_output_dimensions(in_w, in_h, target_ratio)
+    scene_ranges = _smart_ref_detect_scene_ranges(
+        input_video_path,
+        total_frames=total_frames,
+        frame_skip=max(0, int(scene_frame_skip or 0)),
+        downscale=max(0, int(scene_downscale or 0))
+    )
+
+    scene_plan: List[Dict[str, Any]] = []
+    for start_f, end_f in scene_ranges:
+        analysis = _smart_ref_analyze_scene(input_video_path, start_f, end_f)
+        strategy, target_box = _smart_ref_decide_strategy(
+            analysis,
+            frame_w=in_w,
+            frame_h=in_h,
+            target_ratio=target_ratio
+        )
+        scene_plan.append({
+            "start_frame": int(start_f),
+            "end_frame": int(end_f),
+            "strategy": strategy,
+            "target_box": target_box
+        })
+
+    if not scene_plan:
+        scene_plan = [{
+            "start_frame": 0,
+            "end_frame": max(1, total_frames),
+            "strategy": "LETTERBOX",
+            "target_box": None
+        }]
+
+    ffmpeg_cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{out_w}x{out_h}",
+        "-r", f"{fps:.6f}",
+        "-i", "-",
+        "-i", input_video_path,
+        "-map", "0:v:0",
+        "-map", "1:a:0?",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf", "23",
+        "-preset", "fast",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        "-shortest",
+        output_path
+    ]
+    ffmpeg_process = subprocess.Popen(
+        ffmpeg_cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE
+    )
+
+    frame_index = 0
+    scene_index = 0
+    dropped_frames = 0
+    last_output_frame = None
+    broken_pipe = False
+
+    while cap.isOpened():
+        ok, frame = cap.read()
+        if not ok:
+            break
+        while scene_index < len(scene_plan) - 1 and frame_index >= scene_plan[scene_index + 1]["start_frame"]:
+            scene_index += 1
+
+        scene = scene_plan[scene_index]
+        try:
+            if scene["strategy"] == "TRACK" and scene["target_box"]:
+                x1, y1, x2, y2 = _smart_ref_crop_box(scene["target_box"], in_w, in_h, target_ratio)
+                cropped = frame[y1:y2, x1:x2]
+                if cropped.size == 0:
+                    raise RuntimeError("Empty crop region")
+                output_frame = cv2.resize(cropped, (out_w, out_h))
+            else:
+                output_frame = _smart_ref_letterbox_frame(frame, out_w, out_h, np)
+            last_output_frame = output_frame
+        except Exception:
+            dropped_frames += 1
+            if last_output_frame is not None:
+                output_frame = last_output_frame
+            else:
+                output_frame = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+
+        try:
+            if ffmpeg_process.stdin is None:
+                broken_pipe = True
+                break
+            ffmpeg_process.stdin.write(output_frame.tobytes())
+        except Exception:
+            broken_pipe = True
+            break
+        frame_index += 1
+
+    cap.release()
+    try:
+        if ffmpeg_process.stdin:
+            ffmpeg_process.stdin.close()
+    except Exception:
+        pass
+    stderr_text = ffmpeg_process.stderr.read().decode(errors="ignore") if ffmpeg_process.stderr else ""
+    ffmpeg_process.wait()
+    if ffmpeg_process.returncode != 0 or broken_pipe:
+        raise RuntimeError(stderr_text or "Smart reframe encoding failed.")
+
+    track_scenes = sum(1 for s in scene_plan if s["strategy"] == "TRACK")
+    letterbox_scenes = sum(1 for s in scene_plan if s["strategy"] == "LETTERBOX")
+    return {
+        "scene_count": len(scene_plan),
+        "track_scenes": track_scenes,
+        "letterbox_scenes": letterbox_scenes,
+        "frame_skip": max(0, int(scene_frame_skip or 0)),
+        "downscale": max(0, int(scene_downscale or 0)),
+        "dropped_frames": int(dropped_frames)
+    }
 
 def _extract_waveform_peaks(media_path: str, buckets: int = 240, sample_rate: int = 11025) -> List[float]:
     safe_buckets = max(32, min(2000, int(buckets)))
@@ -2267,10 +2840,20 @@ class RecutRequest(BaseModel):
     start: float
     end: float
     aspect_ratio: Optional[str] = None
+    layout_mode: Optional[str] = "single"  # single | split
     fit_mode: Optional[str] = "cover"  # cover | contain
     zoom: Optional[float] = 1.0        # 0.5 .. 2.5
     offset_x: Optional[float] = 0.0    # -100 .. 100
     offset_y: Optional[float] = 0.0    # -100 .. 100
+    split_zoom_a: Optional[float] = 1.0
+    split_offset_a_x: Optional[float] = 0.0
+    split_offset_a_y: Optional[float] = 0.0
+    split_zoom_b: Optional[float] = 1.0
+    split_offset_b_x: Optional[float] = 0.0
+    split_offset_b_y: Optional[float] = 0.0
+    auto_smart_reframe: Optional[bool] = False
+    smart_scene_frame_skip: Optional[int] = 1
+    smart_scene_downscale: Optional[int] = 0
 
 def _parse_form_bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -2297,12 +2880,27 @@ async def recut_clip(req: RecutRequest):
     if req.start < 0 or req.end <= req.start:
         raise HTTPException(status_code=400, detail="Invalid start/end times.")
     aspect_ratio = normalize_aspect_ratio(req.aspect_ratio, default="9:16")
-    fit_mode = str(req.fit_mode or "cover").strip().lower()
-    if fit_mode not in {"cover", "contain"}:
-        fit_mode = "cover"
-    zoom = max(0.5, min(2.5, _safe_float(req.zoom, 1.0)))
-    offset_x = max(-100.0, min(100.0, _safe_float(req.offset_x, 0.0)))
-    offset_y = max(-100.0, min(100.0, _safe_float(req.offset_y, 0.0)))
+    layout_mode = str(req.layout_mode or "single").strip().lower()
+    if layout_mode not in {"single", "split"}:
+        layout_mode = "single"
+    fit_mode = _normalize_layout_fit_mode(req.fit_mode)
+    zoom = _coerce_layout_zoom(req.zoom, 1.0)
+    offset_x = _coerce_layout_offset(req.offset_x, 0.0)
+    offset_y = _coerce_layout_offset(req.offset_y, 0.0)
+    split_zoom_a = _coerce_layout_zoom(req.split_zoom_a, zoom)
+    split_offset_a_x = _coerce_layout_offset(req.split_offset_a_x, offset_x)
+    split_offset_a_y = _coerce_layout_offset(req.split_offset_a_y, offset_y)
+    split_zoom_b = _coerce_layout_zoom(req.split_zoom_b, zoom)
+    split_offset_b_x = _coerce_layout_offset(req.split_offset_b_x, -offset_x)
+    split_offset_b_y = _coerce_layout_offset(req.split_offset_b_y, offset_y)
+    auto_smart_requested = bool(req.auto_smart_reframe)
+    smart_scene_frame_skip = max(0, min(12, int(req.smart_scene_frame_skip if req.smart_scene_frame_skip is not None else 1)))
+    smart_scene_downscale = max(0, min(8, int(req.smart_scene_downscale if req.smart_scene_downscale is not None else 0)))
+    auto_smart_applied = False
+    smart_summary: Optional[Dict[str, Any]] = None
+    recut_warnings: List[str] = []
+    if layout_mode == "split" and auto_smart_requested:
+        recut_warnings.append("Auto smart reframe no se aplica en layout Split; se usó split manual.")
 
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -2326,33 +2924,75 @@ async def recut_clip(req: RecutRequest):
     if res.returncode != 0:
         raise HTTPException(status_code=500, detail=res.stderr.decode())
 
-    # Re-process with target aspect ratio + optional manual layout transform
+    # Re-process with target aspect ratio + optional smart reframe/manual layout transform
     try:
         in_w, in_h = _probe_video_dimensions(temp_cut)
         if in_w <= 0 or in_h <= 0:
             raise HTTPException(status_code=500, detail="Could not inspect recut dimensions.")
 
-        vf_filter, out_w, out_h = _build_manual_layout_filter(
-            in_w=in_w,
-            in_h=in_h,
-            aspect_ratio=aspect_ratio,
-            fit_mode=fit_mode,
-            zoom=zoom,
-            offset_x=offset_x,
-            offset_y=offset_y
-        )
-        recut_cmd = [
-            "ffmpeg", "-y",
-            "-i", temp_cut,
-            "-vf", vf_filter,
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
-            "-c:a", "aac",
-            "-movflags", "+faststart",
-            out_path
-        ]
-        recut_run = subprocess.run(recut_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        if recut_run.returncode != 0:
-            raise HTTPException(status_code=500, detail=recut_run.stderr.decode() or "Failed to apply manual layout recut.")
+        if auto_smart_requested and layout_mode == "single":
+            try:
+                smart_summary = _render_smart_reframe_video(
+                    input_video_path=temp_cut,
+                    output_path=out_path,
+                    aspect_ratio=aspect_ratio,
+                    scene_frame_skip=smart_scene_frame_skip,
+                    scene_downscale=smart_scene_downscale
+                )
+                auto_smart_applied = True
+            except Exception as smart_error:
+                recut_warnings.append(
+                    "Auto smart reframe no estuvo disponible para este clip; se aplicó layout manual."
+                )
+                print(f"⚠️ SmartReframe fallback to manual: {smart_error}")
+
+        if not auto_smart_applied:
+            if layout_mode == "split":
+                filter_complex, out_w, out_h, out_label = _build_split_layout_filter_complex(
+                    in_w=in_w,
+                    in_h=in_h,
+                    aspect_ratio=aspect_ratio,
+                    fit_mode=fit_mode,
+                    zoom_a=split_zoom_a,
+                    offset_a_x=split_offset_a_x,
+                    offset_a_y=split_offset_a_y,
+                    zoom_b=split_zoom_b,
+                    offset_b_x=split_offset_b_x,
+                    offset_b_y=split_offset_b_y
+                )
+                recut_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", temp_cut,
+                    "-filter_complex", filter_complex,
+                    "-map", f"[{out_label}]",
+                    "-map", "0:a?",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
+                    "-c:a", "aac",
+                    "-movflags", "+faststart",
+                    out_path
+                ]
+            else:
+                vf_filter, out_w, out_h = _build_manual_layout_filter(
+                    in_w=in_w,
+                    in_h=in_h,
+                    aspect_ratio=aspect_ratio,
+                    fit_mode=fit_mode,
+                    zoom=zoom,
+                    offset_x=offset_x,
+                    offset_y=offset_y
+                )
+                recut_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", temp_cut,
+                    "-vf", vf_filter,
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
+                    "-c:a", "aac",
+                    "-movflags", "+faststart",
+                    out_path
+                ]
+            recut_run = subprocess.run(recut_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if recut_run.returncode != 0:
+                raise HTTPException(status_code=500, detail=recut_run.stderr.decode() or "Failed to apply manual layout recut.")
     finally:
         if os.path.exists(temp_cut):
             os.remove(temp_cut)
@@ -2368,10 +3008,22 @@ async def recut_clip(req: RecutRequest):
                 clips[req.clip_index]['start'] = req.start
                 clips[req.clip_index]['end'] = req.end
                 clips[req.clip_index]['aspect_ratio'] = aspect_ratio
+                clips[req.clip_index]['layout_mode'] = layout_mode
                 clips[req.clip_index]['layout_fit_mode'] = fit_mode
                 clips[req.clip_index]['layout_zoom'] = round(zoom, 3)
                 clips[req.clip_index]['layout_offset_x'] = round(offset_x, 3)
                 clips[req.clip_index]['layout_offset_y'] = round(offset_y, 3)
+                clips[req.clip_index]['layout_split_zoom_a'] = round(split_zoom_a, 3)
+                clips[req.clip_index]['layout_split_offset_a_x'] = round(split_offset_a_x, 3)
+                clips[req.clip_index]['layout_split_offset_a_y'] = round(split_offset_a_y, 3)
+                clips[req.clip_index]['layout_split_zoom_b'] = round(split_zoom_b, 3)
+                clips[req.clip_index]['layout_split_offset_b_x'] = round(split_offset_b_x, 3)
+                clips[req.clip_index]['layout_split_offset_b_y'] = round(split_offset_b_y, 3)
+                clips[req.clip_index]['layout_auto_smart'] = bool(auto_smart_applied)
+                if smart_summary:
+                    clips[req.clip_index]['layout_smart_summary'] = smart_summary
+                elif 'layout_smart_summary' in clips[req.clip_index]:
+                    del clips[req.clip_index]['layout_smart_summary']
                 with open(json_files[0], 'w') as f:
                     json.dump(data, f, indent=2)
         except Exception:
@@ -2383,12 +3035,35 @@ async def recut_clip(req: RecutRequest):
         job['result']['clips'][req.clip_index]['start'] = req.start
         job['result']['clips'][req.clip_index]['end'] = req.end
         job['result']['clips'][req.clip_index]['aspect_ratio'] = aspect_ratio
+        job['result']['clips'][req.clip_index]['layout_mode'] = layout_mode
         job['result']['clips'][req.clip_index]['layout_fit_mode'] = fit_mode
         job['result']['clips'][req.clip_index]['layout_zoom'] = round(zoom, 3)
         job['result']['clips'][req.clip_index]['layout_offset_x'] = round(offset_x, 3)
         job['result']['clips'][req.clip_index]['layout_offset_y'] = round(offset_y, 3)
+        job['result']['clips'][req.clip_index]['layout_split_zoom_a'] = round(split_zoom_a, 3)
+        job['result']['clips'][req.clip_index]['layout_split_offset_a_x'] = round(split_offset_a_x, 3)
+        job['result']['clips'][req.clip_index]['layout_split_offset_a_y'] = round(split_offset_a_y, 3)
+        job['result']['clips'][req.clip_index]['layout_split_zoom_b'] = round(split_zoom_b, 3)
+        job['result']['clips'][req.clip_index]['layout_split_offset_b_x'] = round(split_offset_b_x, 3)
+        job['result']['clips'][req.clip_index]['layout_split_offset_b_y'] = round(split_offset_b_y, 3)
+        job['result']['clips'][req.clip_index]['layout_auto_smart'] = bool(auto_smart_applied)
+        if smart_summary:
+            job['result']['clips'][req.clip_index]['layout_smart_summary'] = smart_summary
+        elif 'layout_smart_summary' in job['result']['clips'][req.clip_index]:
+            del job['result']['clips'][req.clip_index]['layout_smart_summary']
 
-    return {"success": True, "new_video_url": f"/videos/{req.job_id}/{out_name}"}
+    return {
+        "success": True,
+        "new_video_url": f"/videos/{req.job_id}/{out_name}",
+        "start": req.start,
+        "end": req.end,
+        "layout_mode": layout_mode,
+        "split_layout_applied": layout_mode == "split" and not auto_smart_applied,
+        "auto_smart_reframe_requested": bool(auto_smart_requested),
+        "auto_smart_reframe_applied": bool(auto_smart_applied),
+        "smart_reframe_summary": smart_summary,
+        "warnings": recut_warnings
+    }
 
 @app.post("/api/music")
 async def add_background_music(

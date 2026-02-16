@@ -234,6 +234,13 @@ const formatSubtitleText = (text, emphasize = false, punctuationOn = true) => {
   return emphasize ? base.toUpperCase() : base;
 };
 
+const truncateInline = (value, maxChars = 84) => {
+  const clean = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  if (clean.length <= maxChars) return clean;
+  return `${clean.slice(0, Math.max(1, maxChars - 3)).trim()}...`;
+};
+
 const SettingToggle = ({ label, checked, onChange }) => (
   <div className="flex items-center justify-between rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2.5">
     <span className="text-sm text-slate-700 dark:text-slate-200">{label}</span>
@@ -414,13 +421,43 @@ export default function ClipStudioModal({
   const [layoutAspect, setLayoutAspect] = useState(clip?.aspect_ratio === '16:9' ? '16:9' : '9:16');
   const [layoutStart, setLayoutStart] = useState(Number(clip?.start || 0));
   const [layoutEnd, setLayoutEnd] = useState(Number(clip?.end || 0));
+  const [layoutPreRoll, setLayoutPreRoll] = useState(0);
+  const [layoutPostRoll, setLayoutPostRoll] = useState(0);
+  const [layoutMode, setLayoutMode] = useState(String(clip?.layout_mode || 'single').toLowerCase() === 'split' ? 'split' : 'single');
+  const [layoutAutoSmart, setLayoutAutoSmart] = useState(Boolean(clip?.layout_auto_smart));
   const [layoutFitMode, setLayoutFitMode] = useState(String(clip?.layout_fit_mode || 'cover').toLowerCase() === 'contain' ? 'contain' : 'cover');
   const [layoutZoom, setLayoutZoom] = useState(clamp(Number(clip?.layout_zoom || 1), 0.5, 2.5));
   const [layoutOffsetX, setLayoutOffsetX] = useState(clamp(Number(clip?.layout_offset_x || 0), -100, 100));
   const [layoutOffsetY, setLayoutOffsetY] = useState(clamp(Number(clip?.layout_offset_y || 0), -100, 100));
+  const [layoutSplitZoomA, setLayoutSplitZoomA] = useState(clamp(Number(clip?.layout_split_zoom_a ?? clip?.layout_zoom ?? 1), 0.5, 2.5));
+  const [layoutSplitOffsetAX, setLayoutSplitOffsetAX] = useState(clamp(Number(clip?.layout_split_offset_a_x ?? clip?.layout_offset_x ?? 0), -100, 100));
+  const [layoutSplitOffsetAY, setLayoutSplitOffsetAY] = useState(clamp(Number(clip?.layout_split_offset_a_y ?? clip?.layout_offset_y ?? 0), -100, 100));
+  const [layoutSplitZoomB, setLayoutSplitZoomB] = useState(clamp(Number(clip?.layout_split_zoom_b ?? clip?.layout_zoom ?? 1), 0.5, 2.5));
+  const [layoutSplitOffsetBX, setLayoutSplitOffsetBX] = useState(clamp(Number(clip?.layout_split_offset_b_x ?? (-(Number(clip?.layout_offset_x || 0)))), -100, 100));
+  const [layoutSplitOffsetBY, setLayoutSplitOffsetBY] = useState(clamp(Number(clip?.layout_split_offset_b_y ?? clip?.layout_offset_y ?? 0), -100, 100));
   const [isPanningLayout, setIsPanningLayout] = useState(false);
+  const isSplitLayout = layoutMode === 'split';
   const effectiveLayoutOffsetX = Number(layoutOffsetX || 0) * LAYOUT_OFFSET_FACTOR;
   const effectiveLayoutOffsetY = Number(layoutOffsetY || 0) * LAYOUT_OFFSET_FACTOR;
+  const manualLayoutObjectPosition = useMemo(() => {
+    const x = clamp(50 + Number(effectiveLayoutOffsetX || 0), 0, 100);
+    const y = clamp(50 + Number(effectiveLayoutOffsetY || 0), 0, 100);
+    return `${x.toFixed(3)}% ${y.toFixed(3)}%`;
+  }, [effectiveLayoutOffsetX, effectiveLayoutOffsetY]);
+  const effectiveSplitOffsetAX = Number(layoutSplitOffsetAX || 0) * LAYOUT_OFFSET_FACTOR;
+  const effectiveSplitOffsetAY = Number(layoutSplitOffsetAY || 0) * LAYOUT_OFFSET_FACTOR;
+  const effectiveSplitOffsetBX = Number(layoutSplitOffsetBX || 0) * LAYOUT_OFFSET_FACTOR;
+  const effectiveSplitOffsetBY = Number(layoutSplitOffsetBY || 0) * LAYOUT_OFFSET_FACTOR;
+  const splitObjectPositionA = useMemo(() => {
+    const x = clamp(50 + Number(effectiveSplitOffsetAX || 0), 0, 100);
+    const y = clamp(50 + Number(effectiveSplitOffsetAY || 0), 0, 100);
+    return `${x.toFixed(3)}% ${y.toFixed(3)}%`;
+  }, [effectiveSplitOffsetAX, effectiveSplitOffsetAY]);
+  const splitObjectPositionB = useMemo(() => {
+    const x = clamp(50 + Number(effectiveSplitOffsetBX || 0), 0, 100);
+    const y = clamp(50 + Number(effectiveSplitOffsetBY || 0), 0, 100);
+    return `${x.toFixed(3)}% ${y.toFixed(3)}%`;
+  }, [effectiveSplitOffsetBX, effectiveSplitOffsetBY]);
   const effectiveCaptionOffsetX = Number(captionOffsetX || 0) * CAPTION_OFFSET_FACTOR;
   const effectiveCaptionOffsetY = Number(captionOffsetY || 0) * CAPTION_OFFSET_FACTOR;
 
@@ -439,6 +476,7 @@ export default function ClipStudioModal({
   const [previewVideoUrl, setPreviewVideoUrl] = useState(String(currentVideoUrl || ''));
   const [videoLoadError, setVideoLoadError] = useState('');
   const previewVideoRef = useRef(null);
+  const previewSplitVideoRef = useRef(null);
   const previewSurfaceRef = useRef(null);
   const subtitleListRef = useRef(null);
   const transcriptListRef = useRef(null);
@@ -541,6 +579,29 @@ export default function ClipStudioModal({
       return text && t >= start && t <= (end + 0.04);
     }) || null;
   }, [filteredTranscript, previewAbsoluteTime]);
+
+  const previewClipTitle = useMemo(() => {
+    const socialTitle = String(clip?.video_title_for_youtube_short || '').trim();
+    if (socialTitle) return socialTitle;
+    const genericTitle = String(clip?.title || '').trim();
+    if (genericTitle) return genericTitle;
+    const filename = extractFilename(currentVideoUrl) || extractFilename(clip?.video_url || '');
+    if (filename) return filename;
+    return `Clip n.o ${Number(clipIndex || 0) + 1}`;
+  }, [clip?.video_title_for_youtube_short, clip?.title, clip?.video_url, currentVideoUrl, clipIndex]);
+
+  const previewSocialDescription = useMemo(() => {
+    return [
+      String(clip?.video_description_for_tiktok || '').trim(),
+      String(clip?.video_description_for_instagram || '').trim(),
+      String(clip?.score_reason || '').trim()
+    ].find(Boolean) || '';
+  }, [clip?.video_description_for_tiktok, clip?.video_description_for_instagram, clip?.score_reason]);
+
+  const previewHeaderSubline = useMemo(() => {
+    if (!previewSocialDescription) return 'Sin descripción social para este clip.';
+    return truncateInline(previewSocialDescription, 220);
+  }, [previewSocialDescription]);
 
   const filteredSubtitleEntries = useMemo(() => {
     const q = String(subtitleSearch || '').trim().toLowerCase();
@@ -757,10 +818,20 @@ export default function ClipStudioModal({
     setLayoutAspect(clip?.aspect_ratio === '16:9' ? '16:9' : '9:16');
     setLayoutStart(Number(clip?.start || 0));
     setLayoutEnd(Number(clip?.end || 0));
+    setLayoutPreRoll(0);
+    setLayoutPostRoll(0);
+    setLayoutMode(String(clip?.layout_mode || 'single').toLowerCase() === 'split' ? 'split' : 'single');
+    setLayoutAutoSmart(Boolean(clip?.layout_auto_smart));
     setLayoutFitMode(String(clip?.layout_fit_mode || 'cover').toLowerCase() === 'contain' ? 'contain' : 'cover');
     setLayoutZoom(clamp(Number(clip?.layout_zoom || 1), 0.5, 2.5));
     setLayoutOffsetX(clamp(Number(clip?.layout_offset_x || 0), -100, 100));
     setLayoutOffsetY(clamp(Number(clip?.layout_offset_y || 0), -100, 100));
+    setLayoutSplitZoomA(clamp(Number(clip?.layout_split_zoom_a ?? clip?.layout_zoom ?? 1), 0.5, 2.5));
+    setLayoutSplitOffsetAX(clamp(Number(clip?.layout_split_offset_a_x ?? clip?.layout_offset_x ?? 0), -100, 100));
+    setLayoutSplitOffsetAY(clamp(Number(clip?.layout_split_offset_a_y ?? clip?.layout_offset_y ?? 0), -100, 100));
+    setLayoutSplitZoomB(clamp(Number(clip?.layout_split_zoom_b ?? clip?.layout_zoom ?? 1), 0.5, 2.5));
+    setLayoutSplitOffsetBX(clamp(Number(clip?.layout_split_offset_b_x ?? (-(Number(clip?.layout_offset_x || 0)))), -100, 100));
+    setLayoutSplitOffsetBY(clamp(Number(clip?.layout_split_offset_b_y ?? clip?.layout_offset_y ?? 0), -100, 100));
     setMusicEnabled(false);
     setMusicFile(null);
     setMusicVolume(0.18);
@@ -788,10 +859,18 @@ export default function ClipStudioModal({
     clip?.start,
     clip?.end,
     clip?.aspect_ratio,
+    clip?.layout_mode,
+    clip?.layout_auto_smart,
     clip?.layout_fit_mode,
     clip?.layout_zoom,
     clip?.layout_offset_x,
     clip?.layout_offset_y,
+    clip?.layout_split_zoom_a,
+    clip?.layout_split_offset_a_x,
+    clip?.layout_split_offset_a_y,
+    clip?.layout_split_zoom_b,
+    clip?.layout_split_offset_b_x,
+    clip?.layout_split_offset_b_y,
     clip?.caption_position,
     clip?.caption_offset_x,
     clip?.caption_offset_y
@@ -849,8 +928,10 @@ export default function ClipStudioModal({
         setPreviewVideoUrl(objectUrl);
       } catch (err) {
         if (cancelled) return;
+        // Fallback silencioso: aun si falla la descarga manual, el elemento <video>
+        // puede cargar la URL remota directamente.
         setPreviewVideoUrl(sourceUrl);
-        setVideoLoadError(`No se pudo cargar vista previa remota (${err.message}).`);
+        setVideoLoadError('');
       }
     })();
 
@@ -865,6 +946,41 @@ export default function ClipStudioModal({
     if (!video) return;
     video.playbackRate = Number(playbackRate || 1);
   }, [playbackRate, isOpen]);
+
+  useEffect(() => {
+    const splitVideo = previewSplitVideoRef.current;
+    if (!splitVideo) return;
+    splitVideo.playbackRate = Number(playbackRate || 1);
+  }, [playbackRate, isOpen, isSplitLayout]);
+
+  useEffect(() => {
+    const primary = previewVideoRef.current;
+    const secondary = previewSplitVideoRef.current;
+    if (!secondary) return;
+    if (!isSplitLayout) {
+      secondary.pause();
+      return;
+    }
+    if (!primary) return;
+
+    try {
+      const targetTime = Number(primary.currentTime || previewCurrentTime || 0);
+      if (Math.abs(Number(secondary.currentTime || 0) - targetTime) > 0.05) {
+        secondary.currentTime = targetTime;
+      }
+    } catch (_) {
+      // Ignore sync errors from browsers while seeking.
+    }
+
+    if (primary.paused) {
+      secondary.pause();
+      return;
+    }
+    const playPromise = secondary.play();
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => {});
+    }
+  }, [isSplitLayout, previewCurrentTime, previewPlaying, previewVideoUrl, isOpen]);
 
   const onSubtitleEntryChange = (entryId, nextText) => {
     setSubtitleEntries((prev) => prev.map((entry) => (
@@ -911,21 +1027,50 @@ export default function ClipStudioModal({
     setError('');
     let workingFile = extractFilename(currentVideoUrl);
     let resultingUrl = currentVideoUrl;
+    const normalizedLayoutMode = isSplitLayout ? 'split' : 'single';
+    const autoSmartRequest = normalizedLayoutMode === 'single' ? Boolean(layoutAutoSmart) : false;
+    let appliedLayoutMode = normalizedLayoutMode;
+    let appliedLayoutAutoSmart = autoSmartRequest;
 
     try {
       const clipStart = Number(clip?.start || 0);
       const clipEnd = Number(clip?.end || clipStart);
+      let appliedClipStart = clipStart;
+      let appliedClipEnd = clipEnd;
+      const safePreRoll = clamp(Number(layoutPreRoll || 0), 0, 3);
+      const safePostRoll = clamp(Number(layoutPostRoll || 0), 0, 3);
+      const requestedStart = Math.max(0, Number(layoutStart || 0) - safePreRoll);
+      const requestedEnd = Math.max(requestedStart + 0.08, Number(layoutEnd || requestedStart) + safePostRoll);
+      if (!Number.isFinite(requestedStart) || !Number.isFinite(requestedEnd) || requestedEnd <= requestedStart) {
+        throw new Error('Rango inválido. Ajusta inicio/fin o pre/post roll.');
+      }
+      const originalLayoutMode = String(clip?.layout_mode || 'single').toLowerCase() === 'split' ? 'split' : 'single';
+      const originalAutoSmart = originalLayoutMode === 'single' ? Boolean(clip?.layout_auto_smart) : false;
       const originalFitMode = String(clip?.layout_fit_mode || 'cover').toLowerCase() === 'contain' ? 'contain' : 'cover';
       const originalZoom = clamp(Number(clip?.layout_zoom || 1), 0.5, 2.5);
       const originalOffsetX = clamp(Number(clip?.layout_offset_x || 0), -100, 100);
       const originalOffsetY = clamp(Number(clip?.layout_offset_y || 0), -100, 100);
+      const originalSplitZoomA = clamp(Number(clip?.layout_split_zoom_a ?? clip?.layout_zoom ?? 1), 0.5, 2.5);
+      const originalSplitOffsetAX = clamp(Number(clip?.layout_split_offset_a_x ?? clip?.layout_offset_x ?? 0), -100, 100);
+      const originalSplitOffsetAY = clamp(Number(clip?.layout_split_offset_a_y ?? clip?.layout_offset_y ?? 0), -100, 100);
+      const originalSplitZoomB = clamp(Number(clip?.layout_split_zoom_b ?? clip?.layout_zoom ?? 1), 0.5, 2.5);
+      const originalSplitOffsetBX = clamp(Number(clip?.layout_split_offset_b_x ?? (-(Number(clip?.layout_offset_x || 0)))), -100, 100);
+      const originalSplitOffsetBY = clamp(Number(clip?.layout_split_offset_b_y ?? clip?.layout_offset_y ?? 0), -100, 100);
       const needsRecut = layoutAspect !== (clip?.aspect_ratio === '16:9' ? '16:9' : '9:16')
-        || Math.abs(Number(layoutStart) - clipStart) > 0.01
-        || Math.abs(Number(layoutEnd) - clipEnd) > 0.01
+        || Math.abs(requestedStart - clipStart) > 0.01
+        || Math.abs(requestedEnd - clipEnd) > 0.01
+        || normalizedLayoutMode !== originalLayoutMode
+        || autoSmartRequest !== originalAutoSmart
         || layoutFitMode !== originalFitMode
         || Math.abs(Number(layoutZoom) - originalZoom) > 0.001
         || Math.abs(Number(layoutOffsetX) - originalOffsetX) > 0.01
-        || Math.abs(Number(layoutOffsetY) - originalOffsetY) > 0.01;
+        || Math.abs(Number(layoutOffsetY) - originalOffsetY) > 0.01
+        || Math.abs(Number(layoutSplitZoomA) - originalSplitZoomA) > 0.001
+        || Math.abs(Number(layoutSplitOffsetAX) - originalSplitOffsetAX) > 0.01
+        || Math.abs(Number(layoutSplitOffsetAY) - originalSplitOffsetAY) > 0.01
+        || Math.abs(Number(layoutSplitZoomB) - originalSplitZoomB) > 0.001
+        || Math.abs(Number(layoutSplitOffsetBX) - originalSplitOffsetBX) > 0.01
+        || Math.abs(Number(layoutSplitOffsetBY) - originalSplitOffsetBY) > 0.01;
 
       if (needsRecut) {
         const recutRes = await apiFetch('/api/recut', {
@@ -934,13 +1079,21 @@ export default function ClipStudioModal({
           body: JSON.stringify({
             job_id: jobId,
             clip_index: clipIndex,
-            start: Number(layoutStart),
-            end: Number(layoutEnd),
+            start: requestedStart,
+            end: requestedEnd,
             aspect_ratio: layoutAspect,
+            layout_mode: normalizedLayoutMode,
+            auto_smart_reframe: autoSmartRequest,
             fit_mode: layoutFitMode,
             zoom: Number(layoutZoom),
             offset_x: Number(layoutOffsetX),
-            offset_y: Number(layoutOffsetY)
+            offset_y: Number(layoutOffsetY),
+            split_zoom_a: Number(layoutSplitZoomA),
+            split_offset_a_x: Number(layoutSplitOffsetAX),
+            split_offset_a_y: Number(layoutSplitOffsetAY),
+            split_zoom_b: Number(layoutSplitZoomB),
+            split_offset_b_x: Number(layoutSplitOffsetBX),
+            split_offset_b_y: Number(layoutSplitOffsetBY)
           })
         });
         if (!recutRes.ok) throw new Error(await recutRes.text());
@@ -948,6 +1101,21 @@ export default function ClipStudioModal({
         if (recutData?.new_video_url) {
           resultingUrl = getApiUrl(recutData.new_video_url);
           workingFile = extractFilename(recutData.new_video_url);
+        }
+        if (Number.isFinite(Number(recutData?.start)) && Number.isFinite(Number(recutData?.end))) {
+          appliedClipStart = Number(recutData.start);
+          appliedClipEnd = Number(recutData.end);
+        } else {
+          appliedClipStart = requestedStart;
+          appliedClipEnd = requestedEnd;
+        }
+        if (typeof recutData?.layout_mode === 'string') {
+          appliedLayoutMode = String(recutData.layout_mode).toLowerCase() === 'split' ? 'split' : 'single';
+          setLayoutMode(appliedLayoutMode);
+        }
+        if (typeof recutData?.auto_smart_reframe_applied === 'boolean') {
+          appliedLayoutAutoSmart = Boolean(recutData.auto_smart_reframe_applied);
+          setLayoutAutoSmart(appliedLayoutAutoSmart);
         }
       }
 
@@ -1007,6 +1175,21 @@ export default function ClipStudioModal({
       onApplied && onApplied({
         newVideoUrl: resultingUrl,
         clipPatch: {
+          start: appliedClipStart,
+          end: appliedClipEnd,
+          aspect_ratio: layoutAspect,
+          layout_mode: appliedLayoutMode,
+          layout_auto_smart: appliedLayoutAutoSmart,
+          layout_fit_mode: layoutFitMode,
+          layout_zoom: Number(layoutZoom),
+          layout_offset_x: Number(layoutOffsetX),
+          layout_offset_y: Number(layoutOffsetY),
+          layout_split_zoom_a: Number(layoutSplitZoomA),
+          layout_split_offset_a_x: Number(layoutSplitOffsetAX),
+          layout_split_offset_a_y: Number(layoutSplitOffsetAY),
+          layout_split_zoom_b: Number(layoutSplitZoomB),
+          layout_split_offset_b_x: Number(layoutSplitOffsetBX),
+          layout_split_offset_b_y: Number(layoutSplitOffsetBY),
           caption_position: position,
           caption_offset_x: Number(captionOffsetX),
           caption_offset_y: Number(captionOffsetY)
@@ -1088,6 +1271,8 @@ export default function ClipStudioModal({
 
   const startLayoutPan = (event) => {
     if (section !== 'layout') return;
+    if (isSplitLayout) return;
+    if (layoutAutoSmart) return;
     if (event.button !== 0) return;
     const surface = previewSurfaceRef.current;
     if (!surface) return;
@@ -1779,7 +1964,57 @@ export default function ClipStudioModal({
               {section === 'layout' && (
                 <div className="space-y-4">
                   <h3 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100">Editar layout</h3>
-                  <p className="text-xs text-zinc-500">Ajusta formato, rango, zoom y posición para evitar overlays de publicidad o centrar el encuadre manualmente.</p>
+                  <p className="text-xs text-zinc-500">Ajusta formato/rango y elige entre encuadre manual o auto smart reframe por escena.</p>
+
+                  <div>
+                    <p className="text-xs font-semibold text-zinc-500 mb-2">Modo de layout</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLayoutMode('single');
+                          setSavedPulse(false);
+                        }}
+                        className={`rounded-lg px-3 py-2 text-sm border ${layoutMode === 'single'
+                          ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300'
+                          : 'border-black/10 dark:border-white/10 text-zinc-700 dark:text-zinc-200'
+                        }`}
+                      >
+                        Single
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLayoutMode('split');
+                          setLayoutAutoSmart(false);
+                          setLayoutFitMode('cover');
+                          setSavedPulse(false);
+                        }}
+                        className={`rounded-lg px-3 py-2 text-sm border ${layoutMode === 'split'
+                          ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300'
+                          : 'border-black/10 dark:border-white/10 text-zinc-700 dark:text-zinc-200'
+                        }`}
+                      >
+                        Split (2 personas)
+                      </button>
+                    </div>
+                    <p className="mt-1 text-[11px] text-zinc-500">
+                      {layoutMode === 'split'
+                        ? 'Split usa dos paneles del mismo video con paneo independiente por panel.'
+                        : 'Single mantiene un único encuadre.'}
+                    </p>
+                  </div>
+
+                  {layoutMode === 'single' && (
+                    <SettingToggle
+                      label="Auto smart reframe (beta)"
+                      checked={layoutAutoSmart}
+                      onChange={() => {
+                        setLayoutAutoSmart((v) => !v);
+                        setSavedPulse(false);
+                      }}
+                    />
+                  )}
 
                   <div>
                     <p className="text-xs font-semibold text-zinc-500 mb-2">Formato</p>
@@ -1800,63 +2035,187 @@ export default function ClipStudioModal({
                     </div>
                   </div>
 
-                  <div>
-                    <p className="text-xs font-semibold text-zinc-500 mb-2">Ajuste de video</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      {['cover', 'contain'].map((mode) => (
-                        <button
-                          key={mode}
-                          type="button"
-                          onClick={() => setLayoutFitMode(mode)}
-                          className={`rounded-lg px-3 py-2 text-sm border capitalize ${layoutFitMode === mode
-                            ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300'
-                            : 'border-black/10 dark:border-white/10 text-zinc-700 dark:text-zinc-200'
-                          }`}
-                        >
-                          {mode === 'cover' ? 'Cover' : 'Contain'}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                  {layoutMode === 'single' && !layoutAutoSmart && (
+                    <>
+                      <div>
+                        <p className="text-xs font-semibold text-zinc-500 mb-2">Ajuste de video</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {['cover', 'contain'].map((mode) => (
+                            <button
+                              key={mode}
+                              type="button"
+                              onClick={() => setLayoutFitMode(mode)}
+                              className={`rounded-lg px-3 py-2 text-sm border capitalize ${layoutFitMode === mode
+                                ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300'
+                                : 'border-black/10 dark:border-white/10 text-zinc-700 dark:text-zinc-200'
+                              }`}
+                            >
+                              {mode === 'cover' ? 'Cover' : 'Contain'}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
 
-                  <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
-                    Zoom ({layoutZoom.toFixed(2)}x)
-                    <input
-                      type="range"
-                      min="0.5"
-                      max="2.5"
-                      step="0.01"
-                      value={layoutZoom}
-                      onChange={(e) => setLayoutZoom(clamp(Number(e.target.value || 1), 0.5, 2.5))}
-                      className="w-full mt-2"
-                    />
-                  </label>
+                      <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
+                        Zoom ({layoutZoom.toFixed(2)}x)
+                        <input
+                          type="range"
+                          min="0.5"
+                          max="2.5"
+                          step="0.01"
+                          value={layoutZoom}
+                          onChange={(e) => setLayoutZoom(clamp(Number(e.target.value || 1), 0.5, 2.5))}
+                          className="w-full mt-2"
+                        />
+                      </label>
 
-                  <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
-                    Mover horizontal ({Math.round(effectiveLayoutOffsetX)}% efectivo)
-                    <input
-                      type="range"
-                      min="-100"
-                      max="100"
-                      step="1"
-                      value={layoutOffsetX}
-                      onChange={(e) => setLayoutOffsetX(clamp(Number(e.target.value || 0), -100, 100))}
-                      className="w-full mt-2"
-                    />
-                  </label>
+                      <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
+                        Mover horizontal ({Math.round(effectiveLayoutOffsetX)}% efectivo)
+                        <input
+                          type="range"
+                          min="-100"
+                          max="100"
+                          step="1"
+                          value={layoutOffsetX}
+                          onChange={(e) => setLayoutOffsetX(clamp(Number(e.target.value || 0), -100, 100))}
+                          className="w-full mt-2"
+                        />
+                      </label>
 
-                  <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
-                    Mover vertical ({Math.round(effectiveLayoutOffsetY)}% efectivo)
-                    <input
-                      type="range"
-                      min="-100"
-                      max="100"
-                      step="1"
-                      value={layoutOffsetY}
-                      onChange={(e) => setLayoutOffsetY(clamp(Number(e.target.value || 0), -100, 100))}
-                      className="w-full mt-2"
-                    />
-                  </label>
+                      <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
+                        Mover vertical ({Math.round(effectiveLayoutOffsetY)}% efectivo)
+                        <input
+                          type="range"
+                          min="-100"
+                          max="100"
+                          step="1"
+                          value={layoutOffsetY}
+                          onChange={(e) => setLayoutOffsetY(clamp(Number(e.target.value || 0), -100, 100))}
+                          className="w-full mt-2"
+                        />
+                      </label>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLayoutFitMode('cover');
+                          setLayoutZoom(1);
+                          setLayoutOffsetX(0);
+                          setLayoutOffsetY(0);
+                        }}
+                        className="w-full rounded-lg border border-black/10 dark:border-white/10 px-3 py-2 text-sm text-zinc-600 dark:text-zinc-200 hover:bg-black/5 dark:hover:bg-white/5"
+                      >
+                        Reset encuadre manual
+                      </button>
+                    </>
+                  )}
+
+                  {layoutMode === 'split' && (
+                    <>
+                      <p className="text-[11px] text-zinc-500">
+                        {layoutAspect === '9:16'
+                          ? 'Split activo: panel superior + panel inferior.'
+                          : 'Split activo: panel izquierdo + panel derecho.'}
+                      </p>
+
+                      <div className="space-y-3">
+                        <div className="rounded-xl border border-black/10 dark:border-white/10 p-3 space-y-2">
+                          <p className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">Panel A</p>
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
+                            Zoom A ({layoutSplitZoomA.toFixed(2)}x)
+                            <input
+                              type="range"
+                              min="0.5"
+                              max="2.5"
+                              step="0.01"
+                              value={layoutSplitZoomA}
+                              onChange={(e) => setLayoutSplitZoomA(clamp(Number(e.target.value || 1), 0.5, 2.5))}
+                              className="w-full mt-2"
+                            />
+                          </label>
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
+                            Mover horizontal A ({Math.round(effectiveSplitOffsetAX)}% efectivo)
+                            <input
+                              type="range"
+                              min="-100"
+                              max="100"
+                              step="1"
+                              value={layoutSplitOffsetAX}
+                              onChange={(e) => setLayoutSplitOffsetAX(clamp(Number(e.target.value || 0), -100, 100))}
+                              className="w-full mt-2"
+                            />
+                          </label>
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
+                            Mover vertical A ({Math.round(effectiveSplitOffsetAY)}% efectivo)
+                            <input
+                              type="range"
+                              min="-100"
+                              max="100"
+                              step="1"
+                              value={layoutSplitOffsetAY}
+                              onChange={(e) => setLayoutSplitOffsetAY(clamp(Number(e.target.value || 0), -100, 100))}
+                              className="w-full mt-2"
+                            />
+                          </label>
+                        </div>
+
+                        <div className="rounded-xl border border-black/10 dark:border-white/10 p-3 space-y-2">
+                          <p className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">Panel B</p>
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
+                            Zoom B ({layoutSplitZoomB.toFixed(2)}x)
+                            <input
+                              type="range"
+                              min="0.5"
+                              max="2.5"
+                              step="0.01"
+                              value={layoutSplitZoomB}
+                              onChange={(e) => setLayoutSplitZoomB(clamp(Number(e.target.value || 1), 0.5, 2.5))}
+                              className="w-full mt-2"
+                            />
+                          </label>
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
+                            Mover horizontal B ({Math.round(effectiveSplitOffsetBX)}% efectivo)
+                            <input
+                              type="range"
+                              min="-100"
+                              max="100"
+                              step="1"
+                              value={layoutSplitOffsetBX}
+                              onChange={(e) => setLayoutSplitOffsetBX(clamp(Number(e.target.value || 0), -100, 100))}
+                              className="w-full mt-2"
+                            />
+                          </label>
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
+                            Mover vertical B ({Math.round(effectiveSplitOffsetBY)}% efectivo)
+                            <input
+                              type="range"
+                              min="-100"
+                              max="100"
+                              step="1"
+                              value={layoutSplitOffsetBY}
+                              onChange={(e) => setLayoutSplitOffsetBY(clamp(Number(e.target.value || 0), -100, 100))}
+                              className="w-full mt-2"
+                            />
+                          </label>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLayoutSplitZoomA(1);
+                          setLayoutSplitOffsetAX(0);
+                          setLayoutSplitOffsetAY(0);
+                          setLayoutSplitZoomB(1);
+                          setLayoutSplitOffsetBX(0);
+                          setLayoutSplitOffsetBY(0);
+                        }}
+                        className="w-full rounded-lg border border-black/10 dark:border-white/10 px-3 py-2 text-sm text-zinc-600 dark:text-zinc-200 hover:bg-black/5 dark:hover:bg-white/5"
+                      >
+                        Reset split
+                      </button>
+                    </>
+                  )}
 
                   <div className="grid grid-cols-2 gap-3">
                     <label className="text-xs text-zinc-600 dark:text-zinc-300">Inicio (s)
@@ -1866,19 +2225,58 @@ export default function ClipStudioModal({
                       <input type="number" step="0.1" value={layoutEnd} onChange={(e) => setLayoutEnd(Number(e.target.value || 0))} className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm" />
                     </label>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setLayoutFitMode('cover');
-                      setLayoutZoom(1);
-                      setLayoutOffsetX(0);
-                      setLayoutOffsetY(0);
-                    }}
-                    className="w-full rounded-lg border border-black/10 dark:border-white/10 px-3 py-2 text-sm text-zinc-600 dark:text-zinc-200 hover:bg-black/5 dark:hover:bg-white/5"
-                  >
-                    Reset encuadre manual
-                  </button>
-                  <p className="text-[11px] text-zinc-500">Tip: el recorte y el layout se aplican antes de subtítulos y música.</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="text-xs text-zinc-600 dark:text-zinc-300">
+                      Empezar antes (s)
+                      <input
+                        type="number"
+                        min="0"
+                        max="3"
+                        step="0.1"
+                        value={layoutPreRoll}
+                        onChange={(e) => setLayoutPreRoll(clamp(Number(e.target.value || 0), 0, 3))}
+                        className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm"
+                      />
+                    </label>
+                    <label className="text-xs text-zinc-600 dark:text-zinc-300">
+                      Terminar después (s)
+                      <input
+                        type="number"
+                        min="0"
+                        max="3"
+                        step="0.1"
+                        value={layoutPostRoll}
+                        onChange={(e) => setLayoutPostRoll(clamp(Number(e.target.value || 0), 0, 3))}
+                        className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm"
+                      />
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setLayoutPreRoll((v) => clamp(Number(v || 0) + 0.2, 0, 3))}
+                      className="rounded-lg border border-black/10 dark:border-white/10 px-3 py-2 text-xs text-zinc-600 dark:text-zinc-200 hover:bg-black/5 dark:hover:bg-white/5"
+                    >
+                      +0.2s al inicio
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLayoutPostRoll((v) => clamp(Number(v || 0) + 0.2, 0, 3))}
+                      className="rounded-lg border border-black/10 dark:border-white/10 px-3 py-2 text-xs text-zinc-600 dark:text-zinc-200 hover:bg-black/5 dark:hover:bg-white/5"
+                    >
+                      +0.2s al final
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-zinc-500">
+                    Rango final estimado: {Math.max(0, Number(layoutStart || 0) - Number(layoutPreRoll || 0)).toFixed(2)}s - {(Math.max(0, Number(layoutEnd || 0)) + Math.max(0, Number(layoutPostRoll || 0))).toFixed(2)}s
+                  </p>
+                  <p className="text-[11px] text-zinc-500">
+                    {layoutMode === 'split'
+                      ? 'Tip: usa offsets opuestos entre Panel A y B para separar interlocutores.'
+                      : layoutAutoSmart
+                        ? 'Smart reframe: detecta personas por escena y decide recorte/letterbox automáticamente.'
+                        : 'Tip: el recorte y el layout se aplican antes de subtítulos y música.'}
+                  </p>
                 </div>
               )}
 
@@ -1929,50 +2327,158 @@ export default function ClipStudioModal({
             </section>
 
             <section className="bg-slate-100 dark:bg-slate-900 p-4 md:p-6 flex flex-col">
-              <div className="flex-1 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 flex items-center justify-center">
+              <div className="flex-1 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 flex flex-col items-center justify-start gap-3">
+                <div className="w-full px-1">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[15px] md:text-[20px] font-semibold leading-tight text-slate-900 dark:text-white" title={previewClipTitle}>
+                        {previewClipTitle}
+                      </p>
+                      <p
+                        className="mt-1.5 text-[10px] md:text-[11px] leading-snug text-slate-600 dark:text-slate-300"
+                        style={{
+                          display: '-webkit-box',
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: 'vertical',
+                          overflow: 'hidden'
+                        }}
+                        title={previewHeaderSubline}
+                      >
+                        {previewHeaderSubline}
+                      </p>
+                    </div>
+                  </div>
+                </div>
                 <div
                   ref={previewSurfaceRef}
                   onMouseDown={startLayoutPan}
-                  className={`w-full ${aspectRatioClass} rounded-md bg-black overflow-hidden relative mx-auto ${section === 'layout' ? (isPanningLayout ? 'cursor-grabbing' : 'cursor-grab') : ''}`}
-                  title={section === 'layout' ? 'Arrastra para mover el encuadre manualmente' : undefined}
+                  className={`w-full ${aspectRatioClass} rounded-md bg-black overflow-hidden relative mx-auto ${section === 'layout' && !layoutAutoSmart && !isSplitLayout ? (isPanningLayout ? 'cursor-grabbing' : 'cursor-grab') : ''}`}
+                  title={section === 'layout' && !layoutAutoSmart && !isSplitLayout ? 'Arrastra para mover el encuadre manualmente' : undefined}
                 >
-                  <video
-                    ref={previewVideoRef}
-                    src={previewVideoUrl || currentVideoUrl}
-                    className="w-full h-full"
-                    style={{
-                      objectFit: layoutFitMode === 'contain' ? 'contain' : 'cover',
-                      transform: `translate(${effectiveLayoutOffsetX}%, ${effectiveLayoutOffsetY}%) scale(${Number(layoutZoom || 1)})`,
-                      transformOrigin: 'center center'
-                    }}
-                    controls={section !== 'layout'}
-                    playsInline
-                    onPlay={() => setPreviewPlaying(true)}
-                    onPause={() => setPreviewPlaying(false)}
-                    onTimeUpdate={(e) => {
-                      const nextTime = Number(e?.currentTarget?.currentTime || 0);
-                      setPreviewCurrentTime(nextTime);
-                    }}
-                    onSeeked={(e) => {
-                      const nextTime = Number(e?.currentTarget?.currentTime || 0);
-                      setPreviewCurrentTime(nextTime);
-                    }}
-                    onLoadedMetadata={(e) => {
-                      const duration = Number(e?.currentTarget?.duration || 0);
-                      const nextTime = Number(e?.currentTarget?.currentTime || 0);
-                      setPreviewDuration(Number.isFinite(duration) ? duration : 0);
-                      setPreviewCurrentTime(nextTime);
-                    }}
-                    onEnded={() => {
-                      setPreviewPlaying(false);
-                      setPreviewCurrentTime(0);
-                    }}
-                    onError={() => {
-                      setVideoLoadError('El navegador no pudo reproducir este archivo en la vista previa.');
-                    }}
-                  />
+                  {isSplitLayout ? (
+                    <div className={`absolute inset-0 ${layoutAspect === '16:9' ? 'flex flex-row' : 'flex flex-col'}`}>
+                      <div className={`${layoutAspect === '16:9' ? 'w-1/2 h-full' : 'w-full h-1/2'} overflow-hidden relative`}>
+                        <video
+                          ref={previewVideoRef}
+                          src={previewVideoUrl || currentVideoUrl}
+                          className="w-full h-full"
+                          style={{
+                            objectFit: layoutFitMode === 'contain' ? 'contain' : 'cover',
+                            objectPosition: splitObjectPositionA,
+                            transform: `scale(${Number(layoutSplitZoomA || 1)})`,
+                            transformOrigin: 'center center'
+                          }}
+                          controls={section !== 'layout' && !isSplitLayout}
+                          playsInline
+                          onPlay={() => setPreviewPlaying(true)}
+                          onPause={() => setPreviewPlaying(false)}
+                          onTimeUpdate={(e) => {
+                            const nextTime = Number(e?.currentTarget?.currentTime || 0);
+                            setPreviewCurrentTime(nextTime);
+                          }}
+                          onSeeked={(e) => {
+                            const nextTime = Number(e?.currentTarget?.currentTime || 0);
+                            setPreviewCurrentTime(nextTime);
+                          }}
+                          onLoadedMetadata={(e) => {
+                            const duration = Number(e?.currentTarget?.duration || 0);
+                            const nextTime = Number(e?.currentTarget?.currentTime || 0);
+                            setPreviewDuration(Number.isFinite(duration) ? duration : 0);
+                            setPreviewCurrentTime(nextTime);
+                          }}
+                          onCanPlay={() => {
+                            setVideoLoadError('');
+                          }}
+                          onLoadedData={() => {
+                            setVideoLoadError('');
+                          }}
+                          onEnded={() => {
+                            setPreviewPlaying(false);
+                            setPreviewCurrentTime(0);
+                          }}
+                          onError={(e) => {
+                            const videoEl = e?.currentTarget;
+                            const hasFrame = Number(videoEl?.readyState || 0) >= 2 && Number(videoEl?.videoWidth || 0) > 0;
+                            if (hasFrame) return;
+                            setVideoLoadError('El navegador no pudo reproducir este archivo en la vista previa.');
+                          }}
+                        />
+                      </div>
+                      <div className={`${layoutAspect === '16:9' ? 'w-1/2 h-full' : 'w-full h-1/2'} overflow-hidden relative`}>
+                        <video
+                          ref={previewSplitVideoRef}
+                          src={previewVideoUrl || currentVideoUrl}
+                          className="w-full h-full pointer-events-none"
+                          style={{
+                            objectFit: layoutFitMode === 'contain' ? 'contain' : 'cover',
+                            objectPosition: splitObjectPositionB,
+                            transform: `scale(${Number(layoutSplitZoomB || 1)})`,
+                            transformOrigin: 'center center'
+                          }}
+                          muted
+                          playsInline
+                          controls={false}
+                          tabIndex={-1}
+                          onLoadedData={() => {
+                            // Keep this silent to avoid duplicate warning behavior.
+                          }}
+                        />
+                      </div>
+                      <div
+                        className={`pointer-events-none absolute bg-white/45 ${layoutAspect === '16:9' ? 'top-0 bottom-0 left-1/2 w-px -translate-x-1/2' : 'left-0 right-0 top-1/2 h-px -translate-y-1/2'}`}
+                      />
+                    </div>
+                  ) : (
+                    <video
+                      ref={previewVideoRef}
+                      src={previewVideoUrl || currentVideoUrl}
+                      className="w-full h-full"
+                      style={{
+                        objectFit: layoutFitMode === 'contain' ? 'contain' : 'cover',
+                        objectPosition: layoutAutoSmart ? '50% 50%' : manualLayoutObjectPosition,
+                        transform: layoutAutoSmart
+                          ? 'scale(1)'
+                          : `scale(${Number(layoutZoom || 1)})`,
+                        transformOrigin: 'center center'
+                      }}
+                      controls={section !== 'layout' && !isSplitLayout}
+                      playsInline
+                      onPlay={() => setPreviewPlaying(true)}
+                      onPause={() => setPreviewPlaying(false)}
+                      onTimeUpdate={(e) => {
+                        const nextTime = Number(e?.currentTarget?.currentTime || 0);
+                        setPreviewCurrentTime(nextTime);
+                      }}
+                      onSeeked={(e) => {
+                        const nextTime = Number(e?.currentTarget?.currentTime || 0);
+                        setPreviewCurrentTime(nextTime);
+                      }}
+                      onLoadedMetadata={(e) => {
+                        const duration = Number(e?.currentTarget?.duration || 0);
+                        const nextTime = Number(e?.currentTarget?.currentTime || 0);
+                        setPreviewDuration(Number.isFinite(duration) ? duration : 0);
+                        setPreviewCurrentTime(nextTime);
+                      }}
+                      onCanPlay={() => {
+                        setVideoLoadError('');
+                      }}
+                      onLoadedData={() => {
+                        setVideoLoadError('');
+                      }}
+                      onEnded={() => {
+                        setPreviewPlaying(false);
+                        setPreviewCurrentTime(0);
+                      }}
+                      onError={(e) => {
+                        const videoEl = e?.currentTarget;
+                        const hasFrame = Number(videoEl?.readyState || 0) >= 2 && Number(videoEl?.videoWidth || 0) > 0;
+                        if (hasFrame) return;
+                        setVideoLoadError('El navegador no pudo reproducir este archivo en la vista previa.');
+                      }}
+                    />
+                  )}
 
-                  {section === 'layout' && (
+                  {section === 'layout' && !layoutAutoSmart && !isSplitLayout && (
                     <div className="absolute top-2 right-2 rounded-md bg-black/55 text-white text-[10px] px-2 py-1 pointer-events-none border border-white/20">
                       Arrastra para mover
                     </div>
@@ -2025,6 +2531,7 @@ export default function ClipStudioModal({
                                   ? {
                                       color: karaokePreview.activeColor,
                                       display: 'inline-block',
+                                      marginRight: idx < karaokePreview.words.length - 1 ? '0.28em' : 0,
                                       transform: 'scale(1.16)',
                                       fontWeight: 800,
                                       textShadow: `0 0 ${Math.max(2, Number(strokeWidth || 0) + 1)}px ${strokeColor}`,
@@ -2033,12 +2540,12 @@ export default function ClipStudioModal({
                                   : {
                                       opacity: 0.92,
                                       display: 'inline-block',
+                                      marginRight: idx < karaokePreview.words.length - 1 ? '0.28em' : 0,
                                       transform: 'translateY(0px) scale(1)',
                                       transition: 'opacity 120ms ease'
                                     }}
                               >
                                 {word}
-                                {idx < karaokePreview.words.length - 1 ? ' ' : ''}
                               </span>
                             ))
                           ) : (
