@@ -131,14 +131,27 @@ const PROJECTS_EXPIRE_DAYS = 14;
 const DEFAULT_BRAND_KIT = {
   name: 'Predeterminado',
   subtitle_position: 'bottom',
-  subtitle_font_family: 'Impact',
-  subtitle_font_size: 24,
+  subtitle_font_family: 'Anton',
+  subtitle_font_size: 40,
   subtitle_font_color: '#FFFFFF',
   subtitle_stroke_color: '#000000',
   subtitle_stroke_width: 3,
   subtitle_bold: true,
   subtitle_box_color: '#000000',
   subtitle_box_opacity: 60
+};
+
+const normalizeSubtitleFontFamily = (value) => {
+  const key = String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (key.startsWith('montserrat')) return 'Montserrat';
+  if (key.startsWith('anton') || key === 'impact' || key === 'arial black') return 'Anton';
+  if (key.startsWith('archivo black')) return 'Archivo Black';
+  if (key.startsWith('bebas neue') || key === 'bebas') return 'Bebas Neue';
+  if (key.startsWith('oswald')) return 'Oswald';
+  if (key.startsWith('teko')) return 'Teko';
+  if (key === 'arial') return 'Arial';
+  if (key === 'verdana') return 'Verdana';
+  return DEFAULT_BRAND_KIT.subtitle_font_family;
 };
 
 const normalizeBrandKit = (raw) => {
@@ -151,7 +164,7 @@ const normalizeBrandKit = (raw) => {
   return {
     name: String(src.name || DEFAULT_BRAND_KIT.name).slice(0, 48),
     subtitle_position: ['top', 'middle', 'bottom'].includes(src.subtitle_position) ? src.subtitle_position : DEFAULT_BRAND_KIT.subtitle_position,
-    subtitle_font_family: String(src.subtitle_font_family || DEFAULT_BRAND_KIT.subtitle_font_family).slice(0, 48),
+    subtitle_font_family: normalizeSubtitleFontFamily(src.subtitle_font_family),
     subtitle_font_size: asNum(src.subtitle_font_size, DEFAULT_BRAND_KIT.subtitle_font_size, 12, 84),
     subtitle_font_color: String(src.subtitle_font_color || DEFAULT_BRAND_KIT.subtitle_font_color),
     subtitle_stroke_color: String(src.subtitle_stroke_color || DEFAULT_BRAND_KIT.subtitle_stroke_color),
@@ -177,6 +190,19 @@ const projectVideoTypeLabel = (contentPreset) => {
   if (key === 'tutorial') return 'Tutorial-clips';
   if (key === 'entrevista') return 'Momentos de entrevista';
   return 'Topic-clips';
+};
+
+const normalizeOutputMode = (rawValue) => {
+  const key = String(rawValue || '').trim().toLowerCase();
+  if (key === '16:9') return '16:9';
+  if (key === 'highlight' || key === 'highlight_reel') return 'highlight';
+  return '9:16';
+};
+
+const outputModeLabel = (mode) => {
+  const normalized = normalizeOutputMode(mode);
+  if (normalized === 'highlight') return 'Highlight reel';
+  return normalized;
 };
 
 function App() {
@@ -273,6 +299,9 @@ function App() {
   const [isExportingPack, setIsExportingPack] = useState(false);
   const [packExportReport, setPackExportReport] = useState(null);
   const [isGeneratingHighlightReel, setIsGeneratingHighlightReel] = useState(false);
+  const [highlightAspectRatio, setHighlightAspectRatio] = useState('9:16');
+  const [socialMetrics, setSocialMetrics] = useState(null);
+  const [isLoadingSocialMetrics, setIsLoadingSocialMetrics] = useState(false);
   const [clipSearchQuery, setClipSearchQuery] = useState('');
   const [isSearchingClips, setIsSearchingClips] = useState(false);
   const [clipSearchResults, setClipSearchResults] = useState([]);
@@ -330,6 +359,7 @@ function App() {
   const [projectTitleEditJobId, setProjectTitleEditJobId] = useState(null);
   const [projectTitleDraft, setProjectTitleDraft] = useState('');
   const pollingPauseBeforeStudioRef = useRef(false);
+  const autoHighlightTriggeredJobRef = useRef(null);
   const clipCardRefs = useRef(new Map());
   
   // Sync state for original video playback
@@ -487,6 +517,51 @@ function App() {
   }, [runConnectivityCheck, apiBaseUrlActive]);
 
   useEffect(() => {
+    let cancelled = false;
+    const syncRecoveredProjects = async () => {
+      try {
+        const res = await apiFetch('/api/jobs/recent?limit=30');
+        if (!res.ok) return;
+        const data = await res.json();
+        const items = Array.isArray(data?.items) ? data.items : [];
+        if (!items.length || cancelled) return;
+        setProjects((prev) => {
+          const current = Array.isArray(prev) ? [...prev] : [];
+          const known = new Set(current.map((p) => p.job_id));
+          const nowIso = new Date().toISOString();
+          const recovered = items
+            .filter((item) => item?.job_id && !known.has(item.job_id))
+            .map((item) => ({
+              job_id: item.job_id,
+              title: `Proyecto recuperado ${String(item.job_id).slice(0, 8)}`,
+              source_kind: 'local',
+              source_label: 'Recuperado',
+              video_type: 'Topic-clips',
+              ratio: '9:16',
+              clip_count_target: null,
+              clip_count_actual: Number.isFinite(item.clips_count) ? item.clips_count : null,
+              favorite: false,
+              status: item.status === 'completed' ? 'complete' : item.status === 'failed' ? 'error' : 'processing',
+              thumbnail_url: null,
+              preview_video_url: null,
+              created_at: nowIso,
+              expires_at: new Date(Date.now() + (PROJECTS_EXPIRE_DAYS * 24 * 60 * 60 * 1000)).toISOString(),
+              updated_at: nowIso,
+              last_error: item.last_error || null
+            }));
+          if (!recovered.length) return prev;
+          return [...recovered, ...current].slice(0, 40);
+        });
+      } catch (_) {
+        // Optional sync: ignore connectivity errors.
+      }
+    };
+
+    syncRecoveredProjects();
+    return () => { cancelled = true; };
+  }, [apiBaseUrlActive]);
+
+  useEffect(() => {
     localStorage.setItem('clipSortPreset', clipSort);
   }, [clipSort]);
 
@@ -533,11 +608,12 @@ function App() {
       if (project.job_id !== targetJobId) return project;
       const clips = Array.isArray(data?.result?.clips) ? data.result.clips : [];
       const firstClip = clips[0] || null;
+      const keepHighlightMode = normalizeOutputMode(project.ratio) === 'highlight';
       return {
         ...project,
         status: normalizedStatus,
         clip_count_actual: clips.length || project.clip_count_actual || null,
-        ratio: firstClip?.aspect_ratio || project.ratio || '9:16',
+        ratio: keepHighlightMode ? 'highlight' : (firstClip?.aspect_ratio || project.ratio || '9:16'),
         thumbnail_url: firstClip?.thumbnail_url || project.thumbnail_url || null,
         preview_video_url: firstClip?.video_url || project.preview_video_url || null,
         updated_at: new Date().toISOString(),
@@ -635,12 +711,14 @@ function App() {
       ? (parsedUrl?.pathname ? decodeURIComponent(parsedUrl.pathname).replaceAll('/', '').trim() || parsedUrl.hostname : String(data.payload))
       : (data?.payload?.name || 'Video local');
 
+    autoHighlightTriggeredJobRef.current = null;
+    const outputMode = normalizeOutputMode(data?.aspectRatio);
     const projectDraft = {
       title: projectTitle,
       source_kind: sourceKind,
       source_label: sourceLabel,
       video_type: projectVideoTypeLabel(data?.contentPreset),
-      ratio: data?.aspectRatio === '16:9' ? '16:9' : '9:16',
+      ratio: outputMode,
       clip_count_target: Number.isFinite(data?.clipCount) ? data.clipCount : null,
       created_at: createdAt.toISOString(),
       expires_at: expiresAt.toISOString()
@@ -656,6 +734,7 @@ function App() {
     setResults(null);
     setBatchScheduleReport(null);
     setPackExportReport(null);
+    setSocialMetrics(null);
     setIsGeneratingHighlightReel(false);
     setClipSearchResults([]);
     setClipSearchKeywords([]);
@@ -690,7 +769,7 @@ function App() {
       const wordTimestamps = typeof data.wordTimestamps === 'boolean' ? data.wordTimestamps : null;
       const ffmpegPreset = data.ffmpegPreset || null;
       const ffmpegCrf = Number.isFinite(data.ffmpegCrf) ? data.ffmpegCrf : null;
-      const aspectRatio = data.aspectRatio === '16:9' ? '16:9' : '9:16';
+      const aspectRatio = outputMode === '16:9' ? '16:9' : '9:16';
       const clipLengthTarget = ['short', 'balanced', 'long'].includes(data.clipLengthTarget) ? data.clipLengthTarget : null;
       const styleTemplate = typeof data.styleTemplate === 'string' && data.styleTemplate.trim() ? data.styleTemplate.trim() : null;
       const contentPreset = typeof data.contentPreset === 'string' && data.contentPreset.trim() ? data.contentPreset.trim() : null;
@@ -774,6 +853,7 @@ function App() {
   };
 
   const handleReset = () => {
+    autoHighlightTriggeredJobRef.current = null;
     setActiveTab('home');
     setProjectsViewMode('list');
     setStudioContext(null);
@@ -786,6 +866,7 @@ function App() {
     setResults(null);
     setBatchScheduleReport(null);
     setPackExportReport(null);
+    setSocialMetrics(null);
     setIsGeneratingHighlightReel(false);
     setClipSearchResults([]);
     setClipSearchKeywords([]);
@@ -814,6 +895,7 @@ function App() {
 
   const handleRetryJob = async () => {
     if (!jobId) return;
+    autoHighlightTriggeredJobRef.current = null;
     setIsRetryingJob(true);
     setIsPollingPaused(false);
     setProcessUiPhase('queued');
@@ -828,6 +910,7 @@ function App() {
       setResults(null);
       setBatchScheduleReport(null);
       setPackExportReport(null);
+      setSocialMetrics(null);
       setIsGeneratingHighlightReel(false);
       setStatus('processing');
       setProcessUiPhase('queued');
@@ -967,6 +1050,32 @@ function App() {
     return null;
   }, [results]);
 
+  useEffect(() => {
+    if (!Array.isArray(results?.clips) || results.clips.length === 0) return;
+    const firstAspect = String(results.clips[0]?.aspect_ratio || '').trim();
+    if (firstAspect === '16:9' || firstAspect === '9:16') {
+      setHighlightAspectRatio(firstAspect);
+    }
+  }, [results?.clips]);
+
+  const loadSocialMetrics = useCallback(async (targetJobId = jobId, { silent = false } = {}) => {
+    if (!targetJobId) return;
+    if (!silent) setIsLoadingSocialMetrics(true);
+    try {
+      const res = await apiFetch(`/api/social/metrics/${targetJobId}`);
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setSocialMetrics(data);
+    } catch (e) {
+      if (!silent) {
+        setLogs((prev) => [...prev, `No se pudo cargar métricas sociales: ${e.message}`]);
+      }
+      setSocialMetrics(null);
+    } finally {
+      if (!silent) setIsLoadingSocialMetrics(false);
+    }
+  }, [jobId]);
+
   const applyBatchStrategy = (strategy) => {
     setBatchStrategy(strategy);
     if (strategy === 'growth') {
@@ -1028,6 +1137,39 @@ function App() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
+
+  const triggerDownload = useCallback((href, filename) => {
+    const a = document.createElement('a');
+    a.href = href;
+    if (filename) a.download = filename;
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, []);
+
+  const downloadPackFile = useCallback(async (sourceUrl, filenameFallback) => {
+    const safeUrl = String(sourceUrl || '').trim();
+    if (!safeUrl) throw new Error('URL de paquete vacía');
+
+    const response = await apiFetch(safeUrl, { method: 'GET' });
+    if (!response.ok) {
+      throw new Error(`Descarga de paquete fallida (${response.status})`);
+    }
+
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    if (contentType.includes('text/html') || contentType.includes('application/json')) {
+      throw new Error('El servidor devolvió una respuesta no válida para descarga de ZIP');
+    }
+
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    try {
+      triggerDownload(objectUrl, filenameFallback);
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+    }
+  }, [triggerDownload]);
 
   const handleQueueTopClips = async () => {
     const candidatePool = batchScope === 'global' ? sortedClips : visibleClips;
@@ -1140,6 +1282,7 @@ function App() {
     } else {
       setLogs((prev) => [...prev, `Cola batch completada con incidencias: ${success}/${candidates.length} programados.`]);
     }
+    loadSocialMetrics(jobId, { silent: true });
     setIsBatchScheduling(false);
   };
 
@@ -1157,6 +1300,7 @@ function App() {
           include_srt_files: true,
           include_thumbnails: true,
           include_platform_variants: true,
+          include_platform_video_variants: true,
           thumbnail_format: 'jpg',
           thumbnail_width: 1080
         })
@@ -1165,14 +1309,18 @@ function App() {
       const data = await res.json();
       setPackExportReport(data);
 
-      const href = getApiUrl(data.pack_url);
-      const a = document.createElement('a');
-      a.href = href;
-      a.download = href.split('/').pop() || `agency_pack_${jobId}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setLogs((prev) => [...prev, `Pack listo (${data.video_files_added} videos, ${data.srt_files_added} srt, ${data.thumbnail_files_added || 0} miniaturas).`]);
+      const href = getApiUrl(String(data?.pack_url || ''));
+      const fallbackName = href.split('/').pop() || `agency_pack_${jobId}.zip`;
+      try {
+        await downloadPackFile(href, fallbackName);
+      } catch (downloadErr) {
+        setLogs((prev) => [...prev, `Descarga directa falló, abriendo enlace del pack: ${downloadErr.message}`]);
+        const opened = window.open(href, '_blank', 'noopener,noreferrer');
+        if (!opened) {
+          triggerDownload(href, fallbackName);
+        }
+      }
+      setLogs((prev) => [...prev, `Pack listo (${data.video_files_added} videos, ${data.srt_files_added} srt, ${data.thumbnail_files_added || 0} miniaturas, ${data.platform_video_variant_files_added || 0} variantes por plataforma).`]);
     } catch (e) {
       setPackExportReport({ success: false, error: e.message });
       setLogs((prev) => [...prev, `Error exportando paquete: ${e.message}`]);
@@ -1181,27 +1329,62 @@ function App() {
     }
   };
 
-  const handleGenerateHighlightReel = async () => {
-    if (!jobId || !Array.isArray(sortedClips) || sortedClips.length < 2) return;
+  const handleGenerateHighlightReel = useCallback(async () => {
+    if (!jobId) return;
+    if (!Array.isArray(sortedClips) || sortedClips.length < 1) {
+      setLogs((prev) => [...prev, 'No hay clips disponibles para armar un highlight reel.']);
+      return;
+    }
     const suggestedSegments = Math.max(3, Math.min(8, Number(batchTopCount) || 5));
     setIsGeneratingHighlightReel(true);
-    setLogs((prev) => [...prev, `Generando highlight reel (${suggestedSegments} momentos max)...`]);
+    setLogs((prev) => [...prev, `Generando highlight reel (${suggestedSegments} momentos max, ${highlightAspectRatio})...`]);
 
     try {
-      const res = await apiFetch('/api/highlight/reel', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          job_id: jobId,
-          max_segments: suggestedSegments,
-          target_duration: 52,
-          min_segment_seconds: 4.5,
-          max_segment_seconds: 11,
-          min_gap_seconds: 7
-        })
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const readErrorDetail = (rawText) => {
+        try {
+          const parsed = JSON.parse(String(rawText || ''));
+          if (parsed && typeof parsed.detail === 'string') return parsed.detail;
+        } catch (_) {}
+        return '';
+      };
+      const payload = {
+        job_id: jobId,
+        max_segments: suggestedSegments,
+        target_duration: 52,
+        min_segment_seconds: 4.5,
+        max_segment_seconds: 11,
+        min_gap_seconds: 7,
+        aspect_ratio: highlightAspectRatio
+      };
+      const endpoints = ['/api/highlight/reel', '/api/highlight-reel'];
+      let data = null;
+      let lastError = null;
+
+      for (let i = 0; i < endpoints.length; i += 1) {
+        const endpoint = endpoints[i];
+        const res = await apiFetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+          data = await res.json();
+          break;
+        }
+
+        const errText = await res.text();
+        const detail = readErrorDetail(errText);
+        const endpointNotFound = res.status === 404 && /^not found$/i.test(String(detail || '').trim());
+        if (endpointNotFound && i < endpoints.length - 1) {
+          continue;
+        }
+        lastError = new Error(detail || errText || `HTTP ${res.status}`);
+      }
+
+      if (!data) {
+        throw lastError || new Error('No se pudo generar highlight reel');
+      }
+
       const reel = data?.reel;
       if (reel && typeof reel === 'object') {
         setResults((prev) => {
@@ -1216,16 +1399,39 @@ function App() {
             latest_highlight_reel: reel
           };
         });
-        setLogs((prev) => [...prev, `Highlight reel listo: ${reel.segments_count || '-'} momentos, ${reel.duration || '-'}s.`]);
+        const reelRatio = String(reel?.settings?.aspect_ratio || highlightAspectRatio || '').trim();
+        setLogs((prev) => [...prev, `Highlight reel listo (${reelRatio || 'ratio auto'}): ${reel.segments_count || '-'} momentos, ${reel.duration || '-'}s.`]);
       } else {
         setLogs((prev) => [...prev, 'Highlight reel generado, pero no se recibieron metadatos completos.']);
       }
     } catch (e) {
-      setLogs((prev) => [...prev, `Error generando highlight reel: ${e.message}`]);
+      const rawError = String(e?.message || '');
+      const normalized = rawError.trim().toLowerCase();
+      if (normalized === 'not found') {
+        setLogs((prev) => [...prev, 'Error generando highlight reel: endpoint no disponible en backend activo (reinicia backend/Colab para cargar esta version).']);
+      } else if (normalized.includes('job not found') || normalized.includes('job output directory not found') || normalized.includes('metadata not found')) {
+        setLogs((prev) => [...prev, 'Error generando highlight reel: ese proyecto no está cargado en este backend. Abre el proyecto generado en esta sesión de Colab o vuelve a procesarlo.']);
+      } else {
+        setLogs((prev) => [...prev, `Error generando highlight reel: ${rawError}`]);
+      }
     } finally {
       setIsGeneratingHighlightReel(false);
     }
-  };
+  }, [batchTopCount, highlightAspectRatio, jobId, sortedClips]);
+
+  useEffect(() => {
+    const outputMode = normalizeOutputMode(processingMedia?.aspectRatio);
+    if (outputMode !== 'highlight') return;
+    if (status !== 'complete') return;
+    if (!jobId) return;
+    if (!Array.isArray(sortedClips) || sortedClips.length < 1) return;
+    if (isGeneratingHighlightReel) return;
+    if (autoHighlightTriggeredJobRef.current === jobId) return;
+
+    autoHighlightTriggeredJobRef.current = jobId;
+    setLogs((prev) => [...prev, 'Modo Highlight reel: generando montaje automático...']);
+    handleGenerateHighlightReel();
+  }, [status, processingMedia?.aspectRatio, jobId, sortedClips, isGeneratingHighlightReel, handleGenerateHighlightReel]);
 
   const handleClipSearch = async () => {
     if (!jobId) return;
@@ -1325,6 +1531,11 @@ function App() {
     loadTranscriptSegments(jobId);
   }, [status, jobId]);
 
+  useEffect(() => {
+    if (status !== 'complete' || !jobId) return;
+    loadSocialMetrics(jobId, { silent: true });
+  }, [status, jobId, loadSocialMetrics]);
+
   const visibleTranscriptSegments = useMemo(() => {
     if (!Array.isArray(transcriptSegments) || transcriptSegments.length === 0) return [];
     const q = transcriptFilter.trim().toLowerCase();
@@ -1374,29 +1585,11 @@ function App() {
     const renderingSeen = readyClips > 0 || includesAny('clip_', 'clip ', 'render', 'export');
     const finishingSeen = includesAny('process finished successfully', 'finished successfully', 'completed');
 
-    let phaseIndex = 0;
-    if (status === 'complete' || processUiPhase === 'complete') {
-      phaseIndex = 5;
-    } else if (processUiPhase === 'uploading') {
-      phaseIndex = 0;
-    } else if (processUiPhase === 'queued' || queuedSeen) {
-      phaseIndex = 1;
-    } else if (renderingSeen || processUiPhase === 'rendering') {
-      phaseIndex = 4;
-    } else if (discoverySeen) {
-      phaseIndex = 3;
-    } else if (processingSeen || processUiPhase === 'running') {
-      phaseIndex = 2;
-    } else if (finishingSeen || processUiPhase === 'finalizing') {
-      phaseIndex = 5;
-    }
-
     const steps = [
       {
-        key: 'upload',
+        key: 'ingest',
         label: processingMedia?.type === 'file' ? 'Subiendo video' : 'Enviando enlace'
       },
-      { key: 'project', label: 'Creando proyecto' },
       { key: 'process', label: 'Procesando video' },
       { key: 'best_parts', label: 'Buscando mejores momentos' },
       {
@@ -1410,6 +1603,22 @@ function App() {
       { key: 'finalize', label: 'Finalizando' }
     ];
 
+    const lastStepIndex = steps.length - 1;
+    let phaseIndex = 0;
+    if (status === 'complete' || processUiPhase === 'complete') {
+      phaseIndex = lastStepIndex;
+    } else if (processUiPhase === 'uploading' || processUiPhase === 'queued' || queuedSeen) {
+      phaseIndex = 0;
+    } else if (renderingSeen || processUiPhase === 'rendering') {
+      phaseIndex = 3;
+    } else if (discoverySeen) {
+      phaseIndex = 2;
+    } else if (processingSeen || processUiPhase === 'running') {
+      phaseIndex = 1;
+    } else if (finishingSeen || processUiPhase === 'finalizing') {
+      phaseIndex = 4;
+    }
+
     const withState = steps.map((step, idx) => {
       if (status === 'complete') return { ...step, state: 'done' };
       if (idx < phaseIndex) return { ...step, state: 'done' };
@@ -1417,44 +1626,59 @@ function App() {
       return { ...step, state: 'todo' };
     }).map((step, idx) => ({ ...step, index: idx + 1 }));
 
-    const visibleSteps = withState.filter((step, idx) => {
-      if (status === 'complete') return true;
-      return idx <= phaseIndex;
-    });
-
     let progressPercent = 10;
     if (status === 'complete') {
       progressPercent = 100;
     } else if (phaseIndex === 0) {
-      progressPercent = 12;
+      progressPercent = 16;
     } else if (phaseIndex === 1) {
-      progressPercent = 24;
+      progressPercent = 38;
     } else if (phaseIndex === 2) {
-      progressPercent = 44;
+      progressPercent = 60;
     } else if (phaseIndex === 3) {
-      progressPercent = 62;
-    } else if (phaseIndex === 4) {
       if (targetClips) {
         const ratio = Math.max(0, Math.min(1, readyClips / targetClips));
         progressPercent = Math.min(92, 70 + Math.round(ratio * 22));
       } else {
         progressPercent = Math.min(90, 70 + Math.min(18, readyClips * 6));
       }
-    } else if (phaseIndex === 5) {
+    } else if (phaseIndex === 4) {
       progressPercent = 96;
+    }
+
+    const normalizedProgressPercent = status === 'error'
+      ? Math.max(8, progressPercent - 4)
+      : progressPercent;
+    const totalSteps = withState.length;
+    const fallbackActiveIndex = Math.max(1, Math.min(totalSteps, phaseIndex + 1));
+    const activeStep = withState.find((step) => step.state === 'active') || withState[fallbackActiveIndex - 1] || withState[0];
+    const activeStepIndex = activeStep?.index || fallbackActiveIndex;
+    const stepUnit = 100 / Math.max(1, totalSteps);
+    const stepStart = (activeStepIndex - 1) * stepUnit;
+    let stepProgressPercent = status === 'complete'
+      ? 100
+      : Math.round(Math.max(0, Math.min(100, ((normalizedProgressPercent - stepStart) / stepUnit) * 100)));
+    if (status === 'processing') {
+      stepProgressPercent = Math.max(3, stepProgressPercent);
     }
 
     return {
       steps: withState,
-      visibleSteps,
       phaseIndex,
-      totalSteps: withState.length,
-      progressPercent: status === 'error' ? Math.max(8, progressPercent - 4) : progressPercent,
+      totalSteps,
+      progressPercent: normalizedProgressPercent,
+      stepProgressPercent,
+      activeStepIndex,
       headline: status === 'complete'
         ? 'Proceso completado'
         : status === 'error'
           ? 'Proceso interrumpido'
-          : withState.find((step) => step.state === 'active')?.label || 'Procesando',
+          : activeStep?.label || 'Procesando',
+      stepProgressLabel: status === 'complete'
+        ? `Paso ${totalSteps} de ${totalSteps} completados al 100%`
+        : status === 'error'
+          ? `Paso ${activeStepIndex} de ${totalSteps} detenido al ${stepProgressPercent}%`
+          : `Paso ${activeStepIndex} de ${totalSteps}: ${activeStep?.label || 'Procesando'} (${stepProgressPercent}%)`,
       readyClips,
       targetClips
     };
@@ -1636,6 +1860,35 @@ function App() {
     }
   }, [status, studioContext?.clipIndex]);
 
+  const handleStudioClipPatched = useCallback(({ clipIndex, clipPatch }) => {
+    const targetClipIndex = Number(clipIndex);
+    if (!Number.isFinite(targetClipIndex) || !clipPatch || typeof clipPatch !== 'object') return;
+
+    setResults((prev) => {
+      if (!prev || !Array.isArray(prev.clips)) return prev;
+      return {
+        ...prev,
+        clips: prev.clips.map((item) => {
+          if (Number(item?.clip_index) !== targetClipIndex) return item;
+          return { ...item, ...clipPatch };
+        })
+      };
+    });
+
+    setStudioContext((prev) => {
+      if (!prev) return prev;
+      const currentIndex = Number(prev?.clipIndex);
+      if (!Number.isFinite(currentIndex) || currentIndex !== targetClipIndex) return prev;
+      return {
+        ...prev,
+        clip: {
+          ...(prev.clip || {}),
+          ...clipPatch
+        }
+      };
+    });
+  }, []);
+
   const handleStudioApplied = useCallback(({ newVideoUrl, clipPatch }) => {
     if (!studioContext) return;
     const targetClipIndex = Number(studioContext.clipIndex);
@@ -1677,9 +1930,13 @@ function App() {
     setIsPollingPaused(false);
     setProcessUiPhase('running');
     setResults(null);
+    setSocialMetrics(null);
     setIsGeneratingHighlightReel(false);
     setLogs(['Cargando proyecto guardado...']);
-    setProcessingMedia(null);
+    setProcessingMedia({
+      aspectRatio: normalizeOutputMode(project?.ratio),
+      contentPreset: project?.video_type || null
+    });
     try {
       const data = await pollJob(project.job_id);
       if (Array.isArray(data.logs) && data.logs.length > 0) {
@@ -2042,8 +2299,14 @@ function App() {
                         onChange={(e) => handleBrandKitFieldChange('subtitle_font_family', e.target.value)}
                         className="input-field"
                       >
-                        <option value="Impact">Impact</option>
-                        <option value="Arial Black">Arial Black</option>
+                        <option value="Montserrat">Montserrat</option>
+                        <option value="Anton">Anton (recomendado export)</option>
+                        <option value="Archivo Black">Archivo Black</option>
+                        <option value="Bebas Neue">Bebas Neue</option>
+                        <option value="Oswald">Oswald</option>
+                        <option value="Teko">Teko</option>
+                        <option value="Impact">Impact (mapeado a Anton en export)</option>
+                        <option value="Arial Black">Arial Black (mapeado a Anton en export)</option>
                         <option value="Arial">Arial</option>
                         <option value="Verdana">Verdana</option>
                       </select>
@@ -2055,7 +2318,7 @@ function App() {
                         min="12"
                         max="84"
                         value={brandKit.subtitle_font_size}
-                        onChange={(e) => handleBrandKitFieldChange('subtitle_font_size', Number(e.target.value || 24))}
+                        onChange={(e) => handleBrandKitFieldChange('subtitle_font_size', Number(e.target.value || 40))}
                         className="input-field"
                       />
                     </div>
@@ -2265,7 +2528,7 @@ function App() {
                                   </div>
                                 )}
                                 <div className="absolute bottom-1 right-1 text-[10px] px-1.5 py-0.5 rounded bg-black/70 text-white backdrop-blur-sm">
-                                  {project.ratio || '9:16'}
+                                  {outputModeLabel(project.ratio)}
                                 </div>
                               </div>
                               <div className="py-1 min-w-0">
@@ -2356,7 +2619,7 @@ function App() {
                             </div>
 
                             <div className="col-span-1 md:col-span-1">
-                              <span className="font-medium text-slate-700 dark:text-slate-300 text-sm">{project.ratio || '9:16'}</span>
+                              <span className="font-medium text-slate-700 dark:text-slate-300 text-sm">{outputModeLabel(project.ratio)}</span>
                             </div>
 
                             <div className="col-span-1 md:col-span-1 flex items-center justify-end gap-1">
@@ -2507,7 +2770,7 @@ function App() {
           )}
 
           {activeTab === 'projects' && projectsViewMode === 'detail' && studioContext && (
-            <div className="h-[calc(100vh-7.8rem)] min-h-[720px] animate-[fadeIn_0.22s_ease-out]">
+            <div className="h-[calc(100vh-7.8rem)] min-h-[620px] lg:min-h-[720px] animate-[fadeIn_0.22s_ease-out]">
               <ClipStudioModal
                 isOpen
                 standalone
@@ -2516,6 +2779,7 @@ function App() {
                 clipIndex={studioContext.clipIndex}
                 clip={studioContext.clip}
                 currentVideoUrl={studioContext.currentVideoUrl}
+                onClipPatched={handleStudioClipPatched}
                 onApplied={handleStudioApplied}
               />
             </div>
@@ -2597,9 +2861,9 @@ function App() {
                   </div>
 
                   <div className="space-y-2">
-                    <div className="flex items-center justify-between text-xs md:text-sm">
+                    <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between text-xs md:text-sm">
                       <span className="font-medium text-slate-700 dark:text-slate-200">{processingTimeline.headline}</span>
-                      <span className="text-slate-500 dark:text-slate-400">{processingTimeline.progressPercent}%</span>
+                      <span className="text-slate-500 dark:text-slate-400 md:text-right">{processingTimeline.stepProgressLabel}</span>
                     </div>
                     <div className="w-full h-2.5 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
                       <div
@@ -2608,71 +2872,6 @@ function App() {
                         }`}
                         style={{ width: `${processingTimeline.progressPercent}%` }}
                       />
-                    </div>
-                  </div>
-
-                  <div className="overflow-x-auto custom-scrollbar pb-1">
-                    <div className="flex items-center gap-2 min-w-max">
-                      {processingTimeline.visibleSteps.map((step) => {
-                        const unit = 100 / Math.max(1, processingTimeline.totalSteps || 1);
-                        const stepStart = (step.index - 1) * unit;
-                        const activeStepProgress = Math.max(
-                          8,
-                          Math.min(98, ((processingTimeline.progressPercent - stepStart) / unit) * 100)
-                        );
-                        const ringPercent = step.state === 'done'
-                          ? 100
-                          : step.state === 'active'
-                            ? activeStepProgress
-                            : 0;
-                        const ringCircumference = 2 * Math.PI * 11;
-                        const ringOffset = ringCircumference * (1 - (ringPercent / 100));
-
-                        return (
-                          <div
-                            key={step.key}
-                            className={`px-3 py-2 rounded-xl border text-xs flex items-center gap-2 min-w-[210px] ${
-                              step.state === 'done'
-                                ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300'
-                                : step.state === 'active'
-                                  ? 'border-primary/35 bg-primary/10 text-primary shadow-[0_0_0_1px_rgba(139,92,246,0.18)]'
-                                  : step.state === 'error'
-                                    ? 'border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
-                                    : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400'
-                            }`}
-                          >
-                            <div className="relative w-6 h-6 shrink-0">
-                              <svg className={`absolute inset-0 -rotate-90 ${step.state === 'active' ? 'animate-pulse' : ''}`} viewBox="0 0 24 24">
-                                <circle
-                                  cx="12"
-                                  cy="12"
-                                  r="11"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeOpacity="0.2"
-                                  strokeWidth="2"
-                                />
-                                <circle
-                                  cx="12"
-                                  cy="12"
-                                  r="11"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2"
-                                  strokeLinecap="round"
-                                  strokeDasharray={ringCircumference}
-                                  strokeDashoffset={ringOffset}
-                                  style={{ transition: 'stroke-dashoffset 350ms ease-out' }}
-                                />
-                              </svg>
-                              <div className="absolute inset-0 flex items-center justify-center text-[11px] font-semibold">
-                                {step.state === 'done' ? <Check size={12} /> : step.index}
-                              </div>
-                            </div>
-                            <span className="truncate">{step.label}</span>
-                          </div>
-                        );
-                      })}
                     </div>
                   </div>
 
@@ -2722,20 +2921,20 @@ function App() {
                       )}
                     </h2>
                     <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-white/10 bg-white/5 text-zinc-300">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 text-slate-700 dark:text-zinc-300">
                         <FileVideo size={12} />
                         {`Fuente: ${processingSourceLabel}`}
                       </span>
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-white/10 bg-white/5 text-zinc-300">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 text-slate-700 dark:text-zinc-300">
                         <Scissors size={12} />
                         {`Objetivo: ${processingMedia?.clipCount || '-'} clips`}
                       </span>
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-white/10 bg-white/5 text-zinc-300">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 text-slate-700 dark:text-zinc-300">
                         <LayoutDashboard size={12} />
-                        {`Ratio: ${processingMedia?.aspectRatio === '16:9' ? '16:9' : '9:16'}`}
+                        {`Formato: ${outputModeLabel(processingMedia?.aspectRatio)}`}
                       </span>
                       {results?.cost_analysis && (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-green-500/30 bg-green-500/10 text-green-300" title={`Entrada: ${results.cost_analysis.input_tokens} | Salida: ${results.cost_analysis.output_tokens}`}>
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-green-300 dark:border-green-500/30 bg-green-50 dark:bg-green-500/10 text-green-700 dark:text-green-300" title={`Entrada: ${results.cost_analysis.input_tokens} | Salida: ${results.cost_analysis.output_tokens}`}>
                           {`Costo: $${results.cost_analysis.total_cost.toFixed(5)}`}
                         </span>
                       )}
@@ -2744,50 +2943,50 @@ function App() {
 
                 {sortedClips.length > 0 && (
                   <div className="mb-4 shrink-0 flex flex-wrap items-center gap-2">
-                    <span className="text-xs text-zinc-500">Orden:</span>
+                    <span className="text-xs text-slate-500 dark:text-zinc-500">Orden:</span>
                     <select
                       value={clipSort}
                       onChange={(e) => setClipSort(e.target.value)}
-                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
                     >
                       <option value="top">Mayor puntaje</option>
                       <option value="balanced">Línea de tiempo</option>
                       <option value="safe">Más seguros</option>
                     </select>
-                    <span className="text-xs text-zinc-500 ml-1">Filtro:</span>
+                    <span className="text-xs text-slate-500 dark:text-zinc-500 ml-1">Filtro:</span>
                     <select
                       value={clipFilter}
                       onChange={(e) => setClipFilter(e.target.value)}
-                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
                     >
                       <option value="all">Todos</option>
                       <option value="top">Alto (80+)</option>
                       <option value="medium">Medio (65-79)</option>
                       <option value="low">Bajo (&lt;65)</option>
                     </select>
-                    <span className="text-xs text-zinc-500">Etiqueta:</span>
+                    <span className="text-xs text-slate-500 dark:text-zinc-500">Etiqueta:</span>
                     <select
                       value={clipTagFilter}
                       onChange={(e) => setClipTagFilter(e.target.value)}
-                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
                     >
                       <option value="all">Todas</option>
                       {availableTags.map((tag) => (
                         <option key={tag} value={tag}>{tag}</option>
                       ))}
                     </select>
-                    <span className="text-xs text-zinc-500">Estrategia:</span>
+                    <span className="text-xs text-slate-500 dark:text-zinc-500">Estrategia:</span>
                     <select
                       value={batchStrategy}
                       onChange={(e) => applyBatchStrategy(e.target.value)}
-                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
                     >
                       <option value="growth">Crecimiento</option>
                       <option value="balanced">Balanceada</option>
                       <option value="conservative">Conservadora</option>
                       <option value="custom">Personalizada</option>
                     </select>
-                    <span className="text-xs text-zinc-500 ml-1">N clips:</span>
+                    <span className="text-xs text-slate-500 dark:text-zinc-500 ml-1">N clips:</span>
                     <input
                       type="number"
                       min="1"
@@ -2797,16 +2996,16 @@ function App() {
                         setBatchStrategy('custom');
                         setBatchTopCount(Math.max(1, Math.min(10, Number(e.target.value || 1))));
                       }}
-                      className="w-16 text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                      className="w-16 text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
                     />
-                    <span className="text-xs text-zinc-500">Inicia en:</span>
+                    <span className="text-xs text-slate-500 dark:text-zinc-500">Inicia en:</span>
                     <select
                       value={batchStartDelayMinutes}
                       onChange={(e) => {
                         setBatchStrategy('custom');
                         setBatchStartDelayMinutes(Number(e.target.value));
                       }}
-                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
                     >
                       <option value={0}>ahora</option>
                       <option value={5}>5m</option>
@@ -2814,14 +3013,14 @@ function App() {
                       <option value={30}>30m</option>
                       <option value={60}>60m</option>
                     </select>
-                    <span className="text-xs text-zinc-500">Cada:</span>
+                    <span className="text-xs text-slate-500 dark:text-zinc-500">Cada:</span>
                     <select
                       value={batchIntervalMinutes}
                       onChange={(e) => {
                         setBatchStrategy('custom');
                         setBatchIntervalMinutes(Number(e.target.value));
                       }}
-                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
                     >
                       <option value={15}>15m</option>
                       <option value={30}>30m</option>
@@ -2829,14 +3028,14 @@ function App() {
                       <option value={120}>120m</option>
                       <option value={240}>240m</option>
                     </select>
-                    <span className="text-xs text-zinc-500">Alcance:</span>
+                    <span className="text-xs text-slate-500 dark:text-zinc-500">Alcance:</span>
                     <select
                       value={batchScope}
                       onChange={(e) => {
                         setBatchStrategy('custom');
                         setBatchScope(e.target.value);
                       }}
-                      className="text-xs bg-white/5 border border-white/10 rounded-md px-2 py-1 text-zinc-200"
+                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
                     >
                       <option value="visible">Visible</option>
                       <option value="global">Global</option>
@@ -2844,7 +3043,7 @@ function App() {
                     <button
                       onClick={handleQueueTopClips}
                       disabled={isBatchScheduling || (batchScope === 'global' ? sortedClips.length === 0 : visibleClips.length === 0)}
-                      className="ml-1 text-xs bg-primary/20 border border-primary/40 text-primary rounded-md px-2 py-1 hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="ml-1 text-xs bg-violet-100 dark:bg-primary/20 border border-violet-300 dark:border-primary/40 text-violet-700 dark:text-primary rounded-md px-2 py-1 hover:bg-violet-200 dark:hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
                       title="Programa lote usando N clips e intervalo actual"
                     >
                       {isBatchScheduling ? 'Encolando...' : `Encolar ${Math.max(1, Math.min(10, Number(batchTopCount) || 1))}`}
@@ -2852,15 +3051,25 @@ function App() {
                     <button
                       onClick={handleExportPack}
                       disabled={isExportingPack || !jobId}
-                      className="text-xs bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 rounded-md px-2 py-1 hover:bg-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="text-xs bg-emerald-100 dark:bg-emerald-500/20 border border-emerald-300 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 rounded-md px-2 py-1 hover:bg-emerald-200 dark:hover:bg-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
                       title="Exportar paquete para agencia (zip)"
                     >
                       {isExportingPack ? 'Exportando...' : 'Exportar paquete'}
                     </button>
+                    <span className="text-xs text-slate-500 dark:text-zinc-500">Reel ratio:</span>
+                    <select
+                      value={highlightAspectRatio}
+                      onChange={(e) => setHighlightAspectRatio(e.target.value === '16:9' ? '16:9' : '9:16')}
+                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                      title="Ratio de salida para highlight reel"
+                    >
+                      <option value="9:16">9:16</option>
+                      <option value="16:9">16:9</option>
+                    </select>
                     <button
                       onClick={handleGenerateHighlightReel}
-                      disabled={isGeneratingHighlightReel || !jobId || status !== 'complete' || sortedClips.length < 2}
-                      className="text-xs bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 rounded-md px-2 py-1 hover:bg-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                      disabled={isGeneratingHighlightReel || !jobId || status !== 'complete' || sortedClips.length < 1}
+                      className="text-xs bg-cyan-100 dark:bg-cyan-500/20 border border-cyan-300 dark:border-cyan-500/40 text-cyan-700 dark:text-cyan-300 rounded-md px-2 py-1 hover:bg-cyan-200 dark:hover:bg-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
                       title="Compone un reel corto con varios momentos top para impulsar el video completo"
                     >
                       {isGeneratingHighlightReel ? 'Armando reel...' : 'Generar highlight reel'}
@@ -2950,37 +3159,37 @@ function App() {
                     )}
 
                     {!clipSearchError && (clipSearchResults.length > 0 || clipSearchChapters.length > 0 || clipHybridShortlist.length > 0) && (
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-zinc-400">
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-slate-600 dark:text-zinc-400">
                         <span className={`uppercase tracking-wider px-1.5 py-0.5 rounded border ${
                           clipSearchProvider === 'gemini'
-                            ? 'bg-green-500/15 border-green-500/30 text-green-300'
-                            : 'bg-zinc-500/15 border-zinc-500/30 text-zinc-300'
+                            ? 'bg-green-50 dark:bg-green-500/15 border-green-300 dark:border-green-500/30 text-green-700 dark:text-green-300'
+                            : 'bg-slate-100 dark:bg-zinc-500/15 border-slate-300 dark:border-zinc-500/30 text-slate-700 dark:text-zinc-300'
                         }`}>
                           {`semántica: ${clipSearchProvider}`}
                         </span>
-                        <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-blue-500/15 border-blue-500/30 text-blue-300">
+                        <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-blue-50 dark:bg-blue-500/15 border-blue-300 dark:border-blue-500/30 text-blue-700 dark:text-blue-300">
                           {`intención: ${clipSearchMode}`}
                         </span>
-                        <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-cyan-500/15 border-cyan-500/30 text-cyan-300">
+                        <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-cyan-50 dark:bg-cyan-500/15 border-cyan-300 dark:border-cyan-500/30 text-cyan-700 dark:text-cyan-300">
                           {`modo: ${clipSearchModePreset}`}
                         </span>
                         {clipSearchRelaxed && (
-                          <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-amber-500/15 border-amber-500/30 text-amber-300">
+                          <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-amber-50 dark:bg-amber-500/15 border-amber-300 dark:border-amber-500/30 text-amber-700 dark:text-amber-300">
                             relajado
                           </span>
                         )}
                         {clipSearchKeywords.length > 0 && (
-                          <span className="truncate">
+                          <span className="truncate text-slate-600 dark:text-zinc-400">
                             {`palabras clave: ${clipSearchKeywords.join(', ')}`}
                           </span>
                         )}
                         {clipSearchPhrases.length > 0 && (
-                          <span className="truncate text-zinc-500">
+                          <span className="truncate text-slate-500 dark:text-zinc-500">
                             {`frases: ${clipSearchPhrases.join(' | ')}`}
                           </span>
                         )}
                         {clipSearchScope?.applied && (
-                          <span className="truncate text-emerald-300">
+                          <span className="truncate text-emerald-700 dark:text-emerald-300">
                             {`alcance: ${clipSearchScope.start ?? '-'}s-${clipSearchScope.end ?? '-'}s${clipSearchScope.speaker ? ` | hablante ${clipSearchScope.speaker}` : ''}${clipSearchScope.chapter?.chapter_index !== undefined ? ` | cap #${Number(clipSearchScope.chapter.chapter_index) + 1}` : ''}`}
                           </span>
                         )}
@@ -3186,14 +3395,36 @@ function App() {
                   }`}>
                     {packExportReport.success === false
                       ? <p>{`Error exportando paquete: ${packExportReport.error}`}</p>
-                      : <p>{`Paquete listo: ${packExportReport.video_files_added} videos, ${packExportReport.srt_files_added} SRT, ${packExportReport.thumbnail_files_added || 0} miniaturas, ${packExportReport.platform_variant_rows || 0} filas por plataforma, ${packExportReport.clips_in_manifest} clips en el manifiesto.`}</p>}
+                      : <p>{`Paquete listo: ${packExportReport.video_files_added} videos, ${packExportReport.srt_files_added} SRT, ${packExportReport.thumbnail_files_added || 0} miniaturas, ${packExportReport.platform_variant_rows || 0} filas de copy por plataforma, ${packExportReport.platform_video_variant_files_added || 0} videos variante por plataforma, ${packExportReport.clips_in_manifest} clips en el manifiesto.`}</p>}
+                  </div>
+                )}
+                {status === 'complete' && jobId && (
+                  <div className="mb-4 rounded-lg border border-violet-300/40 dark:border-violet-500/35 bg-violet-50/80 dark:bg-violet-500/10 p-3">
+                    <div className="flex flex-wrap items-center gap-2 justify-between">
+                      <p className="text-xs text-violet-700 dark:text-violet-200 font-medium">Métricas sociales</p>
+                      <button
+                        onClick={() => loadSocialMetrics(jobId)}
+                        disabled={isLoadingSocialMetrics}
+                        className="text-[11px] bg-white/80 dark:bg-white/10 border border-violet-300/60 dark:border-violet-400/40 text-violet-700 dark:text-violet-200 rounded px-2 py-1 hover:bg-white dark:hover:bg-white/20 disabled:opacity-50"
+                      >
+                        {isLoadingSocialMetrics ? 'Cargando...' : 'Recargar métricas'}
+                      </button>
+                    </div>
+                    {socialMetrics ? (
+                      <div className="mt-2 text-[11px] text-violet-800 dark:text-violet-100 space-y-1">
+                        <p>{`Intentos: ${socialMetrics.total_attempts || 0} | Exitosos: ${socialMetrics.successful_attempts || 0} | Fallidos: ${socialMetrics.failed_attempts || 0} | Éxito: ${Math.round((Number(socialMetrics.success_rate || 0) * 100))}%`}</p>
+                        <p>{`TikTok: ${socialMetrics?.by_platform?.tiktok?.success || 0}/${socialMetrics?.by_platform?.tiktok?.attempted || 0} · Instagram: ${socialMetrics?.by_platform?.instagram?.success || 0}/${socialMetrics?.by_platform?.instagram?.attempted || 0} · YouTube: ${socialMetrics?.by_platform?.youtube?.success || 0}/${socialMetrics?.by_platform?.youtube?.attempted || 0}`}</p>
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-[11px] text-violet-700/80 dark:text-violet-200/80">Sin datos aún para este proyecto.</p>
+                    )}
                   </div>
                 )}
                 {latestHighlightReel?.video_url && (
                   <div className="mb-4 rounded-lg border border-cyan-500/35 bg-cyan-500/10 p-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <p className="text-xs text-cyan-200">
-                        {`Highlight reel: ${latestHighlightReel.segments_count || '-'} momentos | ${latestHighlightReel.duration || '-'}s`}
+                        {`Highlight reel (${latestHighlightReel?.settings?.aspect_ratio || '-'}): ${latestHighlightReel.segments_count || '-'} momentos | ${latestHighlightReel.duration || '-'}s`}
                       </p>
                       <div className="flex items-center gap-2">
                         <a
@@ -3256,6 +3487,7 @@ function App() {
                                    onOpenStudio={openClipStudio}
                                    onPlay={(time) => handleClipPlay(time)}
                                    onPause={handleClipPause}
+                                   onSocialPosted={() => loadSocialMetrics(jobId, { silent: true })}
                                  />
                                </div>
                              );

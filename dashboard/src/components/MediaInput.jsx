@@ -4,11 +4,11 @@ import { Youtube, Upload, FileVideo, X, CheckCircle2, Settings2 } from 'lucide-r
 const MEDIA_INPUT_STORAGE_KEY = 'mediaInputPresetV2';
 
 const ALLOWED_VALUES = {
-    language: ['auto', 'es', 'en', 'pt', 'fr', 'de', 'it'],
+    language: ['es', 'en', 'fr', 'de', 'it', 'pt', 'auto'],
     whisperBackend: ['openai', 'faster'],
     whisperModel: ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3'],
     ffmpegPreset: ['ultrafast', 'fast', 'medium'],
-    aspectRatio: ['9:16', '16:9'],
+    aspectRatio: ['9:16', '16:9', 'highlight'],
     clipLengthTarget: ['short', 'balanced', 'long']
 };
 
@@ -261,7 +261,7 @@ function loadStoredMediaInputConfig() {
         const parsed = JSON.parse(raw);
         if (!parsed || typeof parsed !== 'object') return null;
         return {
-            language: pickAllowed(parsed.language, ALLOWED_VALUES.language, 'auto'),
+            language: pickAllowed(parsed.language, ALLOWED_VALUES.language, 'es'),
             clipCount: clampNumber(parsed.clipCount, 6, 1, 15),
             whisperBackend: pickAllowed(parsed.whisperBackend, ALLOWED_VALUES.whisperBackend, 'faster'),
             whisperModel: normalizeWhisperModelForBackend(
@@ -290,7 +290,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [mode, setMode] = useState('file'); // 'url' | 'file'
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
-    const [language, setLanguage] = useState(initialConfig?.language ?? 'auto');
+    const [language, setLanguage] = useState(initialConfig?.language ?? 'es');
     const [clipCount, setClipCount] = useState(initialConfig?.clipCount ?? 6);
     const [whisperBackend, setWhisperBackend] = useState(initialConfig?.whisperBackend ?? 'faster');
     const [whisperModel, setWhisperModel] = useState(initialConfig?.whisperModel ?? 'large-v3');
@@ -547,6 +547,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                     >
                                         <option value="9:16">9:16 (Vertical Shorts/Reels/TikTok)</option>
                                         <option value="16:9">16:9 (Horizontal YouTube/Presentación)</option>
+                                        <option value="highlight">Highlight reel (montaje automático de mejores momentos)</option>
                                     </select>
                                 </div>
                                 <div className="space-y-2">
@@ -650,13 +651,13 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                         onChange={(e) => setLanguage(e.target.value)}
                                         className={modalInputClass}
                                     >
-                                        <option value="auto">Detectar automáticamente</option>
                                         <option value="es">Español</option>
                                         <option value="en">Inglés</option>
-                                        <option value="pt">Portugués</option>
                                         <option value="fr">Francés</option>
                                         <option value="de">Alemán</option>
                                         <option value="it">Italiano</option>
+                                        <option value="pt">Portugués</option>
+                                        <option value="auto">Detectar automáticamente</option>
                                     </select>
                                 </div>
                                 <div className="space-y-2">

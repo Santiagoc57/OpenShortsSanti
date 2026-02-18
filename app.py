@@ -15,11 +15,12 @@ import zipfile
 import math
 import struct
 import zlib
+import sqlite3
 from urllib.parse import unquote
 from dotenv import load_dotenv
 from typing import Dict, Optional, List, Any, Tuple
 from collections import Counter
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -41,15 +42,67 @@ MAX_FILE_SIZE_MB = 500  # 500 MB limit
 JOB_RETENTION_SECONDS = 3600  # 1 hour retention
 MAX_AUTO_RETRIES_DEFAULT = int(os.environ.get("MAX_AUTO_RETRIES", "1"))
 JOB_RETRY_DELAY_SECONDS_DEFAULT = int(os.environ.get("JOB_RETRY_DELAY_SECONDS", "10"))
+JOBS_DB_PATH = os.environ.get("JOBS_DB_PATH", os.path.join(OUTPUT_DIR, "jobs_state.sqlite3"))
 
 # Application State
 job_queue = asyncio.Queue()
 jobs: Dict[str, Dict] = {}
 # Semester to limit concurrency to MAX_CONCURRENT_JOBS
 concurrency_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+_JOBS_DB_LOCK = threading.Lock()
 SEARCH_INDEX_CACHE: Dict[str, Dict[str, Any]] = {}
 LOCAL_EMBED_DIM = 256
 SEMANTIC_EMBED_MODEL = os.environ.get("SEMANTIC_EMBED_MODEL", "text-embedding-004")
+DEFAULT_TITLE_REWRITE_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash",
+]
+
+def _parse_model_candidates(raw_value: Optional[str], fallback_models: List[str]) -> List[str]:
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return list(fallback_models)
+    parts = [p.strip() for p in raw.split(",") if str(p or "").strip()]
+    if not parts:
+        return list(fallback_models)
+    out = []
+    seen = set()
+    for model in parts:
+        key = model.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(model)
+    return out or list(fallback_models)
+
+def _is_gemini_model_unavailable_error(err: Exception) -> bool:
+    msg = str(err or "").lower()
+    if not msg:
+        return False
+    if "models/" in msg and "not found" in msg:
+        return True
+    if "model" in msg and "not found" in msg:
+        return True
+    if "model" in msg and "not supported" in msg:
+        return True
+    if "for api version" in msg and "model" in msg:
+        return True
+    if "unknown model" in msg:
+        return True
+    return False
+
+TITLE_REWRITE_MODELS = _parse_model_candidates(
+    os.environ.get("TITLE_REWRITE_MODELS") or os.environ.get("TITLE_REWRITE_MODEL"),
+    DEFAULT_TITLE_REWRITE_MODELS
+)
+SOCIAL_REWRITE_MODELS = _parse_model_candidates(
+    os.environ.get("SOCIAL_REWRITE_MODELS") or os.environ.get("SOCIAL_REWRITE_MODEL"),
+    TITLE_REWRITE_MODELS
+)
+TITLE_VARIANTS_PER_CLIP = max(2, min(8, int(os.environ.get("TITLE_VARIANTS_PER_CLIP", "4"))))
+TITLE_VARIANTS_TOPUP_COUNT = max(1, min(6, int(os.environ.get("TITLE_VARIANTS_TOPUP_COUNT", "3"))))
 ALLOWED_ASPECT_RATIOS = {"9:16", "16:9"}
 ALLOWED_CLIP_LENGTH_TARGETS = {"short", "balanced", "long"}
 _SMART_REF_YOLO_MODEL = None
@@ -77,6 +130,27 @@ def _safe_input_filename(value: Optional[str]) -> str:
     # In case it arrives double-encoded from chained transformations.
     filename = unquote(filename)
     return os.path.basename(filename)
+
+def _resolve_subtitle_source_filename(output_dir: str, filename: str) -> str:
+    """
+    If the incoming file is already a generated `subtitled_*` artifact,
+    peel the prefix while the underlying source exists, so re-applying
+    subtitles does not stack previous burned captions.
+    """
+    current = _safe_input_filename(filename)
+    if not current:
+        return ""
+
+    depth = 0
+    while current.startswith("subtitled_") and depth < 8:
+        candidate = current[len("subtitled_"):]
+        if not candidate or candidate == current:
+            break
+        if not os.path.exists(os.path.join(output_dir, candidate)):
+            break
+        current = candidate
+        depth += 1
+    return current
 
 def _probe_media_duration_seconds(media_path: str) -> float:
     cmd = [
@@ -134,8 +208,11 @@ def _normalize_layout_fit_mode(fit_mode: Optional[str]) -> str:
         fit = "cover"
     return fit
 
-def _coerce_layout_zoom(value: Any, default: float = 1.0) -> float:
-    return max(0.5, min(2.5, _safe_float(value, default)))
+def _coerce_layout_zoom(value: Any, default: float = 1.0, fit_mode: str = "cover") -> float:
+    fit = _normalize_layout_fit_mode(fit_mode)
+    min_zoom = 1.0 if fit == "cover" else 0.5
+    fallback = max(min_zoom, _safe_float(default, 1.0))
+    return max(min_zoom, min(2.5, _safe_float(value, fallback)))
 
 def _coerce_layout_offset(value: Any, default: float = 0.0) -> float:
     return max(-100.0, min(100.0, _safe_float(value, default)))
@@ -151,7 +228,7 @@ def _build_manual_layout_ops_for_target(
     offset_y: float = 0.0
 ) -> List[str]:
     fit = _normalize_layout_fit_mode(fit_mode)
-    z = _coerce_layout_zoom(zoom, 1.0)
+    z = _coerce_layout_zoom(zoom, 1.0, fit)
     ox_raw = _coerce_layout_offset(offset_x, 0.0) / 100.0
     oy_raw = _coerce_layout_offset(offset_y, 0.0) / 100.0
     ox = ox_raw * _LAYOUT_OFFSET_FACTOR
@@ -1125,6 +1202,440 @@ def _safe_float(value, default: float = 0.0) -> float:
 def _normalize_space(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
+def _extract_generated_text(response: Any) -> str:
+    if response is None:
+        return ""
+
+    if isinstance(response, dict):
+        direct = _normalize_space(response.get("text", ""))
+        candidates = response.get("candidates") or []
+    else:
+        direct = _normalize_space(getattr(response, "text", ""))
+        candidates = getattr(response, "candidates", None) or []
+    if direct:
+        return direct
+
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            content = candidate.get("content")
+        else:
+            content = getattr(candidate, "content", None)
+        if content is None:
+            continue
+        if isinstance(content, dict):
+            parts = content.get("parts") or []
+        else:
+            parts = getattr(content, "parts", None) or []
+        chunks: List[str] = []
+        for part in parts:
+            if isinstance(part, dict):
+                text = part.get("text")
+            else:
+                text = getattr(part, "text", None)
+            text_norm = _normalize_space(text)
+            if text_norm:
+                chunks.append(text_norm)
+        merged = _normalize_space(" ".join(chunks))
+        if merged:
+            return merged
+    return ""
+
+def _sanitize_short_title(raw_title: str, max_chars: int = 95) -> str:
+    text = _normalize_space(raw_title)
+    text = text.strip(" \"'`")
+    text = re.sub(r"^[\-\–\—:;,.!?¡¿\s]+", "", text).strip()
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = text.replace("#", "").replace("@", "")
+    text = _normalize_space(text)
+    if len(text) > max_chars:
+        sliced = text[:max_chars]
+        if " " in sliced:
+            sliced = sliced.rsplit(" ", 1)[0]
+        text = sliced.strip()
+    return text
+
+def _title_fingerprint(raw_title: str) -> str:
+    clean = _sanitize_short_title(raw_title).lower()
+    clean = unicodedata.normalize("NFD", clean)
+    clean = "".join(ch for ch in clean if unicodedata.category(ch) != "Mn")
+    return re.sub(r"[^a-z0-9]+", "", clean)
+
+def _dedupe_title_candidates(candidates: List[str], blocked: Optional[List[str]] = None) -> List[str]:
+    blocked_keys = {
+        _title_fingerprint(item)
+        for item in (blocked or [])
+        if _title_fingerprint(item)
+    }
+    seen = set()
+    out: List[str] = []
+    for raw in (candidates or []):
+        clean = _sanitize_short_title(raw)
+        if not clean:
+            continue
+        key = _title_fingerprint(clean)
+        if not key or key in seen or key in blocked_keys:
+            continue
+        seen.add(key)
+        out.append(clean)
+    return out
+
+def _parse_title_variants_payload(raw_text: str) -> List[str]:
+    payload = str(raw_text or "").strip()
+    if not payload:
+        return []
+
+    block = payload
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", payload, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        block = fenced.group(1).strip()
+
+    parsed_candidates: List[str] = []
+    try:
+        parsed = json.loads(block)
+        if isinstance(parsed, list):
+            parsed_candidates = [str(item) for item in parsed]
+        elif isinstance(parsed, dict):
+            for key in ("titles", "variants", "options"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    parsed_candidates = [str(item) for item in value]
+                    break
+                if isinstance(value, str):
+                    parsed_candidates = [value]
+                    break
+    except Exception:
+        parsed_candidates = []
+
+    if parsed_candidates:
+        return _dedupe_title_candidates(parsed_candidates)
+
+    rough_lines = re.split(r"[\r\n]+|(?<!\d)\.\s+", block)
+    fallback_candidates: List[str] = []
+    for line in rough_lines:
+        cleaned = re.sub(r"^\s*[-*•\d\)\.\:]+\s*", "", str(line or "")).strip(" \"'`")
+        cleaned = _sanitize_short_title(cleaned)
+        if cleaned:
+            fallback_candidates.append(cleaned)
+    return _dedupe_title_candidates(fallback_candidates)
+
+def _build_fallback_title(
+    current_title: str,
+    transcript_excerpt: str,
+    topic_tags: List[str],
+    avoid_title: str
+) -> str:
+    clean_current = _sanitize_short_title(current_title)
+    clean_avoid = _sanitize_short_title(avoid_title).lower()
+
+    keyword = ""
+    for tag in topic_tags or []:
+        t = _sanitize_short_title(tag, max_chars=24).lower()
+        if len(t) >= 4:
+            keyword = t
+            break
+    if not keyword:
+        words = re.findall(r"[a-zA-ZÀ-ÿ0-9]{4,}", str(transcript_excerpt or "").lower())
+        stop = {"esto", "esta", "este", "para", "como", "cuando", "donde", "sobre", "porque", "video", "clip"}
+        for word in words:
+            if word in stop:
+                continue
+            keyword = word
+            break
+
+    hooks = [
+        "cambia el debate",
+        "deja una alerta clara",
+        "explica el punto clave",
+        "abre una discusión fuerte",
+        "resume lo más importante"
+    ]
+    lead = [
+        "Lo que no te contaron",
+        "La parte más fuerte",
+        "El momento que explica todo",
+        "Esta frase lo resume",
+        "Así lo dijo sin filtro"
+    ]
+    seed_raw = f"{clean_current}|{transcript_excerpt}|{clean_avoid}|{int(time.time())}"
+    seed = zlib.crc32(seed_raw.encode("utf-8"))
+    lead_text = lead[seed % len(lead)]
+    hook_text = hooks[(seed // max(1, len(lead))) % len(hooks)]
+
+    candidates = []
+    if keyword:
+        candidates.append(f"{lead_text}: {keyword} y por qué {hook_text}")
+        candidates.append(f"{keyword}: {hook_text} en este corte")
+    if clean_current:
+        candidates.append(f"{clean_current} | {hook_text}")
+    candidates.append(f"{lead_text} y por qué {hook_text}")
+
+    for candidate in candidates:
+        clean = _sanitize_short_title(candidate)
+        if not clean:
+            continue
+        if clean.lower() == clean_avoid:
+            continue
+        return clean
+    return _sanitize_short_title(clean_current or "Momento clave del video")
+
+def _generate_rewritten_title(
+    current_title: str,
+    transcript_excerpt: str,
+    social_excerpt: str,
+    topic_tags: List[str],
+    avoid_title: str,
+    api_key: Optional[str]
+) -> str:
+    clean_current = _sanitize_short_title(current_title or avoid_title or "")
+    clean_avoid = _sanitize_short_title(avoid_title).lower()
+    clean_social = _normalize_space(social_excerpt)[:300]
+    clean_transcript = _normalize_space(transcript_excerpt)[:420]
+    safe_tags = [str(tag).strip().lower()[:24] for tag in (topic_tags or []) if str(tag).strip()]
+    tag_line = ", ".join(safe_tags[:6])
+
+    if api_key:
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            prompt = (
+                "Reescribe SOLO el titulo para un clip corto vertical.\n"
+                "Devuelve una sola linea sin comillas.\n"
+                "Reglas: español neutro, 55-95 caracteres, gancho claro, sin emojis, sin hashtags, sin clickbait engañoso.\n"
+                f"Evita repetir literalmente este titulo: {clean_avoid or clean_current or 'n/a'}.\n"
+                f"Titulo actual: {clean_current or 'n/a'}\n"
+                f"Contexto social: {clean_social or 'n/a'}\n"
+                f"Contexto transcript: {clean_transcript or 'n/a'}\n"
+                f"Etiquetas: {tag_line or 'n/a'}"
+            )
+            for model_name in TITLE_REWRITE_MODELS:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt
+                    )
+                except Exception as model_err:
+                    if _is_gemini_model_unavailable_error(model_err):
+                        continue
+                    raise
+                generated = _sanitize_short_title(_extract_generated_text(response))
+                if generated and generated.lower() != clean_avoid:
+                    return generated
+        except Exception:
+            pass
+
+    return _build_fallback_title(
+        current_title=clean_current,
+        transcript_excerpt=clean_transcript,
+        topic_tags=safe_tags,
+        avoid_title=clean_avoid
+    )
+
+def _generate_rewritten_title_variants(
+    current_title: str,
+    transcript_excerpt: str,
+    social_excerpt: str,
+    topic_tags: List[str],
+    avoid_titles: Optional[List[str]],
+    target_count: int,
+    api_key: Optional[str]
+) -> List[str]:
+    safe_target = max(1, min(8, int(target_count or 1)))
+    clean_current = _sanitize_short_title(current_title or "Momento clave del video")
+    clean_social = _normalize_space(social_excerpt)[:320]
+    clean_transcript = _normalize_space(transcript_excerpt)[:460]
+    safe_tags = [str(tag).strip().lower()[:24] for tag in (topic_tags or []) if str(tag).strip()]
+    blocked = _dedupe_title_candidates(list(avoid_titles or []) + [clean_current])
+    results: List[str] = []
+
+    if api_key:
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            blocked_line = "; ".join(blocked[:8]) if blocked else "n/a"
+            tag_line = ", ".join(safe_tags[:6]) if safe_tags else "n/a"
+            prompt = (
+                f"Genera exactamente {safe_target} títulos distintos para un clip vertical.\n"
+                "Responde SOLO como JSON array de strings y nada más.\n"
+                "Reglas: español neutro, 55-95 caracteres, sin emojis, sin hashtags, sin comillas extra.\n"
+                f"Evita repetir literalmente estos títulos: {blocked_line}\n"
+                f"Título base: {clean_current or 'n/a'}\n"
+                f"Contexto social: {clean_social or 'n/a'}\n"
+                f"Contexto transcript: {clean_transcript or 'n/a'}\n"
+                f"Etiquetas: {tag_line}"
+            )
+            for model_name in TITLE_REWRITE_MODELS:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt
+                    )
+                except Exception as model_err:
+                    if _is_gemini_model_unavailable_error(model_err):
+                        continue
+                    raise
+
+                raw = _extract_generated_text(response)
+                parsed = _parse_title_variants_payload(raw)
+                parsed = _dedupe_title_candidates(parsed, blocked=blocked + results)
+                if parsed:
+                    results.extend(parsed)
+                    results = _dedupe_title_candidates(results, blocked=blocked)
+                if len(results) >= safe_target:
+                    break
+        except Exception:
+            pass
+
+    attempts = max(8, safe_target * 4)
+    while len(results) < safe_target and attempts > 0:
+        avoid_line = " | ".join((blocked + results)[-10:] or [clean_current])
+        candidate = _generate_rewritten_title(
+            current_title=clean_current,
+            transcript_excerpt=clean_transcript,
+            social_excerpt=clean_social,
+            topic_tags=safe_tags,
+            avoid_title=avoid_line,
+            api_key=api_key
+        )
+        deduped = _dedupe_title_candidates([candidate], blocked=blocked + results)
+        if deduped:
+            results.extend(deduped)
+        attempts -= 1
+
+    filler_guard = 0
+    while len(results) < safe_target and filler_guard < (safe_target * 4):
+        salt = f"{int(time.time() * 1000)}-{len(results)}-{filler_guard}"
+        candidate = _build_fallback_title(
+            current_title=clean_current,
+            transcript_excerpt=clean_transcript,
+            topic_tags=safe_tags,
+            avoid_title=" | ".join((blocked + results + [salt])[-12:])
+        )
+        deduped = _dedupe_title_candidates([candidate], blocked=blocked + results)
+        if deduped:
+            results.extend(deduped)
+        filler_guard += 1
+
+    return _dedupe_title_candidates(results, blocked=blocked)[:safe_target]
+
+def _sanitize_social_copy(text: str, max_chars: int = 280) -> str:
+    raw = _normalize_space(text)
+    if not raw:
+        return ""
+    raw = raw.replace("\n", " ").strip()
+    raw = re.sub(r"\s+", " ", raw)
+    if len(raw) > max_chars:
+        cut = raw[:max_chars].rsplit(" ", 1)[0].strip()
+        raw = cut or raw[:max_chars].strip()
+    return raw
+
+def _ensure_social_cta(text: str, token_hint: str = "CLIP") -> str:
+    clean = _sanitize_social_copy(text)
+    if not clean:
+        return f'Sígueme y comenta "{token_hint}" y te envío más análisis.'
+    if re.search(r"sig[uú]eme\s+y\s+comenta", clean, flags=re.IGNORECASE):
+        return clean
+    suffix = f'Sígueme y comenta "{token_hint}" y te envío más análisis.'
+    return _sanitize_social_copy(f"{clean} {suffix}")
+
+def _build_fallback_social_copy(
+    current_social: str,
+    current_title: str,
+    transcript_excerpt: str,
+    score_reason: str,
+    topic_tags: List[str]
+) -> str:
+    seed_raw = "|".join([
+        str(current_social or ""),
+        str(current_title or ""),
+        str(transcript_excerpt or ""),
+        str(score_reason or ""),
+        ",".join(topic_tags or [])
+    ])
+    seed = zlib.crc32(seed_raw.encode("utf-8"))
+
+    base = _sanitize_social_copy(current_social)
+    if not base:
+        title = _sanitize_short_title(current_title or "Este clip")
+        score = _normalize_space(score_reason or "")
+        score = score[:120]
+        openers = [
+            f"{title}: este momento resume el punto más fuerte del debate.",
+            f"{title}: aquí se explica por qué este tema está generando tanta conversación.",
+            f"{title}: un corte clave para entender el contexto completo."
+        ]
+        base = openers[seed % len(openers)]
+        if score:
+            base = f"{base} {score}"
+
+    token = "CLIP"
+    for tag in topic_tags or []:
+        normalized = _sanitize_short_title(tag, max_chars=24)
+        if normalized and len(normalized) >= 4:
+            token = normalized.upper()
+            break
+    if token == "CLIP":
+        words = re.findall(r"[a-zA-ZÀ-ÿ0-9]{4,}", str(transcript_excerpt or ""))
+        for word in words[:20]:
+            token = word.upper()
+            break
+
+    return _ensure_social_cta(base, token_hint=token[:18] if token else "CLIP")
+
+def _generate_rewritten_social_copy(
+    current_social: str,
+    current_title: str,
+    transcript_excerpt: str,
+    score_reason: str,
+    topic_tags: List[str],
+    api_key: Optional[str]
+) -> str:
+    clean_current = _sanitize_social_copy(current_social, max_chars=340)
+    clean_title = _sanitize_short_title(current_title or "")
+    clean_transcript = _normalize_space(transcript_excerpt)[:420]
+    clean_reason = _normalize_space(score_reason)[:220]
+    safe_tags = [str(tag).strip().lower()[:24] for tag in (topic_tags or []) if str(tag).strip()]
+    tag_line = ", ".join(safe_tags[:6]) or "n/a"
+
+    if api_key:
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            prompt = (
+                "Reescribe SOLO el texto social para un clip vertical.\n"
+                "Devuelve una sola línea sin comillas.\n"
+                "Reglas: español neutro, 150-280 caracteres, claro y natural, sin inventar datos, máximo 2 hashtags.\n"
+                "Incluye CTA al final con formato: Sígueme y comenta \"PALABRA\" y te envío más análisis.\n"
+                f"Texto actual: {clean_current or 'n/a'}\n"
+                f"Título del clip: {clean_title or 'n/a'}\n"
+                f"Transcript: {clean_transcript or 'n/a'}\n"
+                f"Razón de viralidad: {clean_reason or 'n/a'}\n"
+                f"Etiquetas: {tag_line}"
+            )
+            for model_name in SOCIAL_REWRITE_MODELS:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt
+                    )
+                except Exception as model_err:
+                    if _is_gemini_model_unavailable_error(model_err):
+                        continue
+                    raise
+                generated = _sanitize_social_copy(_extract_generated_text(response))
+                generated = _ensure_social_cta(generated, token_hint="CLIP")
+                if generated:
+                    return generated
+        except Exception:
+            pass
+
+    return _build_fallback_social_copy(
+        current_social=clean_current,
+        current_title=clean_title,
+        transcript_excerpt=clean_transcript,
+        score_reason=clean_reason,
+        topic_tags=safe_tags
+    )
+
 def _vector_norm(vec: List[float]) -> float:
     return math.sqrt(sum(v * v for v in vec))
 
@@ -1968,6 +2479,94 @@ def _clip_transcript_excerpt(
         excerpt = f"{excerpt[:max_chars - 3].rstrip()}..."
     return excerpt
 
+def _ensure_clip_title_variant_pool(
+    clip: Dict[str, Any],
+    transcript: Optional[Dict[str, Any]],
+    api_key: Optional[str],
+    target_size: int = TITLE_VARIANTS_PER_CLIP
+) -> Tuple[List[str], int, bool]:
+    if not isinstance(clip, dict):
+        return [], 0, False
+
+    safe_target = max(2, min(8, int(target_size or TITLE_VARIANTS_PER_CLIP)))
+    current_title = _sanitize_short_title(
+        clip.get("video_title_for_youtube_short")
+        or clip.get("title")
+        or "Momento clave del video"
+    ) or "Momento clave del video"
+    current_fp = _title_fingerprint(current_title)
+
+    raw_variants = clip.get("title_variants") if isinstance(clip.get("title_variants"), list) else []
+    variants = _dedupe_title_candidates(raw_variants)
+    variant_keys = {_title_fingerprint(v) for v in variants if _title_fingerprint(v)}
+    if current_fp and current_fp not in variant_keys:
+        variants = _dedupe_title_candidates([current_title] + variants)
+    elif not variants:
+        variants = [current_title]
+
+    changed = False
+    if len(variants) < safe_target:
+        social_excerpt = _normalize_space(" ".join([
+            str(clip.get("video_description_for_tiktok", "")),
+            str(clip.get("video_description_for_instagram", "")),
+            str(clip.get("score_reason", ""))
+        ]))
+        transcript_excerpt = _normalize_space(
+            clip.get("transcript_excerpt")
+            or _clip_transcript_excerpt(clip, transcript, max_chars=420, max_segments=10)
+        )
+        tags = _normalize_topic_tags(clip.get("topic_tags"))
+        missing = safe_target - len(variants)
+        generated = _generate_rewritten_title_variants(
+            current_title=current_title,
+            transcript_excerpt=transcript_excerpt,
+            social_excerpt=social_excerpt,
+            topic_tags=tags,
+            avoid_titles=variants,
+            target_count=missing,
+            api_key=api_key
+        )
+        if generated:
+            variants = _dedupe_title_candidates(variants + generated)
+            changed = True
+
+    raw_idx = clip.get("title_variant_index")
+    idx: Optional[int] = None
+    if raw_idx is not None:
+        try:
+            idx = int(raw_idx)
+        except Exception:
+            idx = None
+    if idx is None:
+        idx = 0
+        if current_fp:
+            for i, candidate in enumerate(variants):
+                if _title_fingerprint(candidate) == current_fp:
+                    idx = i
+                    break
+    idx = max(0, min(len(variants) - 1, idx)) if variants else 0
+
+    active_title = variants[idx] if variants else current_title
+    if clip.get("video_title_for_youtube_short") != active_title:
+        clip["video_title_for_youtube_short"] = active_title
+        changed = True
+    if clip.get("title") != active_title:
+        clip["title"] = active_title
+        changed = True
+    if clip.get("title_variants") != variants:
+        clip["title_variants"] = variants
+        changed = True
+    prev_idx_raw = clip.get("title_variant_index")
+    try:
+        prev_idx = int(prev_idx_raw)
+    except Exception:
+        prev_idx = None
+    if prev_idx != idx:
+        clip["title_variant_index"] = idx
+        changed = True
+
+    return variants, idx, changed
+
 def _normalize_clip_payload(clip: Dict, rank: int, transcript: Optional[Dict[str, Any]] = None) -> Dict:
     """
     Ensure clip carries stable metadata used by the dashboard:
@@ -2010,6 +2609,314 @@ def _normalize_clip_payload(clip: Dict, rank: int, transcript: Optional[Dict[str
 
     return clip
 
+def _jobs_db_connect() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(JOBS_DB_PATH) or ".", exist_ok=True)
+    conn = sqlite3.connect(JOBS_DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    return conn
+
+def _init_jobs_store():
+    with _JOBS_DB_LOCK:
+        conn = _jobs_db_connect()
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS job_state (
+                    job_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+def _safe_job_snapshot(job: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = dict(job or {})
+
+    logs = snapshot.get("logs")
+    if isinstance(logs, list):
+        snapshot["logs"] = [str(item) for item in logs][-1600:]
+    else:
+        snapshot["logs"] = []
+
+    social_posts = snapshot.get("social_posts")
+    if isinstance(social_posts, list):
+        snapshot["social_posts"] = social_posts[-300:]
+    else:
+        snapshot["social_posts"] = []
+
+    env_payload = snapshot.get("env")
+    if isinstance(env_payload, dict):
+        snapshot["env"] = {str(k): str(v) for k, v in env_payload.items()}
+
+    return snapshot
+
+def _persist_job_state(job_id: str):
+    job = jobs.get(job_id)
+    if not isinstance(job, dict):
+        return
+    now = time.time()
+    job["updated_at"] = now
+    snapshot = _safe_job_snapshot(job)
+    status = str(snapshot.get("status", "unknown"))
+    payload = json.dumps(snapshot, ensure_ascii=False, default=str)
+
+    with _JOBS_DB_LOCK:
+        conn = _jobs_db_connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO job_state (job_id, status, payload_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    status = excluded.status,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (job_id, status, payload, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+def _delete_persisted_job(job_id: str):
+    with _JOBS_DB_LOCK:
+        conn = _jobs_db_connect()
+        try:
+            conn.execute("DELETE FROM job_state WHERE job_id = ?", (job_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+def _load_persisted_job(job_id: str) -> Optional[Dict[str, Any]]:
+    with _JOBS_DB_LOCK:
+        conn = _jobs_db_connect()
+        try:
+            row = conn.execute(
+                "SELECT payload_json FROM job_state WHERE job_id = ? LIMIT 1",
+                (job_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        return None
+    try:
+        payload = json.loads(row[0])
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        return None
+    return None
+
+def _load_all_persisted_jobs(limit: int = 400) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    safe_limit = max(10, min(4000, int(limit)))
+    with _JOBS_DB_LOCK:
+        conn = _jobs_db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT job_id, payload_json FROM job_state ORDER BY updated_at DESC LIMIT ?",
+                (safe_limit,)
+            ).fetchall()
+        finally:
+            conn.close()
+    for row in rows:
+        try:
+            job_id = str(row[0])
+            payload = json.loads(row[1])
+            if isinstance(payload, dict):
+                out[job_id] = payload
+        except Exception:
+            continue
+    return out
+
+def _metadata_path_for_job(job_id: str) -> Optional[str]:
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    if not os.path.isdir(output_dir):
+        return None
+    candidates = sorted(glob.glob(os.path.join(output_dir, "*_metadata.json")))
+    if not candidates:
+        return None
+    return candidates[0]
+
+def _materialize_result_from_metadata(job_id: str, metadata: Dict[str, Any], metadata_path: str) -> Dict[str, Any]:
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    transcript_data = metadata.get("transcript") if isinstance(metadata, dict) else None
+    shorts = metadata.get("shorts", []) if isinstance(metadata, dict) else []
+    if not isinstance(shorts, list):
+        shorts = []
+
+    base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
+    clips: List[Dict[str, Any]] = []
+    for i, raw_clip in enumerate(shorts):
+        clip = _normalize_clip_payload(
+            dict(raw_clip) if isinstance(raw_clip, dict) else {},
+            i,
+            transcript=transcript_data
+        )
+        video_url = str(clip.get("video_url", "") or "").strip()
+        if video_url:
+            clip_name = _safe_input_filename(video_url)
+            if clip_name:
+                clip["video_url"] = f"/videos/{job_id}/{clip_name}"
+        else:
+            clip_name = f"{base_name}_clip_{i+1}.mp4"
+            if os.path.exists(os.path.join(output_dir, clip_name)):
+                clip["video_url"] = f"/videos/{job_id}/{clip_name}"
+        clips.append(clip)
+
+    result_payload: Dict[str, Any] = {
+        "clips": clips,
+        "cost_analysis": metadata.get("cost_analysis") if isinstance(metadata, dict) else None
+    }
+    if isinstance(metadata.get("highlight_reels"), list):
+        result_payload["highlight_reels"] = metadata.get("highlight_reels", [])
+        if result_payload["highlight_reels"]:
+            result_payload["latest_highlight_reel"] = result_payload["highlight_reels"][-1]
+    return result_payload
+
+def _normalize_recovered_job(job_id: str, payload: Dict[str, Any], source: str) -> Dict[str, Any]:
+    job = dict(payload or {})
+    job["status"] = str(job.get("status", "completed"))
+    job["output_dir"] = str(job.get("output_dir") or os.path.join(OUTPUT_DIR, job_id))
+    raw_input = job.get("input_path")
+    job["input_path"] = str(raw_input) if raw_input else None
+    job["logs"] = [str(item) for item in (job.get("logs") if isinstance(job.get("logs"), list) else [])][-1600:]
+    if not job["logs"]:
+        job["logs"] = [f"Recovered from {source}."]
+    elif not any("Recovered from" in entry for entry in job["logs"][-3:]):
+        job["logs"].append(f"Recovered from {source}.")
+
+    for key, default in (
+        ("attempt_count", 0),
+        ("auto_retry_count", 0),
+        ("manual_retry_count", 0),
+        ("max_auto_retries", MAX_AUTO_RETRIES_DEFAULT),
+        ("retry_delay_seconds", JOB_RETRY_DELAY_SECONDS_DEFAULT),
+    ):
+        try:
+            job[key] = int(job.get(key, default))
+        except Exception:
+            job[key] = int(default)
+
+    job["last_error"] = job.get("last_error")
+    social_posts = job.get("social_posts")
+    job["social_posts"] = social_posts[-300:] if isinstance(social_posts, list) else []
+    return job
+
+def _recover_job_from_artifacts(job_id: str) -> Optional[Dict[str, Any]]:
+    output_dir = os.path.join(OUTPUT_DIR, job_id)
+    if not os.path.isdir(output_dir):
+        return None
+
+    metadata_path = _metadata_path_for_job(job_id)
+    metadata = {}
+    result_payload: Optional[Dict[str, Any]] = None
+    status = "processing"
+
+    if metadata_path:
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+            if isinstance(metadata, dict):
+                result_payload = _materialize_result_from_metadata(job_id, metadata, metadata_path)
+                clips = result_payload.get("clips", []) if isinstance(result_payload, dict) else []
+                if isinstance(clips, list) and len(clips) > 0:
+                    status = "completed"
+        except Exception:
+            metadata = {}
+
+    upload_candidates = sorted(glob.glob(os.path.join(UPLOAD_DIR, f"{job_id}_*")), key=lambda p: os.path.getmtime(p), reverse=True)
+    input_path = upload_candidates[0] if upload_candidates else None
+
+    job: Dict[str, Any] = {
+        "status": status,
+        "logs": [f"Recovered from artifacts ({job_id})."],
+        "output_dir": output_dir,
+        "input_path": input_path,
+        "attempt_count": 0,
+        "auto_retry_count": 0,
+        "manual_retry_count": 0,
+        "max_auto_retries": MAX_AUTO_RETRIES_DEFAULT,
+        "retry_delay_seconds": JOB_RETRY_DELAY_SECONDS_DEFAULT,
+        "last_error": None,
+        "social_posts": metadata.get("social_posts", []) if isinstance(metadata.get("social_posts"), list) else []
+    }
+    if isinstance(result_payload, dict):
+        job["result"] = result_payload
+    return _normalize_recovered_job(job_id, job, source="artifacts")
+
+def _ensure_job_context(job_id: str) -> Optional[Dict[str, Any]]:
+    existing = jobs.get(job_id)
+    if isinstance(existing, dict):
+        return existing
+
+    from_store = _load_persisted_job(job_id)
+    if isinstance(from_store, dict):
+        recovered = _normalize_recovered_job(job_id, from_store, source="sqlite")
+        if "result" not in recovered:
+            artifact = _recover_job_from_artifacts(job_id)
+            if isinstance(artifact, dict) and isinstance(artifact.get("result"), dict):
+                recovered["result"] = artifact["result"]
+                recovered["status"] = artifact.get("status", recovered.get("status", "completed"))
+        jobs[job_id] = recovered
+        _persist_job_state(job_id)
+        return recovered
+
+    artifact = _recover_job_from_artifacts(job_id)
+    if isinstance(artifact, dict):
+        jobs[job_id] = artifact
+        _persist_job_state(job_id)
+        return artifact
+    return None
+
+async def _restore_runtime_jobs_from_store():
+    persisted = _load_all_persisted_jobs(limit=600)
+
+    for job_id, payload in persisted.items():
+        if not isinstance(payload, dict):
+            continue
+        if job_id in jobs:
+            continue
+        jobs[job_id] = _normalize_recovered_job(job_id, payload, source="sqlite (startup)")
+
+    # Recover completed jobs that may exist only as artifacts.
+    try:
+        for entry in os.listdir(OUTPUT_DIR):
+            candidate = str(entry).strip()
+            if not candidate or candidate in jobs:
+                continue
+            recovered = _recover_job_from_artifacts(candidate)
+            if isinstance(recovered, dict):
+                jobs[candidate] = recovered
+    except Exception:
+        pass
+
+    for job_id in list(jobs.keys()):
+        job = jobs.get(job_id)
+        if not isinstance(job, dict):
+            continue
+        status = str(job.get("status", ""))
+        if status in {"queued", "retrying", "processing"}:
+            cmd = job.get("cmd")
+            env = job.get("env")
+            if isinstance(cmd, list) and len(cmd) > 0 and isinstance(env, dict):
+                if status != "queued":
+                    job["status"] = "queued"
+                    job.setdefault("logs", []).append("Recovered after restart; job re-queued.")
+                await job_queue.put(job_id)
+            else:
+                job["status"] = "failed"
+                job.setdefault("logs", []).append(
+                    "Recovered after restart, but command context was incomplete."
+                )
+                if not job.get("last_error"):
+                    job["last_error"] = "Lost active process after restart"
+        _persist_job_state(job_id)
+
 async def cleanup_jobs():
     """Background task to remove old jobs and files."""
     import time
@@ -2029,6 +2936,7 @@ async def cleanup_jobs():
                         shutil.rmtree(job_path, ignore_errors=True)
                         if job_id in jobs:
                             del jobs[job_id]
+                        _delete_persisted_job(job_id)
                         SEARCH_INDEX_CACHE.pop(job_id, None)
 
             # Cleanup Uploads
@@ -2064,7 +2972,7 @@ async def process_queue():
 async def run_job_wrapper(job_id):
     """Wrapper to run job and release semaphore"""
     try:
-        job = jobs.get(job_id)
+        job = _ensure_job_context(job_id)
         if job:
             await run_job(job_id, job)
     except Exception as e:
@@ -2077,11 +2985,20 @@ async def run_job_wrapper(job_id):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _init_jobs_store()
+    await _restore_runtime_jobs_from_store()
     # Start worker and cleanup
     worker_task = asyncio.create_task(process_queue())
     cleanup_task = asyncio.create_task(cleanup_jobs())
-    yield
-    # Cleanup (optional: cancel worker)
+    try:
+        yield
+    finally:
+        worker_task.cancel()
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker_task
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
 
 app = FastAPI(lifespan=lifespan)
 
@@ -2103,6 +3020,7 @@ class ProcessRequest(BaseModel):
 
 def enqueue_output(out, job_id):
     """Reads output from a subprocess and appends it to jobs logs."""
+    persist_tick = 0
     try:
         for line in iter(out.readline, b''):
             decoded_line = line.decode('utf-8').strip()
@@ -2110,6 +3028,9 @@ def enqueue_output(out, job_id):
                 print(f"📝 [Job Output] {decoded_line}")
                 if job_id in jobs:
                     jobs[job_id]['logs'].append(decoded_line)
+                    persist_tick += 1
+                    if persist_tick % 12 == 0:
+                        _persist_job_state(job_id)
     except Exception as e:
         print(f"Error reading output for job {job_id}: {e}")
     finally:
@@ -2134,10 +3055,11 @@ async def _delayed_retry_enqueue(job_id: str, delay_seconds: int, trigger: str):
         return
     job['status'] = 'queued'
     job['logs'].append(f"Retry enqueued ({trigger}).")
+    _persist_job_state(job_id)
     await job_queue.put(job_id)
 
 async def _queue_job_retry(job_id: str, reason: str, trigger: str = "auto", delay_seconds: Optional[int] = None) -> Tuple[bool, str]:
-    job = jobs.get(job_id)
+    job = _ensure_job_context(job_id)
     if not job:
         return False, "Job not found"
 
@@ -2171,10 +3093,12 @@ async def _queue_job_retry(job_id: str, reason: str, trigger: str = "auto", dela
 
     if delay > 0:
         job['status'] = 'retrying'
+        _persist_job_state(job_id)
         asyncio.create_task(_delayed_retry_enqueue(job_id, delay, trigger))
     else:
         job['status'] = 'queued'
         job['logs'].append(f"Retry enqueued ({trigger}).")
+        _persist_job_state(job_id)
         await job_queue.put(job_id)
 
     return True, msg
@@ -2190,15 +3114,18 @@ async def run_job(job_id, job_data):
     attempt_count = int(jobs[job_id]['attempt_count'])
     jobs[job_id]['status'] = 'processing'
     jobs[job_id]['logs'].append(f"Job attempt #{attempt_count} started by worker.")
+    _persist_job_state(job_id)
     print(f"🎬 [run_job] Executing command for {job_id}: {' '.join(cmd)}")
 
     async def _fail_or_retry(reason: str):
         jobs[job_id]['last_error'] = reason
         retry_ok, _ = await _queue_job_retry(job_id, reason, trigger="auto")
         if retry_ok:
+            _persist_job_state(job_id)
             return
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['logs'].append(reason)
+        _persist_job_state(job_id)
     
     try:
         process = subprocess.Popen(
@@ -2216,6 +3143,7 @@ async def run_job(job_id, job_data):
         
         # Async wait for process with incremental updates
         start_wait = time.time()
+        last_partial_clip_count = -1
         while process.poll() is None:
             await asyncio.sleep(2)
             
@@ -2251,6 +3179,9 @@ async def run_job(job_id, job_data):
                         
                         if ready_clips:
                              jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
+                             if len(ready_clips) != last_partial_clip_count:
+                                 last_partial_clip_count = len(ready_clips)
+                                 _persist_job_state(job_id)
             except Exception as e:
                 # Ignore read errors during processing
                 pass
@@ -2282,12 +3213,32 @@ async def run_job(job_id, job_data):
                 cost_analysis = data.get('cost_analysis')
 
                 transcript_data = data.get('transcript') if isinstance(data, dict) else None
+                title_variants_changed = False
+                title_variant_api_key = _normalize_space(
+                    (jobs.get(job_id, {}).get("env", {}) or {}).get("GEMINI_API_KEY", "")
+                ) or _normalize_space(os.environ.get("GEMINI_API_KEY", ""))
                 for i, clip in enumerate(clips):
                      clip = _normalize_clip_payload(clip, i, transcript=transcript_data)
+                     _, _, clip_changed = _ensure_clip_title_variant_pool(
+                         clip,
+                         transcript=transcript_data,
+                         api_key=title_variant_api_key,
+                         target_size=TITLE_VARIANTS_PER_CLIP
+                     )
+                     title_variants_changed = bool(title_variants_changed or clip_changed)
                      clip_filename = f"{base_name}_clip_{i+1}.mp4"
                      clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+
+                if title_variants_changed and isinstance(data, dict):
+                    try:
+                        data["shorts"] = clips
+                        with open(target_json, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=2, ensure_ascii=False)
+                    except Exception:
+                        pass
                 
                 jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
+                _persist_job_state(job_id)
             else:
                  await _fail_or_retry("No metadata file generated.")
         else:
@@ -2427,21 +3378,31 @@ async def process_endpoint(
         'retry_delay_seconds': retry_delay_seconds,
         'last_error': None
     }
+    _persist_job_state(job_id)
     
     await job_queue.put(job_id)
     
     return {"job_id": job_id, "status": "queued"}
 
+@app.get("/api/status/__healthcheck__")
+async def status_healthcheck():
+    return {
+        "ok": True,
+        "timestamp": int(time.time()),
+        "jobs_in_memory": len(jobs)
+    }
+
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str):
-    if job_id not in jobs:
+    job = _ensure_job_context(job_id)
+    if not isinstance(job, dict):
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = jobs[job_id]
+
     return {
         "status": job['status'],
         "logs": job['logs'],
         "result": job.get('result'),
+        "updated_at": int(_safe_float(job.get('updated_at', 0), 0)),
         "retry": {
             "attempt_count": int(job.get('attempt_count', 0)),
             "auto_retry_count": int(job.get('auto_retry_count', 0)),
@@ -2452,12 +3413,32 @@ async def get_status(job_id: str):
         }
     }
 
+@app.get("/api/jobs/recent")
+async def list_recent_jobs(limit: int = 20):
+    safe_limit = max(1, min(100, int(limit or 20)))
+    items: List[Dict[str, Any]] = []
+    for job_id, job in list(jobs.items()):
+        if not isinstance(job, dict):
+            continue
+        result = job.get("result", {}) if isinstance(job.get("result"), dict) else {}
+        clips = result.get("clips", []) if isinstance(result, dict) else []
+        highlight_reels = result.get("highlight_reels", []) if isinstance(result, dict) else []
+        items.append({
+            "job_id": job_id,
+            "status": str(job.get("status", "unknown")),
+            "clips_count": len(clips) if isinstance(clips, list) else 0,
+            "has_highlight_reel": bool(isinstance(highlight_reels, list) and len(highlight_reels) > 0),
+            "last_error": job.get("last_error"),
+            "updated_at": int(_safe_float(job.get("updated_at", 0), 0))
+        })
+    items = sorted(items, key=lambda row: row.get("updated_at", 0), reverse=True)
+    return {"items": items[:safe_limit]}
+
 @app.post("/api/retry/{job_id}")
 async def retry_job(job_id: str):
-    if job_id not in jobs:
+    job = _ensure_job_context(job_id)
+    if not isinstance(job, dict):
         raise HTTPException(status_code=404, detail="Job not found")
-
-    job = jobs[job_id]
     if job.get('status') != 'failed':
         raise HTTPException(status_code=409, detail=f"Job is {job.get('status')}. Manual retry is only allowed for failed jobs.")
     ok, msg = await _queue_job_retry(job_id, reason="Manual retry requested", trigger="manual", delay_seconds=0)
@@ -2477,7 +3458,7 @@ async def retry_job(job_id: str):
     }
 
 from editor import VideoEditor
-from subtitles import generate_srt, burn_subtitles, generate_karaoke_ass_from_srt, generate_styled_ass_from_srt
+from subtitles import generate_srt, burn_subtitles, generate_karaoke_ass_from_srt, generate_styled_ass_from_srt, _sanitize_font_name
 
 class EditRequest(BaseModel):
     job_id: str
@@ -2496,10 +3477,9 @@ async def edit_clip(
     if not final_api_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header or Body)")
 
-    if req.job_id not in jobs:
+    job = _ensure_job_context(req.job_id)
+    if not isinstance(job, dict):
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = jobs[req.job_id]
     if 'result' not in job or 'clips' not in job['result']:
         raise HTTPException(status_code=400, detail="Job result not available")
         
@@ -2613,8 +3593,8 @@ class SubtitleRequest(BaseModel):
     job_id: str
     clip_index: int
     position: str = "bottom" # top, middle, bottom
-    font_size: int = 34
-    font_family: str = "Montserrat"
+    font_size: int = 40
+    font_family: str = "Anton"
     font_color: str = "#FFFFFF"
     stroke_color: str = "#000000"
     stroke_width: int = 5
@@ -2629,12 +3609,10 @@ class SubtitleRequest(BaseModel):
 
 @app.post("/api/subtitle")
 async def add_subtitles(req: SubtitleRequest):
-    if req.job_id not in jobs:
+    job = _ensure_job_context(req.job_id)
+    if not isinstance(job, dict):
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    # Reload job data from disk just in case metadata was updated
-    job = jobs[req.job_id]
-    
+
     # We need to access metadata.json to get the transcript
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
@@ -2659,9 +3637,12 @@ async def add_subtitles(req: SubtitleRequest):
     if req.input_filename:
         # Use chained file
         filename = _safe_input_filename(req.input_filename)
+        filename = _resolve_subtitle_source_filename(output_dir, filename)
     else:
         # Fallback to standard naming
         filename = _safe_input_filename(clip_data.get('video_url', ''))
+        if filename:
+            filename = _resolve_subtitle_source_filename(output_dir, filename)
         if not filename:
              base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
              filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
@@ -2674,6 +3655,7 @@ async def add_subtitles(req: SubtitleRequest):
         
     caption_offset_x = max(-100.0, min(100.0, _safe_float(req.caption_offset_x, 0.0)))
     caption_offset_y = max(-100.0, min(100.0, _safe_float(req.caption_offset_y, 0.0)))
+    resolved_font_family = _sanitize_font_name(req.font_family)
 
     # Define outputs
     subtitle_ext = "ass"
@@ -2683,7 +3665,8 @@ async def add_subtitles(req: SubtitleRequest):
     # Output video
     # We create a new file "subtitled_..."
     base_name = os.path.splitext(filename)[0]
-    output_filename = f"subtitled_{base_name}.mp4"
+    output_nonce = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    output_filename = f"subtitled_{base_name}_{output_nonce}.mp4"
     output_path = os.path.join(output_dir, output_filename)
     
     try:
@@ -2709,7 +3692,7 @@ async def add_subtitles(req: SubtitleRequest):
                 subtitle_path,
                 alignment=req.position,
                 font_size=req.font_size,
-                font_name=req.font_family,
+                font_name=resolved_font_family,
                 font_color=req.font_color,
                 active_word_color="auto",
                 stroke_color=req.stroke_color,
@@ -2729,7 +3712,7 @@ async def add_subtitles(req: SubtitleRequest):
                 subtitle_path,
                 alignment=req.position,
                 font_size=req.font_size,
-                font_name=req.font_family,
+                font_name=resolved_font_family,
                 font_color=req.font_color,
                 stroke_color=req.stroke_color,
                 stroke_width=req.stroke_width,
@@ -2751,7 +3734,7 @@ async def add_subtitles(req: SubtitleRequest):
                  output_path,
                  alignment=req.position,
                  fontsize=req.font_size,
-                 font_name=req.font_family,
+                 font_name=resolved_font_family,
                  font_color=req.font_color,
                  stroke_color=req.stroke_color,
                  stroke_width=req.stroke_width,
@@ -2768,25 +3751,55 @@ async def add_subtitles(req: SubtitleRequest):
         new_video_url = f"/videos/{req.job_id}/{output_filename}"
         
         try:
+            clips[req.clip_index]['video_url'] = new_video_url
             clips[req.clip_index]['caption_position'] = req.position
             clips[req.clip_index]['caption_offset_x'] = round(caption_offset_x, 3)
             clips[req.clip_index]['caption_offset_y'] = round(caption_offset_y, 3)
+            clips[req.clip_index]['caption_font_size'] = int(req.font_size)
+            clips[req.clip_index]['caption_font_family'] = str(resolved_font_family or "Anton")
+            clips[req.clip_index]['caption_font_color'] = str(req.font_color or "#FFFFFF")
+            clips[req.clip_index]['caption_stroke_color'] = str(req.stroke_color or "#000000")
+            clips[req.clip_index]['caption_stroke_width'] = int(req.stroke_width)
+            clips[req.clip_index]['caption_bold'] = bool(req.bold)
+            clips[req.clip_index]['caption_box_color'] = str(req.box_color or "#000000")
+            clips[req.clip_index]['caption_box_opacity'] = int(req.box_opacity)
+            clips[req.clip_index]['caption_karaoke_mode'] = bool(req.karaoke_mode)
             with open(json_files[0], 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception:
             pass
 
         if 'result' in job and 'clips' in job['result'] and req.clip_index < len(job['result']['clips']):
+            job['result']['clips'][req.clip_index]['video_url'] = new_video_url
             job['result']['clips'][req.clip_index]['caption_position'] = req.position
             job['result']['clips'][req.clip_index]['caption_offset_x'] = round(caption_offset_x, 3)
             job['result']['clips'][req.clip_index]['caption_offset_y'] = round(caption_offset_y, 3)
+            job['result']['clips'][req.clip_index]['caption_font_size'] = int(req.font_size)
+            job['result']['clips'][req.clip_index]['caption_font_family'] = str(resolved_font_family or "Anton")
+            job['result']['clips'][req.clip_index]['caption_font_color'] = str(req.font_color or "#FFFFFF")
+            job['result']['clips'][req.clip_index]['caption_stroke_color'] = str(req.stroke_color or "#000000")
+            job['result']['clips'][req.clip_index]['caption_stroke_width'] = int(req.stroke_width)
+            job['result']['clips'][req.clip_index]['caption_bold'] = bool(req.bold)
+            job['result']['clips'][req.clip_index]['caption_box_color'] = str(req.box_color or "#000000")
+            job['result']['clips'][req.clip_index]['caption_box_opacity'] = int(req.box_opacity)
+            job['result']['clips'][req.clip_index]['caption_karaoke_mode'] = bool(req.karaoke_mode)
+            _persist_job_state(req.job_id)
 
         return {
             "success": True,
             "new_video_url": new_video_url,
             "caption_position": req.position,
             "caption_offset_x": round(caption_offset_x, 3),
-            "caption_offset_y": round(caption_offset_y, 3)
+            "caption_offset_y": round(caption_offset_y, 3),
+            "caption_font_size": int(req.font_size),
+            "caption_font_family": str(resolved_font_family or "Anton"),
+            "caption_font_color": str(req.font_color or "#FFFFFF"),
+            "caption_stroke_color": str(req.stroke_color or "#000000"),
+            "caption_stroke_width": int(req.stroke_width),
+            "caption_bold": bool(req.bold),
+            "caption_box_color": str(req.box_color or "#000000"),
+            "caption_box_opacity": int(req.box_opacity),
+            "caption_karaoke_mode": bool(req.karaoke_mode)
         }
         
     except Exception as e:
@@ -2799,7 +3812,8 @@ class SubtitlePreviewRequest(BaseModel):
 
 @app.post("/api/subtitle/preview")
 async def preview_subtitles(req: SubtitlePreviewRequest):
-    if req.job_id not in jobs:
+    job = _ensure_job_context(req.job_id)
+    if not isinstance(job, dict):
         raise HTTPException(status_code=404, detail="Job not found")
 
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
@@ -2834,6 +3848,317 @@ async def preview_subtitles(req: SubtitlePreviewRequest):
 
     return {"srt": content}
 
+class FastPreviewRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    input_filename: Optional[str] = None
+    start: Optional[float] = None
+    duration: float = 3.0
+    aspect_ratio: Optional[str] = None
+
+@app.post("/api/clip/fast-preview")
+async def generate_fast_preview(req: FastPreviewRequest):
+    job = _ensure_job_context(req.job_id)
+    if not isinstance(job, dict):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    if not os.path.isdir(output_dir):
+        raise HTTPException(status_code=404, detail="Job output directory not found")
+
+    metadata_path = _metadata_path_for_job(req.job_id)
+    if not metadata_path:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    clips = metadata.get("shorts", []) if isinstance(metadata.get("shorts"), list) else []
+    if req.clip_index < 0 or req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+    clip_data = clips[req.clip_index] if isinstance(clips[req.clip_index], dict) else {}
+
+    if req.input_filename:
+        source_name = _safe_input_filename(req.input_filename)
+    else:
+        source_name = _safe_input_filename(clip_data.get("video_url", ""))
+        if not source_name:
+            base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
+            source_name = f"{base_name}_clip_{req.clip_index + 1}.mp4"
+    source_path = os.path.join(output_dir, source_name)
+    if not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {source_path}")
+
+    clip_start = max(0.0, _safe_float(clip_data.get("start", 0.0), 0.0))
+    requested_start = max(0.0, _safe_float(req.start, clip_start))
+    duration = max(0.6, min(8.0, _safe_float(req.duration, 3.0)))
+    aspect_ratio = normalize_aspect_ratio(req.aspect_ratio, default=str(clip_data.get("aspect_ratio", "9:16"))) or "9:16"
+    target_w, target_h = (1080, 1920) if aspect_ratio == "9:16" else (1920, 1080)
+    vf_filter = f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h}"
+
+    out_name = f"fast_preview_clip_{req.clip_index+1}_{int(time.time())}_{uuid.uuid4().hex[:6]}.mp4"
+    out_path = os.path.join(output_dir, out_name)
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{requested_start:.3f}",
+        "-t", f"{duration:.3f}",
+        "-i", source_path,
+        "-vf", vf_filter,
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf", "24",
+        "-preset", "veryfast",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        out_path
+    ]
+    run = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if run.returncode != 0 or not os.path.exists(out_path):
+        raise HTTPException(status_code=500, detail=run.stderr.decode("utf-8", errors="ignore") or "Failed to render fast preview")
+
+    return {
+        "success": True,
+        "clip_index": req.clip_index,
+        "aspect_ratio": aspect_ratio,
+        "start": round(requested_start, 3),
+        "duration": round(_probe_media_duration_seconds(out_path), 3),
+        "preview_video_url": f"/videos/{req.job_id}/{out_name}"
+    }
+
+class RetitleRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    current_title: Optional[str] = None
+
+@app.post("/api/clip/retitle")
+async def retitle_clip(
+    req: RetitleRequest,
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+):
+    job = _ensure_job_context(req.job_id)
+    final_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    metadata_path: Optional[str] = None
+    metadata_data: Dict[str, Any] = {}
+    metadata_clips: List[Dict[str, Any]] = []
+    clip_payload: Dict[str, Any] = {}
+    transcript_data: Optional[Dict[str, Any]] = None
+    context_source = "request_only"
+
+    if os.path.isdir(output_dir):
+        json_files = sorted(glob.glob(os.path.join(output_dir, "*_metadata.json")))
+        if json_files:
+            metadata_path = json_files[0]
+            try:
+                with open(metadata_path, "r", encoding="utf-8") as f:
+                    metadata_data = json.load(f)
+                if isinstance(metadata_data.get("shorts"), list):
+                    metadata_clips = metadata_data.get("shorts") or []
+                transcript_data = metadata_data.get("transcript") if isinstance(metadata_data, dict) else None
+            except Exception:
+                metadata_path = None
+                metadata_data = {}
+                metadata_clips = []
+                transcript_data = None
+
+    if req.clip_index >= 0 and req.clip_index < len(metadata_clips):
+        maybe_clip = metadata_clips[req.clip_index]
+        if isinstance(maybe_clip, dict):
+            clip_payload = maybe_clip
+            context_source = "metadata"
+
+    if not clip_payload and isinstance(job, dict) and isinstance(job.get("result"), dict):
+        result_clips = job["result"].get("clips", [])
+        if isinstance(result_clips, list) and req.clip_index >= 0 and req.clip_index < len(result_clips):
+            maybe_clip = result_clips[req.clip_index]
+            if isinstance(maybe_clip, dict):
+                clip_payload = maybe_clip
+                context_source = "runtime_job"
+
+    current_title = _sanitize_short_title(
+        req.current_title
+        or clip_payload.get("video_title_for_youtube_short")
+        or clip_payload.get("title")
+        or "Momento clave del video"
+    ) or "Momento clave del video"
+
+    social_excerpt = _normalize_space(" ".join([
+        str(clip_payload.get("video_description_for_tiktok", "")),
+        str(clip_payload.get("video_description_for_instagram", "")),
+        str(clip_payload.get("score_reason", ""))
+    ]))
+    transcript_excerpt = _normalize_space(
+        clip_payload.get("transcript_excerpt")
+        or _clip_transcript_excerpt(clip_payload, transcript_data, max_chars=420, max_segments=10)
+    )
+    tags = _normalize_topic_tags(clip_payload.get("topic_tags"))
+
+    variants, active_index, _ = _ensure_clip_title_variant_pool(
+        clip_payload,
+        transcript=transcript_data,
+        api_key=final_api_key,
+        target_size=TITLE_VARIANTS_PER_CLIP
+    )
+    if not variants:
+        variants = [current_title]
+        active_index = 0
+
+    current_fp = _title_fingerprint(current_title)
+    if current_fp:
+        current_match = next((i for i, title in enumerate(variants) if _title_fingerprint(title) == current_fp), None)
+        if current_match is not None:
+            active_index = current_match
+        else:
+            variants = _dedupe_title_candidates([current_title] + variants)
+            active_index = 0
+
+    next_index = active_index + 1
+    if next_index >= len(variants):
+        extra_variants = _generate_rewritten_title_variants(
+            current_title=current_title,
+            transcript_excerpt=transcript_excerpt,
+            social_excerpt=social_excerpt,
+            topic_tags=tags,
+            avoid_titles=variants,
+            target_count=TITLE_VARIANTS_TOPUP_COUNT,
+            api_key=final_api_key
+        )
+        if extra_variants:
+            variants = _dedupe_title_candidates(variants + extra_variants)
+        if next_index >= len(variants):
+            next_index = 0 if len(variants) > 1 else 0
+
+    new_title = _sanitize_short_title(variants[next_index] if variants else current_title) or current_title
+    if not new_title:
+        raise HTTPException(status_code=500, detail="Could not generate a new title.")
+
+    clip_patch = {
+        "video_title_for_youtube_short": new_title,
+        "title": new_title,
+        "title_variants": variants,
+        "title_variant_index": int(next_index)
+    }
+
+    if metadata_path and metadata_clips and req.clip_index >= 0 and req.clip_index < len(metadata_clips):
+        try:
+            metadata_clips[req.clip_index].update(clip_patch)
+            if isinstance(metadata_data, dict):
+                metadata_data["shorts"] = metadata_clips
+                with open(metadata_path, "w", encoding="utf-8") as f:
+                    json.dump(metadata_data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    if isinstance(job, dict) and isinstance(job.get("result"), dict):
+        result_clips = job["result"].get("clips", [])
+        if isinstance(result_clips, list) and req.clip_index < len(result_clips) and isinstance(result_clips[req.clip_index], dict):
+            result_clips[req.clip_index].update(clip_patch)
+        _persist_job_state(req.job_id)
+
+    return {
+        "success": True,
+        "clip_index": req.clip_index,
+        "context_source": context_source,
+        "previous_title": current_title,
+        "new_title": new_title,
+        "title_variants": variants,
+        "title_variant_index": int(next_index),
+        "title_variant_total": len(variants),
+        "clip_patch": clip_patch
+    }
+
+class ResocialRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    current_social: Optional[str] = None
+
+@app.post("/api/clip/resocial")
+async def rewrite_clip_social(
+    req: ResocialRequest,
+    x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
+):
+    _ensure_job_context(req.job_id)
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    if not os.path.isdir(output_dir):
+        raise HTTPException(status_code=404, detail="Job output directory not found")
+
+    json_files = sorted(glob.glob(os.path.join(output_dir, "*_metadata.json")))
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+
+    metadata_path = json_files[0]
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read metadata: {e}")
+
+    metadata_clips = data.get("shorts") if isinstance(data.get("shorts"), list) else []
+    if req.clip_index < 0 or req.clip_index >= len(metadata_clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip_payload = metadata_clips[req.clip_index] if isinstance(metadata_clips[req.clip_index], dict) else {}
+    transcript_data = data.get("transcript") if isinstance(data, dict) else None
+
+    current_social = _normalize_space(
+        req.current_social
+        or clip_payload.get("video_description_for_tiktok")
+        or clip_payload.get("video_description_for_instagram")
+        or ""
+    )
+    current_title = _normalize_space(
+        clip_payload.get("video_title_for_youtube_short")
+        or clip_payload.get("title")
+        or ""
+    )
+    transcript_excerpt = _normalize_space(
+        clip_payload.get("transcript_excerpt")
+        or _clip_transcript_excerpt(clip_payload, transcript_data, max_chars=420, max_segments=10)
+    )
+    score_reason = _normalize_space(clip_payload.get("score_reason") or "")
+    tags = _normalize_topic_tags(clip_payload.get("topic_tags"))
+    final_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    if not final_api_key:
+        raise HTTPException(status_code=400, detail="Missing Gemini API key. Set X-Gemini-Key or GEMINI_API_KEY.")
+
+    new_social = _generate_rewritten_social_copy(
+        current_social=current_social,
+        current_title=current_title,
+        transcript_excerpt=transcript_excerpt,
+        score_reason=score_reason,
+        topic_tags=tags,
+        api_key=final_api_key
+    )
+    if not new_social:
+        raise HTTPException(status_code=500, detail="Could not generate new social copy.")
+
+    clip_patch = {
+        "video_description_for_tiktok": new_social,
+        "video_description_for_instagram": new_social
+    }
+
+    try:
+        metadata_clips[req.clip_index].update(clip_patch)
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+    job = _ensure_job_context(req.job_id)
+    if isinstance(job, dict) and isinstance(job.get("result"), dict):
+        result_clips = job["result"].get("clips", [])
+        if isinstance(result_clips, list) and req.clip_index < len(result_clips) and isinstance(result_clips[req.clip_index], dict):
+            result_clips[req.clip_index].update(clip_patch)
+    _persist_job_state(req.job_id)
+
+    return {
+        "success": True,
+        "clip_index": req.clip_index,
+        "previous_social": current_social,
+        "new_social": new_social,
+        "clip_patch": clip_patch
+    }
+
 class RecutRequest(BaseModel):
     job_id: str
     clip_index: int
@@ -2842,7 +4167,7 @@ class RecutRequest(BaseModel):
     aspect_ratio: Optional[str] = None
     layout_mode: Optional[str] = "single"  # single | split
     fit_mode: Optional[str] = "cover"  # cover | contain
-    zoom: Optional[float] = 1.0        # 0.5 .. 2.5
+    zoom: Optional[float] = 1.0        # contain: 0.5..2.5 | cover: 1.0..2.5
     offset_x: Optional[float] = 0.0    # -100 .. 100
     offset_y: Optional[float] = 0.0    # -100 .. 100
     split_zoom_a: Optional[float] = 1.0
@@ -2869,10 +4194,10 @@ def _parse_form_bool(value: Any, default: bool = False) -> bool:
 
 @app.post("/api/recut")
 async def recut_clip(req: RecutRequest):
-    if req.job_id not in jobs:
+    job = _ensure_job_context(req.job_id)
+    if not isinstance(job, dict):
         raise HTTPException(status_code=404, detail="Job not found")
 
-    job = jobs[req.job_id]
     input_path = job.get('input_path')
     if not input_path or not os.path.exists(input_path):
         raise HTTPException(status_code=400, detail="Original source video not available for recut.")
@@ -2884,13 +4209,13 @@ async def recut_clip(req: RecutRequest):
     if layout_mode not in {"single", "split"}:
         layout_mode = "single"
     fit_mode = _normalize_layout_fit_mode(req.fit_mode)
-    zoom = _coerce_layout_zoom(req.zoom, 1.0)
+    zoom = _coerce_layout_zoom(req.zoom, 1.0, fit_mode)
     offset_x = _coerce_layout_offset(req.offset_x, 0.0)
     offset_y = _coerce_layout_offset(req.offset_y, 0.0)
-    split_zoom_a = _coerce_layout_zoom(req.split_zoom_a, zoom)
+    split_zoom_a = _coerce_layout_zoom(req.split_zoom_a, zoom, fit_mode)
     split_offset_a_x = _coerce_layout_offset(req.split_offset_a_x, offset_x)
     split_offset_a_y = _coerce_layout_offset(req.split_offset_a_y, offset_y)
-    split_zoom_b = _coerce_layout_zoom(req.split_zoom_b, zoom)
+    split_zoom_b = _coerce_layout_zoom(req.split_zoom_b, zoom, fit_mode)
     split_offset_b_x = _coerce_layout_offset(req.split_offset_b_x, -offset_x)
     split_offset_b_y = _coerce_layout_offset(req.split_offset_b_y, offset_y)
     auto_smart_requested = bool(req.auto_smart_reframe)
@@ -3051,6 +4376,7 @@ async def recut_clip(req: RecutRequest):
             job['result']['clips'][req.clip_index]['layout_smart_summary'] = smart_summary
         elif 'layout_smart_summary' in job['result']['clips'][req.clip_index]:
             del job['result']['clips'][req.clip_index]['layout_smart_summary']
+        _persist_job_state(req.job_id)
 
     return {
         "success": True,
@@ -3074,7 +4400,8 @@ async def add_background_music(
     music_volume: float = Form(0.18),
     duck_voice: Optional[str] = Form("true")
 ):
-    if job_id not in jobs:
+    job = _ensure_job_context(job_id)
+    if not isinstance(job, dict):
         raise HTTPException(status_code=404, detail="Job not found")
 
     output_dir = os.path.join(OUTPUT_DIR, job_id)
@@ -3211,11 +4538,11 @@ async def add_background_music(
             pass
 
         # Keep in-memory job result in sync.
-        job = jobs.get(job_id, {})
         if isinstance(job.get("result"), dict):
             job_clips = job["result"].get("clips", [])
             if isinstance(job_clips, list) and clip_index < len(job_clips):
                 job_clips[clip_index]["video_url"] = new_video_url
+            _persist_job_state(job_id)
 
         return {"success": True, "new_video_url": new_video_url}
     finally:
@@ -3503,18 +4830,64 @@ def _build_platform_variants_rows(normalized_clips: List[Dict[str, Any]]) -> Lis
         rows.append([clip_no, clip_index, "tiktok", title_yt, desc_tk or desc_ig, hashtags, tags_joined, score, start, end])
     return rows
 
+def _platform_variant_target(platform: str) -> Tuple[str, int, int]:
+    key = str(platform or "").strip().lower()
+    if key == "youtube":
+        return "16:9", 1920, 1080
+    return "9:16", 1080, 1920
+
+def _render_platform_variant_video(
+    source_path: str,
+    output_path: str,
+    platform: str
+) -> bool:
+    if not source_path or not os.path.exists(source_path):
+        return False
+    ratio, target_w, target_h = _platform_variant_target(platform)
+
+    in_w, in_h = _probe_video_dimensions(source_path)
+    if in_w <= 0 or in_h <= 0:
+        return False
+    vf_filter, _, _ = _build_manual_layout_filter(
+        in_w=in_w,
+        in_h=in_h,
+        aspect_ratio=ratio,
+        fit_mode="cover",
+        zoom=1.0,
+        offset_x=0.0,
+        offset_y=0.0
+    )
+    # Normalize final output dimensions per platform for delivery consistency.
+    vf_final = f"{vf_filter},scale={target_w}:{target_h}"
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", source_path,
+        "-vf", vf_final,
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf", "23",
+        "-preset", "fast",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        output_path
+    ]
+    run = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    return run.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0
+
 class ExportPackRequest(BaseModel):
     job_id: str
     include_video_files: bool = True
     include_srt_files: bool = True
     include_thumbnails: bool = True
     include_platform_variants: bool = True
+    include_platform_video_variants: bool = False
     thumbnail_format: str = "jpg"
     thumbnail_width: int = 1080
 
 @app.post("/api/export/pack")
 async def export_pack(req: ExportPackRequest):
-    if req.job_id not in jobs:
+    job = _ensure_job_context(req.job_id)
+    if not isinstance(job, dict):
         raise HTTPException(status_code=404, detail="Job not found")
 
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
@@ -3531,7 +4904,6 @@ async def export_pack(req: ExportPackRequest):
         except Exception:
             metadata = {}
 
-    job = jobs[req.job_id]
     clips = []
     if isinstance(job.get("result"), dict):
         clips = job["result"].get("clips", []) or []
@@ -3609,6 +4981,7 @@ async def export_pack(req: ExportPackRequest):
         variants_writer.writerow(row)
 
     thumbnails_generated = []
+    platform_video_variants: List[Dict[str, Any]] = []
     for i, clip in enumerate(normalized_clips):
         clip_file = _clip_file_path_from_payload(output_dir, clip, i + 1)
         if not clip_file:
@@ -3630,19 +5003,44 @@ async def export_pack(req: ExportPackRequest):
             clip["thumbnail_url"] = f"/videos/{req.job_id}/{os.path.basename(thumb_path)}"
             thumbnails_generated.append(thumb_path)
 
+        if req.include_platform_video_variants:
+            for platform in ("youtube", "instagram", "tiktok"):
+                variant_name = f"variant_clip_{i+1}_{platform}_{int(time.time())}.mp4"
+                variant_path = os.path.join(output_dir, variant_name)
+                ok = _render_platform_variant_video(
+                    source_path=clip_file,
+                    output_path=variant_path,
+                    platform=platform
+                )
+                if not ok:
+                    continue
+                ratio, _, _ = _platform_variant_target(platform)
+                variant_entry = {
+                    "clip_number": i + 1,
+                    "clip_index": clip.get("clip_index", i),
+                    "platform": platform,
+                    "aspect_ratio": ratio,
+                    "filename": variant_name,
+                    "video_url": f"/videos/{req.job_id}/{variant_name}",
+                }
+                platform_video_variants.append(variant_entry)
+                clip.setdefault("platform_video_variants", []).append(variant_entry)
+
     manifest = {
         "job_id": req.job_id,
         "generated_at": int(time.time()),
-        "export_version": "v2",
+        "export_version": "v3",
         "options": {
             "include_video_files": bool(req.include_video_files),
             "include_srt_files": bool(req.include_srt_files),
             "include_thumbnails": bool(req.include_thumbnails),
             "include_platform_variants": bool(req.include_platform_variants),
+            "include_platform_video_variants": bool(req.include_platform_video_variants),
             "thumbnail_format": thumb_format,
             "thumbnail_width": thumb_width
         },
-        "clips": normalized_clips
+        "clips": normalized_clips,
+        "platform_video_variants": platform_video_variants
     }
 
     zip_name = f"agency_pack_{req.job_id}_{int(time.time())}.zip"
@@ -3650,6 +5048,7 @@ async def export_pack(req: ExportPackRequest):
     clip_files_added = 0
     srt_files_added = 0
     thumbnail_files_added = 0
+    platform_video_variant_files_added = 0
 
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -3689,6 +5088,19 @@ async def export_pack(req: ExportPackRequest):
                 zf.write(thumb_path, arcname=f"thumbnails/{os.path.basename(thumb_path)}")
                 thumbnail_files_added += 1
 
+        if req.include_platform_video_variants and platform_video_variants:
+            seen_variants = set()
+            for item in platform_video_variants:
+                filename = _safe_input_filename(item.get("filename", ""))
+                if not filename:
+                    continue
+                variant_path = os.path.join(output_dir, filename)
+                if variant_path in seen_variants or not os.path.exists(variant_path):
+                    continue
+                seen_variants.add(variant_path)
+                zf.write(variant_path, arcname=f"platform_variants/{filename}")
+                platform_video_variant_files_added += 1
+
     return {
         "success": True,
         "pack_url": f"/videos/{req.job_id}/{zip_name}",
@@ -3696,7 +5108,8 @@ async def export_pack(req: ExportPackRequest):
         "video_files_added": clip_files_added,
         "srt_files_added": srt_files_added,
         "thumbnail_files_added": thumbnail_files_added,
-        "platform_variant_rows": len(platform_rows) if req.include_platform_variants else 0
+        "platform_variant_rows": len(platform_rows) if req.include_platform_variants else 0,
+        "platform_video_variant_files_added": platform_video_variant_files_added
     }
 
 class HighlightReelRequest(BaseModel):
@@ -3706,12 +5119,12 @@ class HighlightReelRequest(BaseModel):
     min_segment_seconds: float = 4.5
     max_segment_seconds: float = 11.0
     min_gap_seconds: float = 7.0
+    aspect_ratio: Optional[str] = None
 
 @app.post("/api/highlight/reel")
+@app.post("/api/highlight-reel")
 async def generate_highlight_reel(req: HighlightReelRequest):
-    if req.job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-
+    _ensure_job_context(req.job_id)
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     if not os.path.isdir(output_dir):
         raise HTTPException(status_code=404, detail="Job output directory not found")
@@ -3727,9 +5140,9 @@ async def generate_highlight_reel(req: HighlightReelRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read metadata: {e}")
 
-    job = jobs[req.job_id]
+    job = _ensure_job_context(req.job_id)
     clips = []
-    if isinstance(job.get("result"), dict):
+    if isinstance(job, dict) and isinstance(job.get("result"), dict):
         clips = job["result"].get("clips", []) or []
     if not clips and isinstance(metadata, dict):
         clips = metadata.get("shorts", []) or []
@@ -3745,8 +5158,17 @@ async def generate_highlight_reel(req: HighlightReelRequest):
         )
         for i, clip in enumerate(clips)
     ]
+    inferred_aspect_ratio = "9:16"
+    for clip in normalized_clips:
+        raw_ar = str(clip.get("aspect_ratio", "")).strip().replace("/", ":")
+        if raw_ar in ALLOWED_ASPECT_RATIOS:
+            inferred_aspect_ratio = raw_ar
+            break
+    target_aspect_ratio = normalize_aspect_ratio(req.aspect_ratio, default=inferred_aspect_ratio) or inferred_aspect_ratio
+    target_w, target_h = (1080, 1920) if target_aspect_ratio == "9:16" else (1920, 1080)
+    segment_vf = f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h}"
 
-    safe_max_segments = max(2, min(12, int(req.max_segments)))
+    safe_max_segments = max(1, min(12, int(req.max_segments)))
     safe_target_duration = max(12.0, min(240.0, _safe_float(req.target_duration, 50.0)))
     safe_min_segment = max(1.0, min(20.0, _safe_float(req.min_segment_seconds, 4.5)))
     safe_max_segment = max(safe_min_segment, min(35.0, _safe_float(req.max_segment_seconds, 11.0)))
@@ -3761,8 +5183,8 @@ async def generate_highlight_reel(req: HighlightReelRequest):
         max_segment_seconds=safe_max_segment,
         min_gap_seconds=safe_min_gap
     )
-    if len(planned_segments) < 2:
-        raise HTTPException(status_code=400, detail="Not enough diverse moments to compose a highlight reel")
+    if len(planned_segments) < 1:
+        raise HTTPException(status_code=400, detail="No se encontraron momentos suficientes para componer el highlight reel")
 
     ts = int(time.time())
     reel_id = f"hl_{ts}_{uuid.uuid4().hex[:8]}"
@@ -3783,6 +5205,7 @@ async def generate_highlight_reel(req: HighlightReelRequest):
                 "-ss", f"{start_local:.3f}",
                 "-to", f"{end_local:.3f}",
                 "-i", item["source_file_path"],
+                "-vf", segment_vf,
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
                 "-c:a", "aac",
                 "-movflags", "+faststart",
@@ -3816,8 +5239,8 @@ async def generate_highlight_reel(req: HighlightReelRequest):
                 "transcript_excerpt": item.get("transcript_excerpt", "")
             })
 
-        if len(temp_segments) < 2:
-            raise HTTPException(status_code=400, detail="No se pudieron renderizar suficientes segmentos para el highlight reel")
+        if len(temp_segments) < 1:
+            raise HTTPException(status_code=400, detail="No se pudieron renderizar segmentos para el highlight reel")
 
         with open(concat_file, "w", encoding="utf-8") as f:
             for path in temp_segments:
@@ -3858,6 +5281,7 @@ async def generate_highlight_reel(req: HighlightReelRequest):
         "segments_count": len(stitched_segments),
         "segments": stitched_segments,
         "settings": {
+            "aspect_ratio": target_aspect_ratio,
             "max_segments": safe_max_segments,
             "target_duration": round(safe_target_duration, 3),
             "min_segment_seconds": round(safe_min_segment, 3),
@@ -3866,6 +5290,8 @@ async def generate_highlight_reel(req: HighlightReelRequest):
         },
         "warnings": warnings
     }
+    if len(stitched_segments) == 1:
+        highlight_entry["warnings"].append("Solo se detectó 1 momento utilizable; se generó highlight reel de 1 segmento.")
 
     if not isinstance(metadata.get("highlight_reels"), list):
         metadata["highlight_reels"] = []
@@ -3877,19 +5303,22 @@ async def generate_highlight_reel(req: HighlightReelRequest):
     except Exception:
         pass
 
-    if not isinstance(job.get("result"), dict):
-        job["result"] = {"clips": normalized_clips}
-    result_payload = job["result"]
-    if not isinstance(result_payload.get("highlight_reels"), list):
-        result_payload["highlight_reels"] = []
-    result_payload["highlight_reels"].append(highlight_entry)
-    result_payload["highlight_reels"] = result_payload["highlight_reels"][-20:]
-    result_payload["latest_highlight_reel"] = highlight_entry
+    if isinstance(job, dict):
+        if not isinstance(job.get("result"), dict):
+            job["result"] = {"clips": normalized_clips}
+        result_payload = job["result"]
+        if not isinstance(result_payload.get("highlight_reels"), list):
+            result_payload["highlight_reels"] = []
+        result_payload["highlight_reels"].append(highlight_entry)
+        result_payload["highlight_reels"] = result_payload["highlight_reels"][-20:]
+        result_payload["latest_highlight_reel"] = highlight_entry
+        _persist_job_state(req.job_id)
 
     return {
         "success": True,
         "reel": highlight_entry,
         "reel_url": highlight_entry["video_url"],
+        "aspect_ratio": target_aspect_ratio,
         "warnings": warnings
     }
 
@@ -4084,7 +5513,8 @@ async def search_clips(
     req: ClipSearchRequest,
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
-    if req.job_id not in jobs:
+    job = _ensure_job_context(req.job_id)
+    if not isinstance(job, dict):
         raise HTTPException(status_code=404, detail="Job not found")
 
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
@@ -4123,7 +5553,7 @@ async def search_clips(
     if isinstance(data.get("shorts"), list):
         clips = data.get("shorts") or []
     if not clips:
-        job_result = jobs.get(req.job_id, {}).get("result", {})
+        job_result = job.get("result", {}) if isinstance(job, dict) else {}
         if isinstance(job_result, dict):
             clips = job_result.get("clips", []) or []
 
@@ -4256,7 +5686,8 @@ async def evaluate_clip_search(
     req: ClipSearchEvalRequest,
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
-    if req.job_id not in jobs:
+    job = _ensure_job_context(req.job_id)
+    if not isinstance(job, dict):
         raise HTTPException(status_code=404, detail="Job not found")
     if not req.cases:
         raise HTTPException(status_code=400, detail="cases cannot be empty")
@@ -4414,12 +5845,91 @@ class SocialPostRequest(BaseModel):
 
 import httpx
 
+def _append_social_post_event(
+    job_id: str,
+    clip_index: int,
+    platforms: List[str],
+    status: str,
+    status_code: int,
+    detail: str = "",
+    vendor_payload: Optional[Dict[str, Any]] = None
+):
+    job = _ensure_job_context(job_id)
+    if not isinstance(job, dict):
+        return
+
+    event = {
+        "timestamp": int(time.time()),
+        "clip_index": int(max(0, clip_index)),
+        "platforms": [str(p) for p in (platforms or [])],
+        "status": str(status or "unknown"),
+        "status_code": int(status_code or 0),
+        "detail": str(detail or "")[:400],
+        "vendor_payload": vendor_payload if isinstance(vendor_payload, dict) else None,
+    }
+    posts = job.setdefault("social_posts", [])
+    if not isinstance(posts, list):
+        posts = []
+        job["social_posts"] = posts
+    posts.append(event)
+    job["social_posts"] = posts[-300:]
+    _persist_job_state(job_id)
+
+    metadata_path = _metadata_path_for_job(job_id)
+    if metadata_path:
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+            events = metadata.get("social_posts", [])
+            if not isinstance(events, list):
+                events = []
+            events.append(event)
+            metadata["social_posts"] = events[-300:]
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+def _compute_social_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    safe_events = [e for e in events if isinstance(e, dict)]
+    total = len(safe_events)
+    success = sum(1 for e in safe_events if str(e.get("status", "")).lower() == "success")
+    failed = total - success
+
+    by_platform: Dict[str, Dict[str, int]] = {
+        "tiktok": {"attempted": 0, "success": 0, "failed": 0},
+        "instagram": {"attempted": 0, "success": 0, "failed": 0},
+        "youtube": {"attempted": 0, "success": 0, "failed": 0},
+    }
+    for event in safe_events:
+        platforms = event.get("platforms", [])
+        if not isinstance(platforms, list):
+            continue
+        is_ok = str(event.get("status", "")).lower() == "success"
+        for platform in platforms:
+            key = str(platform or "").strip().lower()
+            if key not in by_platform:
+                by_platform[key] = {"attempted": 0, "success": 0, "failed": 0}
+            by_platform[key]["attempted"] += 1
+            if is_ok:
+                by_platform[key]["success"] += 1
+            else:
+                by_platform[key]["failed"] += 1
+
+    return {
+        "total_attempts": total,
+        "successful_attempts": success,
+        "failed_attempts": failed,
+        "success_rate": round((success / total), 4) if total > 0 else 0.0,
+        "by_platform": by_platform,
+    }
+
 @app.post("/api/social/post")
 async def post_to_socials(req: SocialPostRequest):
-    if req.job_id not in jobs:
+    job = _ensure_job_context(req.job_id)
+    if not isinstance(job, dict):
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    job = jobs[req.job_id]
+
     if 'result' not in job or 'clips' not in job['result']:
         raise HTTPException(status_code=400, detail="Job result not available")
         
@@ -4493,11 +6003,74 @@ async def post_to_socials(req: SocialPostRequest):
              print(f"❌ Upload-Post Error: {response.text}")
              raise HTTPException(status_code=response.status_code, detail=f"Vendor API Error: {response.text}")
 
-        return response.json()
+        try:
+            vendor_payload = response.json()
+        except Exception:
+            vendor_payload = {"raw_response": response.text[:1500]}
+        _append_social_post_event(
+            job_id=req.job_id,
+            clip_index=req.clip_index,
+            platforms=req.platforms,
+            status="success",
+            status_code=response.status_code,
+            detail="Published/scheduled successfully",
+            vendor_payload=vendor_payload if isinstance(vendor_payload, dict) else None
+        )
+        return vendor_payload
+
+    except HTTPException as e:
+        print(f"❌ Social Post HTTPException: {e.detail}")
+        _append_social_post_event(
+            job_id=req.job_id,
+            clip_index=req.clip_index,
+            platforms=req.platforms,
+            status="failed",
+            status_code=e.status_code,
+            detail=str(e.detail)
+        )
+        raise
 
     except Exception as e:
         print(f"❌ Social Post Exception: {e}")
+        _append_social_post_event(
+            job_id=req.job_id,
+            clip_index=req.clip_index,
+            platforms=req.platforms,
+            status="failed",
+            status_code=500,
+            detail=str(e)
+        )
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/social/metrics/{job_id}")
+async def get_social_metrics(job_id: str):
+    job = _ensure_job_context(job_id)
+    if not isinstance(job, dict):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    events: List[Dict[str, Any]] = []
+    if isinstance(job.get("social_posts"), list):
+        events.extend([e for e in job.get("social_posts", []) if isinstance(e, dict)])
+
+    if not events:
+        metadata_path = _metadata_path_for_job(job_id)
+        if metadata_path:
+            try:
+                with open(metadata_path, "r", encoding="utf-8") as f:
+                    metadata = json.load(f)
+                metadata_events = metadata.get("social_posts", [])
+                if isinstance(metadata_events, list):
+                    events.extend([e for e in metadata_events if isinstance(e, dict)])
+            except Exception:
+                pass
+
+    events = sorted(events, key=lambda e: int(_safe_float(e.get("timestamp", 0), 0)), reverse=True)
+    metrics = _compute_social_metrics(events)
+    return {
+        "job_id": job_id,
+        **metrics,
+        "recent_events": events[:30]
+    }
 
 @app.get("/api/social/user")
 async def get_social_user(api_key: str = Header(..., alias="X-Upload-Post-Key")):

@@ -127,6 +127,17 @@ También puedes enviar directamente `POST /api/search/clips/eval`.
 
 ---
 
+## 🧩 Novedades Operativas (Colab/Ngrok)
+
+- **Persistencia de jobs**: estado en SQLite (`output/jobs_state.sqlite3`) para recuperar proyectos tras reinicio.
+- **Healthcheck real**: `GET /api/status/__healthcheck__`.
+- **Recuperación de proyectos**: `GET /api/jobs/recent`.
+- **Métricas sociales**: `GET /api/social/metrics/{job_id}`.
+- **Highlight reel configurable**: `POST /api/highlight/reel` con `aspect_ratio` (`9:16` o `16:9`).
+- **Preview rápido de edición**: `POST /api/clip/fast-preview`.
+
+---
+
 ## 🔒 Security & Performance
 
 *   **Non-Root Execution**: Containers run as a dedicated `appuser` for security.
@@ -280,3 +291,92 @@ Se forzó salida `yuv420p` y `faststart` para que los previews funcionen en nave
 # ✅ Notas rápidas
 - Si el preview falla, prueba regenerar el clip (ahora sale compatible).
 - Si Auto Edit no hace nada: falta GEMINI_API_KEY o falla `/api/edit`.
+
+---
+
+# ☁️ Modo Colab-First (verificado)
+
+Este es el flujo estable cuando el procesamiento corre en Colab y tu Mac solo usa el frontend.
+
+## 1) Frontend en Mac
+```bash
+cd "/Users/santiagocordoba/GITHUBS/-- 05 Openshorts-main 2/dashboard"
+npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+Luego en la app:
+- Ir a `Configuración`.
+- Pegar la URL pública de ngrok en `Backend remoto (Colab / ngrok)`.
+- Guardar.
+
+> `set-colab-api.sh` queda como alternativa por terminal, pero no es obligatorio si ya usas el campo en la UI.
+
+## 2) Backend en Colab
+```python
+%cd /content
+!rm -rf OpenShortsSanti
+!git clone https://github.com/Santiagoc57/OpenShortsSanti.git
+%cd /content/OpenShortsSanti
+
+!apt-get update -y
+!apt-get install -y ffmpeg
+!python3 -m pip install -U pip
+!python3 -m pip install -r requirements.txt pyngrok
+```
+
+```python
+import os
+from pyngrok import ngrok
+
+os.environ["WHISPER_BACKEND"] = "openai"
+os.environ["WHISPER_MODEL"] = "base"
+os.environ["WHISPER_DEVICE"] = "cuda"
+
+ngrok.set_auth_token("TU_NGROK_TOKEN")
+```
+
+```python
+!pkill -f "uvicorn app:app" || true
+ngrok.kill()
+
+!nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8000 > /content/backend.log 2>&1 &
+!sleep 4
+!tail -n 60 /content/backend.log
+```
+
+```python
+from pyngrok import ngrok
+import requests
+
+t = ngrok.connect(8000, "http")
+url = t.public_url
+print(url)
+
+headers = {"ngrok-skip-browser-warning": "true"}
+print("docs:", requests.get(f"{url}/docs", headers=headers).status_code)
+print("openapi:", requests.get(f"{url}/openapi.json", headers=headers).status_code)
+print("health:", requests.get(f"{url}/api/status/__healthcheck__?ts=1", headers=headers).status_code)
+```
+
+Valores esperados:
+- `/docs` -> `200`
+- `/openapi.json` -> `200`
+- `/api/status/__healthcheck__` -> `200`
+
+## 3) Verificación desde Mac (opcional, recomendado)
+```bash
+URL="https://tu-subdominio.ngrok-free.dev"
+curl -i -H "ngrok-skip-browser-warning: true" "$URL/docs"
+curl -i -H "ngrok-skip-browser-warning: true" "$URL/openapi.json"
+```
+
+Si recibes `HTTP 421 Received a request for different Host`, estás usando una URL placeholder o distinta al túnel real.
+
+## 4) Errores comunes
+- `NetworkError when attempting to fetch resource`: URL de ngrok vencida/caída o backend no corriendo en Colab.
+- `CORS Missing Allow Origin`: normalmente no es CORS real; suele ser respuesta de error de ngrok o URL incorrecta.
+- `ERR_NGROK_324`: demasiados endpoints abiertos en la sesión. Ejecuta `ngrok.kill()` y crea un solo túnel.
+
+## 5) Seguridad
+- No publiques ni commitees tu `ngrok authtoken`.
+- Si se expuso en capturas o logs, rótalo desde el dashboard de ngrok y usa uno nuevo.

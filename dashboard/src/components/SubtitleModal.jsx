@@ -5,8 +5,8 @@ const BRAND_KIT_STORAGE_KEY = 'brandKitV1';
 const DEFAULT_SUBTITLE_STYLE = {
     name: 'Predeterminado',
     subtitle_position: 'bottom',
-    subtitle_font_size: 24,
-    subtitle_font_family: 'Impact',
+    subtitle_font_size: 40,
+    subtitle_font_family: 'Anton',
     subtitle_font_color: '#FFFFFF',
     subtitle_stroke_color: '#000000',
     subtitle_stroke_width: 3,
@@ -17,71 +17,110 @@ const DEFAULT_SUBTITLE_STYLE = {
 
 const CAPTION_STYLE_PRESETS = [
     {
-        id: 'bold_center',
-        name: 'Negrita Centro',
-        subtitle_position: 'middle',
-        subtitle_font_size: 32,
-        subtitle_font_family: 'Impact',
+        id: 'deep_diver',
+        name: 'Deep Diver',
+        subtitle_position: 'bottom',
+        subtitle_font_size: 40,
+        subtitle_font_family: 'Montserrat',
         subtitle_font_color: '#FFFFFF',
-        subtitle_stroke_color: '#000000',
-        subtitle_stroke_width: 4,
-        subtitle_bold: true,
-        subtitle_box_color: '#000000',
-        subtitle_box_opacity: 45
-    },
-    {
-        id: 'neon_pop',
-        name: 'Neon Pop',
-        subtitle_position: 'bottom',
-        subtitle_font_size: 30,
-        subtitle_font_family: 'Arial Black',
-        subtitle_font_color: '#00F5FF',
-        subtitle_stroke_color: '#091933',
-        subtitle_stroke_width: 3,
-        subtitle_bold: true,
-        subtitle_box_color: '#0B1020',
-        subtitle_box_opacity: 35
-    },
-    {
-        id: 'typewriter',
-        name: 'Máquina de escribir',
-        subtitle_position: 'bottom',
-        subtitle_font_size: 24,
-        subtitle_font_family: 'Verdana',
-        subtitle_font_color: '#F8FAFC',
         subtitle_stroke_color: '#111827',
-        subtitle_stroke_width: 2,
-        subtitle_bold: false,
-        subtitle_box_color: '#111827',
-        subtitle_box_opacity: 25
-    },
-    {
-        id: 'bubble',
-        name: 'Burbuja',
-        subtitle_position: 'middle',
-        subtitle_font_size: 30,
-        subtitle_font_family: 'Arial Black',
-        subtitle_font_color: '#111827',
-        subtitle_stroke_color: '#FFFFFF',
-        subtitle_stroke_width: 4,
+        subtitle_stroke_width: 1,
         subtitle_bold: true,
-        subtitle_box_color: '#FDE047',
-        subtitle_box_opacity: 75
+        subtitle_box_color: '#111827',
+        subtitle_box_opacity: 72
     },
     {
-        id: 'minimal_clean',
-        name: 'Minimal limpio',
+        id: 'karaoke_pro',
+        name: 'Karaoke Pro',
         subtitle_position: 'bottom',
-        subtitle_font_size: 22,
-        subtitle_font_family: 'Arial',
+        subtitle_font_size: 40,
+        subtitle_font_family: 'Anton',
         subtitle_font_color: '#FFFFFF',
         subtitle_stroke_color: '#000000',
-        subtitle_stroke_width: 1,
-        subtitle_bold: false,
+        subtitle_stroke_width: 5,
+        subtitle_bold: true,
         subtitle_box_color: '#000000',
-        subtitle_box_opacity: 20
+        subtitle_box_opacity: 0
+    },
+    {
+        id: 'mozi_pop',
+        name: 'Mozi Pop',
+        subtitle_position: 'bottom',
+        subtitle_font_size: 40,
+        subtitle_font_family: 'Archivo Black',
+        subtitle_font_color: '#FFFFFF',
+        subtitle_stroke_color: '#0A0A0A',
+        subtitle_stroke_width: 5,
+        subtitle_bold: true,
+        subtitle_box_color: '#000000',
+        subtitle_box_opacity: 0
+    },
+    {
+        id: 'think_media',
+        name: 'Think Media',
+        subtitle_position: 'bottom',
+        subtitle_font_size: 40,
+        subtitle_font_family: 'Bebas Neue',
+        subtitle_font_color: '#FFFFFF',
+        subtitle_stroke_color: '#0A0A0A',
+        subtitle_stroke_width: 5,
+        subtitle_bold: true,
+        subtitle_box_color: '#000000',
+        subtitle_box_opacity: 0
+    },
+    {
+        id: 'highlighter_box',
+        name: 'Highlighter Box',
+        subtitle_position: 'middle',
+        subtitle_font_size: 40,
+        subtitle_font_family: 'Oswald',
+        subtitle_font_color: '#E0F2FE',
+        subtitle_stroke_color: '#0F172A',
+        subtitle_stroke_width: 2,
+        subtitle_bold: true,
+        subtitle_box_color: '#1D4ED8',
+        subtitle_box_opacity: 78
+    },
+    {
+        id: 'white_card',
+        name: 'Caja Blanca',
+        subtitle_position: 'middle',
+        subtitle_font_size: 40,
+        subtitle_font_family: 'Montserrat',
+        subtitle_font_color: '#111111',
+        subtitle_stroke_color: '#111111',
+        subtitle_stroke_width: 0,
+        subtitle_bold: true,
+        subtitle_box_color: '#FFFFFF',
+        subtitle_box_opacity: 100
+    },
+    {
+        id: 'focus_bold',
+        name: 'Focus',
+        subtitle_position: 'bottom',
+        subtitle_font_size: 40,
+        subtitle_font_family: 'Teko',
+        subtitle_font_color: '#EAFB23',
+        subtitle_stroke_color: '#101010',
+        subtitle_stroke_width: 6,
+        subtitle_bold: true,
+        subtitle_box_color: '#000000',
+        subtitle_box_opacity: 0
     }
 ];
+
+const normalizeSubtitleFontFamily = (value) => {
+    const key = String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (key.startsWith('montserrat')) return 'Montserrat';
+    if (key.startsWith('anton') || key === 'impact' || key === 'arial black') return 'Anton';
+    if (key.startsWith('archivo black')) return 'Archivo Black';
+    if (key.startsWith('bebas neue') || key === 'bebas') return 'Bebas Neue';
+    if (key.startsWith('oswald')) return 'Oswald';
+    if (key.startsWith('teko')) return 'Teko';
+    if (key === 'arial') return 'Arial';
+    if (key === 'verdana') return 'Verdana';
+    return DEFAULT_SUBTITLE_STYLE.subtitle_font_family;
+};
 
 const normalizeBrandKitStyle = (raw) => {
     const src = raw && typeof raw === 'object' ? raw : {};
@@ -94,7 +133,7 @@ const normalizeBrandKitStyle = (raw) => {
         name: String(src.name || DEFAULT_SUBTITLE_STYLE.name).slice(0, 48),
         subtitle_position: ['top', 'middle', 'bottom'].includes(src.subtitle_position) ? src.subtitle_position : DEFAULT_SUBTITLE_STYLE.subtitle_position,
         subtitle_font_size: asNum(src.subtitle_font_size, DEFAULT_SUBTITLE_STYLE.subtitle_font_size, 12, 84),
-        subtitle_font_family: String(src.subtitle_font_family || DEFAULT_SUBTITLE_STYLE.subtitle_font_family).slice(0, 48),
+        subtitle_font_family: normalizeSubtitleFontFamily(src.subtitle_font_family),
         subtitle_font_color: String(src.subtitle_font_color || DEFAULT_SUBTITLE_STYLE.subtitle_font_color),
         subtitle_stroke_color: String(src.subtitle_stroke_color || DEFAULT_SUBTITLE_STYLE.subtitle_stroke_color),
         subtitle_stroke_width: asNum(src.subtitle_stroke_width, DEFAULT_SUBTITLE_STYLE.subtitle_stroke_width, 0, 8),
@@ -292,11 +331,17 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                         <label className="text-[10px] text-zinc-500">Tipografía</label>
                                         <select
                                             value={fontFamily}
-                                            onChange={(e) => setFontFamily(e.target.value)}
+                                            onChange={(e) => setFontFamily(normalizeSubtitleFontFamily(e.target.value))}
                                             className="input-field text-xs"
                                         >
-                                            <option value="Impact">Impact</option>
-                                            <option value="Arial Black">Arial Black</option>
+                                            <option value="Montserrat">Montserrat</option>
+                                            <option value="Anton">Anton (recomendado)</option>
+                                            <option value="Archivo Black">Archivo Black</option>
+                                            <option value="Bebas Neue">Bebas Neue</option>
+                                            <option value="Oswald">Oswald</option>
+                                            <option value="Teko">Teko</option>
+                                            <option value="Impact">Impact (mapeado a Anton en export)</option>
+                                            <option value="Arial Black">Arial Black (mapeado a Anton en export)</option>
                                             <option value="Arial">Arial</option>
                                             <option value="Verdana">Verdana</option>
                                         </select>
@@ -308,7 +353,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                             min="16"
                                             max="80"
                                             value={fontSize}
-                                            onChange={(e) => setFontSize(Number(e.target.value || 24))}
+                                            onChange={(e) => setFontSize(Number(e.target.value || 40))}
                                             className="input-field text-xs"
                                         />
                                     </div>
@@ -412,7 +457,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         onClick={() => onGenerate({
                             position,
                             fontSize,
-                            fontFamily,
+                            fontFamily: normalizeSubtitleFontFamily(fontFamily),
                             fontColor,
                             strokeColor,
                             strokeWidth,

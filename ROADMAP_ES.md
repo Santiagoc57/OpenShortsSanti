@@ -74,6 +74,17 @@ Este documento centraliza la hoja de ruta del producto y el estado real de imple
 - QA de relevancia para `Clip Anything`:
   - endpoint `POST /api/search/clips/eval` con métricas (`pass_rate`, `mrr`, overlap)
   - script local `scripts/eval_clip_search.py` + template `scripts/clip_search_cases.example.json`
+- Persistencia operativa de jobs:
+  - estado en SQLite (`output/jobs_state.sqlite3`)
+  - recuperación automática de jobs/artefactos al reiniciar backend
+  - endpoints `GET /api/status/__healthcheck__` y `GET /api/jobs/recent`
+- Export pack v3:
+  - variantes de video por plataforma (`youtube`/`instagram`/`tiktok`) dentro del zip
+- Highlight reel con ratio configurable (`9:16` / `16:9`)
+- Métricas de publicación social:
+  - endpoint `GET /api/social/metrics/{job_id}` con agregados por plataforma + eventos recientes
+- Clip Studio:
+  - preview rápido de render (`POST /api/clip/fast-preview`)
 
 ### 🟡 Parcial
 - Brand kit/template engine:

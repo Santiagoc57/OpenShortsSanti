@@ -1,128 +1,152 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { X, FileText, Captions, Type, LayoutTemplate, Music2, Search, Sparkles, Loader2, Play, Pause, Pencil, SlidersHorizontal, ZoomOut, ZoomIn, Crosshair, Menu } from 'lucide-react';
+import { X, FileText, Captions, Type, LayoutTemplate, Music2, Search, Sparkles, Loader2, Play, Pause, Pencil, SlidersHorizontal, ZoomOut, ZoomIn, Crosshair, Menu, Lightbulb, Download } from 'lucide-react';
 import { apiFetch, getApiUrl } from '../config';
 
 const CAPTION_PRESETS = [
   {
-    id: 'viral_pop',
-    name: 'Viral Pop',
-    sample: 'THUNDER AGAIN\nLED BY',
+    id: 'deep_diver',
+    name: 'Deep Diver',
+    sample: 'TO GET\nSTARTED',
     preview: {
-      bg: 'linear-gradient(145deg, #0b1220 0%, #141b2a 55%, #090d16 100%)',
+      bg: 'linear-gradient(145deg, #0f172a 0%, #111827 60%, #1f2937 100%)',
+      highlightColor: '#E2E8F0',
+      highlightWordIndex: 2
+    },
+    style: {
+      position: 'bottom',
+      fontSize: 40,
+      fontFamily: 'Montserrat',
+      fontColor: '#FFFFFF',
+      strokeColor: '#111827',
+      strokeWidth: 1,
+      bold: true,
+      boxColor: '#111827',
+      boxOpacity: 72
+    }
+  },
+  {
+    id: 'karaoke_pro',
+    name: 'Karaoke Pro',
+    sample: 'TO GET\nSTARTED',
+    preview: {
+      bg: 'linear-gradient(145deg, #090f1d 0%, #111827 55%, #0b1020 100%)',
       highlightColor: '#39FF14',
       highlightWordIndex: 1
     },
     style: {
       position: 'bottom',
-      fontSize: 34,
-      fontFamily: 'Montserrat',
+      fontSize: 40,
+      fontFamily: 'Anton',
+      fontColor: '#FFFFFF',
+      strokeColor: '#000000',
+      strokeWidth: 5,
+      bold: true,
+      boxColor: '#000000',
+      boxOpacity: 0
+    },
+    karaokeMode: true
+  },
+  {
+    id: 'mozi_pop',
+    name: 'Mozi Pop',
+    sample: 'TO GET\nSTARTED',
+    preview: {
+      bg: 'linear-gradient(145deg, #0b1220 0%, #111827 60%, #131925 100%)',
+      highlightColor: '#22C55E',
+      highlightWordIndex: 1
+    },
+    style: {
+      position: 'bottom',
+      fontSize: 40,
+      fontFamily: 'Archivo Black',
       fontColor: '#FFFFFF',
       strokeColor: '#0A0A0A',
       strokeWidth: 5,
       bold: true,
       boxColor: '#000000',
       boxOpacity: 0
-    }
+    },
+    karaokeMode: true
   },
   {
-    id: 'classy',
-    name: 'Elegante',
-    sample: 'Aqui va tu\nsubtitulo',
+    id: 'think_media',
+    name: 'Think Media',
+    sample: 'TO GET\nSTARTED',
     preview: {
-      bg: 'linear-gradient(145deg, #1f2937 0%, #334155 100%)',
-      highlightColor: '#E2E8F0',
-      highlightWordIndex: 2
+      bg: 'linear-gradient(145deg, #1c1917 0%, #292524 100%)',
+      highlightColor: '#FACC15',
+      highlightWordIndex: 1
     },
     style: {
       position: 'bottom',
-      fontSize: 24,
-      fontFamily: 'Georgia',
-      fontColor: '#F8FAFC',
-      strokeColor: '#1F2937',
-      strokeWidth: 2,
-      bold: false,
+      fontSize: 40,
+      fontFamily: 'Bebas Neue',
+      fontColor: '#FFFFFF',
+      strokeColor: '#0A0A0A',
+      strokeWidth: 5,
+      bold: true,
       boxColor: '#000000',
-      boxOpacity: 35
-    }
+      boxOpacity: 0
+    },
+    karaokeMode: true
   },
   {
-    id: 'sleek',
-    name: 'Nítido',
-    sample: 'FRASE BREVE\nY CLARA',
+    id: 'highlighter_box',
+    name: 'Highlighter Box',
+    sample: 'TO GET\nSTARTED',
     preview: {
-      bg: 'linear-gradient(145deg, #111827 0%, #0b1120 100%)',
-      highlightColor: '#FDE047',
+      bg: 'linear-gradient(145deg, #1e293b 0%, #0f172a 100%)',
+      highlightColor: '#38BDF8',
       highlightWordIndex: 0
     },
     style: {
       position: 'middle',
-      fontSize: 26,
-      fontFamily: 'Arial Black',
-      fontColor: '#FFFFFF',
-      strokeColor: '#000000',
+      fontSize: 40,
+      fontFamily: 'Oswald',
+      fontColor: '#E0F2FE',
+      strokeColor: '#0F172A',
       strokeWidth: 2,
       bold: true,
-      boxColor: '#000000',
-      boxOpacity: 20
+      boxColor: '#1D4ED8',
+      boxOpacity: 78
     }
   },
   {
-    id: 'instant',
-    name: 'Instantáneo',
-    sample: 'Subtitulo\nrapido',
+    id: 'white_card',
+    name: 'Caja Blanca',
+    sample: "Tal Wilkenfeld's\nJeff Beck\nAudition",
     preview: {
-      bg: 'linear-gradient(145deg, #1e293b 0%, #0f172a 100%)',
-      highlightColor: '#22d3ee',
-      highlightWordIndex: 1
-    },
-    style: {
-      position: 'bottom',
-      fontSize: 24,
-      fontFamily: 'Verdana',
-      fontColor: '#FFFFFF',
-      strokeColor: '#000000',
-      strokeWidth: 2,
-      bold: true,
-      boxColor: '#000000',
-      boxOpacity: 40
-    }
-  },
-  {
-    id: 'cinema',
-    name: 'Cine',
-    sample: 'Frase\ncinematica',
-    preview: {
-      bg: 'linear-gradient(145deg, #1c1917 0%, #292524 100%)',
-      highlightColor: '#facc15',
+      bg: 'linear-gradient(145deg, #0f172a 0%, #111827 100%)',
+      highlightColor: '#111827',
       highlightWordIndex: 1
     },
     style: {
       position: 'middle',
-      fontSize: 28,
-      fontFamily: 'Arial',
-      fontColor: '#FDE047',
-      strokeColor: '#111827',
-      strokeWidth: 3,
+      fontSize: 40,
+      fontFamily: 'Montserrat',
+      fontColor: '#111111',
+      strokeColor: '#111111',
+      strokeWidth: 0,
       bold: true,
-      boxColor: '#111827',
-      boxOpacity: 30
+      boxColor: '#FFFFFF',
+      boxOpacity: 100
     }
   },
   {
-    id: 'mrbeast_pro',
-    name: 'MrBeast / Impact Pro',
-    sample: 'NO TE LO\nPIERDAS',
+    id: 'focus_bold',
+    name: 'Focus',
+    sample: 'TO GET\nSTARTED',
     preview: {
-      bg: 'linear-gradient(145deg, #0f172a 0%, #111827 60%, #1f2937 100%)',
-      highlightColor: '#22c55e',
-      highlightWordIndex: 3
+      bg: 'linear-gradient(145deg, #1a1a1a 0%, #101010 100%)',
+      highlightColor: '#EAFB23',
+      highlightWordIndex: 1
     },
     style: {
       position: 'bottom',
-      fontSize: 38,
-      fontFamily: 'Montserrat',
-      fontColor: '#FFFFFF',
-      strokeColor: '#0A0A0A',
+      fontSize: 40,
+      fontFamily: 'Teko',
+      fontColor: '#EAFB23',
+      strokeColor: '#101010',
       strokeWidth: 6,
       bold: true,
       boxColor: '#000000',
@@ -159,6 +183,50 @@ const EMOTION_COLOR_RULES = [
   { color: '#00E5FF', keywords: ['tip', 'clave', 'estrategia', 'tutorial', 'paso', 'metodo', 'método'] },
   { color: '#B266FF', keywords: ['mindset', 'increible', 'increíble', 'wow', 'sorpresa', 'impacto'] }
 ];
+const BRAND_KIT_STORAGE_KEY = 'brandKitV1';
+
+const normalizeSubtitleFontFamily = (value) => {
+  const key = String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (key.startsWith('montserrat')) return 'Montserrat';
+  if (key.startsWith('anton') || key === 'impact' || key === 'arial black') return 'Anton';
+  if (key.startsWith('archivo black')) return 'Archivo Black';
+  if (key.startsWith('bebas neue') || key === 'bebas') return 'Bebas Neue';
+  if (key.startsWith('oswald')) return 'Oswald';
+  if (key.startsWith('teko')) return 'Teko';
+  if (key === 'arial') return 'Arial';
+  if (key === 'verdana') return 'Verdana';
+  return 'Anton';
+};
+
+const clampNum = (value, fallback, min, max) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+};
+
+const readStoredBrandKitSubtitleStyle = () => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(BRAND_KIT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      position: ['top', 'middle', 'bottom'].includes(parsed.subtitle_position) ? parsed.subtitle_position : null,
+      fontSize: clampNum(parsed.subtitle_font_size, 40, 12, 84),
+      fontFamily: normalizeSubtitleFontFamily(parsed.subtitle_font_family),
+      fontColor: String(parsed.subtitle_font_color || '#FFFFFF'),
+      strokeColor: String(parsed.subtitle_stroke_color || '#000000'),
+      strokeWidth: clampNum(parsed.subtitle_stroke_width, 3, 0, 8),
+      bold: typeof parsed.subtitle_bold === 'boolean' ? parsed.subtitle_bold : true,
+      boxColor: String(parsed.subtitle_box_color || '#000000'),
+      boxOpacity: clampNum(parsed.subtitle_box_opacity, 0, 0, 100),
+      karaokeMode: false
+    };
+  } catch (_) {
+    return null;
+  }
+};
 
 const parseTimeToSeconds = (raw) => {
   const value = String(raw || '').trim();
@@ -241,13 +309,28 @@ const truncateInline = (value, maxChars = 84) => {
   return `${clean.slice(0, Math.max(1, maxChars - 3)).trim()}...`;
 };
 
-const SettingToggle = ({ label, checked, onChange }) => (
-  <div className="flex items-center justify-between rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2.5">
-    <span className="text-sm text-slate-700 dark:text-slate-200">{label}</span>
+const SettingToggle = ({ label, checked, onChange, tooltip }) => (
+  <div
+    className="flex items-center justify-between rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2.5"
+    title={tooltip || undefined}
+  >
+    <span className="inline-flex items-center gap-1 text-sm text-slate-700 dark:text-slate-200">
+      {label}
+      {tooltip && (
+        <span
+          className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-slate-300 dark:border-slate-600 text-[10px] text-slate-500 dark:text-slate-300 cursor-help"
+          title={tooltip}
+          aria-label={tooltip}
+        >
+          ?
+        </span>
+      )}
+    </span>
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={`${label}: ${checked ? 'activado' : 'desactivado'}`}
       onClick={onChange}
       className={`w-11 h-6 rounded-full transition-colors ${checked ? 'bg-violet-500' : 'bg-slate-300 dark:bg-slate-600'}`}
     >
@@ -347,6 +430,9 @@ const extractFilename = (urlOrPath) => {
 };
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+const getMinZoomForFitMode = (fitMode) => (
+  String(fitMode || 'cover').toLowerCase() === 'contain' ? 0.5 : 1.0
+);
 const LAYOUT_OFFSET_FACTOR = 0.35;
 const LAYOUT_PAN_SENSITIVITY = 120;
 const CAPTION_OFFSET_FACTOR = 0.35;
@@ -382,13 +468,17 @@ export default function ClipStudioModal({
   clipIndex,
   clip,
   currentVideoUrl,
-  onApplied
+  onApplied,
+  onClipPatched
 }) {
   const [section, setSection] = useState('transcript');
   const [isApplying, setIsApplying] = useState(false);
+  const [applyAction, setApplyAction] = useState('apply');
+  const [isRenderingFastPreview, setIsRenderingFastPreview] = useState(false);
   const [isLoadingTranscript, setIsLoadingTranscript] = useState(false);
   const [isLoadingSrt, setIsLoadingSrt] = useState(false);
   const [error, setError] = useState('');
+  const [previewTitleOverride, setPreviewTitleOverride] = useState('');
   const [savedPulse, setSavedPulse] = useState(false);
 
   const [transcriptSegments, setTranscriptSegments] = useState([]);
@@ -425,18 +515,21 @@ export default function ClipStudioModal({
   const [layoutPostRoll, setLayoutPostRoll] = useState(0);
   const [layoutMode, setLayoutMode] = useState(String(clip?.layout_mode || 'single').toLowerCase() === 'split' ? 'split' : 'single');
   const [layoutAutoSmart, setLayoutAutoSmart] = useState(Boolean(clip?.layout_auto_smart));
-  const [layoutFitMode, setLayoutFitMode] = useState(String(clip?.layout_fit_mode || 'cover').toLowerCase() === 'contain' ? 'contain' : 'cover');
-  const [layoutZoom, setLayoutZoom] = useState(clamp(Number(clip?.layout_zoom || 1), 0.5, 2.5));
+  const initialLayoutFitMode = String(clip?.layout_fit_mode || 'cover').toLowerCase() === 'contain' ? 'contain' : 'cover';
+  const initialLayoutZoomMin = getMinZoomForFitMode(initialLayoutFitMode);
+  const [layoutFitMode, setLayoutFitMode] = useState(initialLayoutFitMode);
+  const [layoutZoom, setLayoutZoom] = useState(clamp(Number(clip?.layout_zoom || 1), initialLayoutZoomMin, 2.5));
   const [layoutOffsetX, setLayoutOffsetX] = useState(clamp(Number(clip?.layout_offset_x || 0), -100, 100));
   const [layoutOffsetY, setLayoutOffsetY] = useState(clamp(Number(clip?.layout_offset_y || 0), -100, 100));
-  const [layoutSplitZoomA, setLayoutSplitZoomA] = useState(clamp(Number(clip?.layout_split_zoom_a ?? clip?.layout_zoom ?? 1), 0.5, 2.5));
+  const [layoutSplitZoomA, setLayoutSplitZoomA] = useState(clamp(Number(clip?.layout_split_zoom_a ?? clip?.layout_zoom ?? 1), initialLayoutZoomMin, 2.5));
   const [layoutSplitOffsetAX, setLayoutSplitOffsetAX] = useState(clamp(Number(clip?.layout_split_offset_a_x ?? clip?.layout_offset_x ?? 0), -100, 100));
   const [layoutSplitOffsetAY, setLayoutSplitOffsetAY] = useState(clamp(Number(clip?.layout_split_offset_a_y ?? clip?.layout_offset_y ?? 0), -100, 100));
-  const [layoutSplitZoomB, setLayoutSplitZoomB] = useState(clamp(Number(clip?.layout_split_zoom_b ?? clip?.layout_zoom ?? 1), 0.5, 2.5));
+  const [layoutSplitZoomB, setLayoutSplitZoomB] = useState(clamp(Number(clip?.layout_split_zoom_b ?? clip?.layout_zoom ?? 1), initialLayoutZoomMin, 2.5));
   const [layoutSplitOffsetBX, setLayoutSplitOffsetBX] = useState(clamp(Number(clip?.layout_split_offset_b_x ?? (-(Number(clip?.layout_offset_x || 0)))), -100, 100));
   const [layoutSplitOffsetBY, setLayoutSplitOffsetBY] = useState(clamp(Number(clip?.layout_split_offset_b_y ?? clip?.layout_offset_y ?? 0), -100, 100));
   const [isPanningLayout, setIsPanningLayout] = useState(false);
   const isSplitLayout = layoutMode === 'split';
+  const layoutZoomMin = getMinZoomForFitMode(layoutFitMode);
   const effectiveLayoutOffsetX = Number(layoutOffsetX || 0) * LAYOUT_OFFSET_FACTOR;
   const effectiveLayoutOffsetY = Number(layoutOffsetY || 0) * LAYOUT_OFFSET_FACTOR;
   const manualLayoutObjectPosition = useMemo(() => {
@@ -461,6 +554,13 @@ export default function ClipStudioModal({
   const effectiveCaptionOffsetX = Number(captionOffsetX || 0) * CAPTION_OFFSET_FACTOR;
   const effectiveCaptionOffsetY = Number(captionOffsetY || 0) * CAPTION_OFFSET_FACTOR;
 
+  useEffect(() => {
+    const minZoom = getMinZoomForFitMode(layoutFitMode);
+    setLayoutZoom((prev) => clamp(Number(prev || 1), minZoom, 2.5));
+    setLayoutSplitZoomA((prev) => clamp(Number(prev || 1), minZoom, 2.5));
+    setLayoutSplitZoomB((prev) => clamp(Number(prev || 1), minZoom, 2.5));
+  }, [layoutFitMode]);
+
   const [musicEnabled, setMusicEnabled] = useState(false);
   const [musicFile, setMusicFile] = useState(null);
   const [musicVolume, setMusicVolume] = useState(0.18);
@@ -481,6 +581,7 @@ export default function ClipStudioModal({
   const subtitleListRef = useRef(null);
   const transcriptListRef = useRef(null);
   const previewBlobUrlRef = useRef(null);
+  const fastPreviewStopTimerRef = useRef(null);
   const timelineViewportRef = useRef(null);
   const timelineTrackRef = useRef(null);
   const subtitleDragRef = useRef(null);
@@ -581,6 +682,8 @@ export default function ClipStudioModal({
   }, [filteredTranscript, previewAbsoluteTime]);
 
   const previewClipTitle = useMemo(() => {
+    const overriddenTitle = String(previewTitleOverride || '').trim();
+    if (overriddenTitle) return overriddenTitle;
     const socialTitle = String(clip?.video_title_for_youtube_short || '').trim();
     if (socialTitle) return socialTitle;
     const genericTitle = String(clip?.title || '').trim();
@@ -588,7 +691,7 @@ export default function ClipStudioModal({
     const filename = extractFilename(currentVideoUrl) || extractFilename(clip?.video_url || '');
     if (filename) return filename;
     return `Clip n.o ${Number(clipIndex || 0) + 1}`;
-  }, [clip?.video_title_for_youtube_short, clip?.title, clip?.video_url, currentVideoUrl, clipIndex]);
+  }, [previewTitleOverride, clip?.video_title_for_youtube_short, clip?.title, clip?.video_url, currentVideoUrl, clipIndex]);
 
   const previewSocialDescription = useMemo(() => {
     return [
@@ -597,6 +700,18 @@ export default function ClipStudioModal({
       String(clip?.score_reason || '').trim()
     ].find(Boolean) || '';
   }, [clip?.video_description_for_tiktok, clip?.video_description_for_instagram, clip?.score_reason]);
+
+  const transcriptForPreview = useMemo(() => {
+    if (!Array.isArray(filteredTranscript) || filteredTranscript.length === 0) return '';
+    const merged = filteredTranscript
+      .map((seg) => String(seg?.text || '').trim())
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!merged) return '';
+    return merged.length > 420 ? `${merged.slice(0, 417).trim()}...` : merged;
+  }, [filteredTranscript]);
 
   const previewHeaderSubline = useMemo(() => {
     if (!previewSocialDescription) return 'Sin descripción social para este clip.';
@@ -772,6 +887,7 @@ export default function ClipStudioModal({
     setBold(Boolean(preset.style.bold));
     setBoxColor(preset.style.boxColor);
     setBoxOpacity(preset.style.boxOpacity);
+    setKaraokeMode(Boolean(preset.karaokeMode));
   };
 
   const loadTranscript = async () => {
@@ -812,9 +928,105 @@ export default function ClipStudioModal({
     }
   };
 
+  const parseApiErrorDetail = async (res) => {
+    const raw = await res.text();
+    let detail = '';
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+    } catch (_) {
+      // Non-JSON error body.
+    }
+    return detail || raw || `HTTP ${res.status}`;
+  };
+
+  const buildDownloadFilename = useCallback(() => {
+    const fallbackIndex = Number.isFinite(Number(clipIndex)) ? Number(clipIndex) + 1 : 1;
+    const raw = String(
+      previewTitleOverride
+      || clip?.video_title_for_youtube_short
+      || clip?.title
+      || `clip-${fallbackIndex}`
+    );
+    const safe = raw
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 72);
+    return `${safe || `clip-${fallbackIndex}`}.mp4`;
+  }, [clip?.title, clip?.video_title_for_youtube_short, clipIndex, previewTitleOverride]);
+
+  const triggerAnchorDownload = useCallback((href, filename) => {
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = href;
+    if (filename) a.download = filename;
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, []);
+
+  const openDownloadFallback = useCallback((sourceUrl) => {
+    const safeUrl = String(sourceUrl || '').trim();
+    if (!safeUrl) return;
+    const popup = window.open(safeUrl, '_blank', 'noopener,noreferrer');
+    if (!popup) {
+      triggerAnchorDownload(safeUrl, undefined);
+    }
+  }, [triggerAnchorDownload]);
+
+  const downloadVideoFromUrl = useCallback(async (sourceUrl) => {
+    const safeUrl = String(sourceUrl || '').trim();
+    if (!safeUrl) throw new Error('URL de video vacía');
+
+    const useDirectFetch = /^blob:|^data:/i.test(safeUrl);
+    const response = await (useDirectFetch
+      ? fetch(safeUrl, { method: 'GET' })
+      : apiFetch(safeUrl, { method: 'GET' }));
+
+    if (!response.ok) {
+      throw new Error(`Descarga fallida (${response.status})`);
+    }
+
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    if (contentType.includes('text/html')) {
+      throw new Error('El servidor devolvió HTML en lugar de video');
+    }
+
+    const blob = await response.blob();
+    const blobType = String(blob.type || '').toLowerCase();
+    if (blobType.includes('text/html')) {
+      throw new Error('Respuesta inválida al descargar video');
+    }
+
+    const objectUrl = window.URL.createObjectURL(blob);
+    try {
+      triggerAnchorDownload(objectUrl, buildDownloadFilename());
+    } finally {
+      setTimeout(() => {
+        window.URL.revokeObjectURL(objectUrl);
+      }, 1500);
+    }
+  }, [buildDownloadFilename, triggerAnchorDownload]);
+
+  const downloadVideoWithFallback = useCallback(async (sourceUrl) => {
+    const safeUrl = String(sourceUrl || '').trim();
+    if (!safeUrl) return;
+    try {
+      await downloadVideoFromUrl(safeUrl);
+    } catch (downloadErr) {
+      console.warn('No se pudo descargar automáticamente el clip editado:', downloadErr);
+      openDownloadFallback(safeUrl);
+    }
+  }, [downloadVideoFromUrl, openDownloadFallback]);
+
   useEffect(() => {
     if (!isOpen) return;
     setSection('transcript');
+    setPreviewTitleOverride('');
     setLayoutAspect(clip?.aspect_ratio === '16:9' ? '16:9' : '9:16');
     setLayoutStart(Number(clip?.start || 0));
     setLayoutEnd(Number(clip?.end || 0));
@@ -822,14 +1034,16 @@ export default function ClipStudioModal({
     setLayoutPostRoll(0);
     setLayoutMode(String(clip?.layout_mode || 'single').toLowerCase() === 'split' ? 'split' : 'single');
     setLayoutAutoSmart(Boolean(clip?.layout_auto_smart));
-    setLayoutFitMode(String(clip?.layout_fit_mode || 'cover').toLowerCase() === 'contain' ? 'contain' : 'cover');
-    setLayoutZoom(clamp(Number(clip?.layout_zoom || 1), 0.5, 2.5));
+    const nextFitMode = String(clip?.layout_fit_mode || 'cover').toLowerCase() === 'contain' ? 'contain' : 'cover';
+    const nextZoomMin = getMinZoomForFitMode(nextFitMode);
+    setLayoutFitMode(nextFitMode);
+    setLayoutZoom(clamp(Number(clip?.layout_zoom || 1), nextZoomMin, 2.5));
     setLayoutOffsetX(clamp(Number(clip?.layout_offset_x || 0), -100, 100));
     setLayoutOffsetY(clamp(Number(clip?.layout_offset_y || 0), -100, 100));
-    setLayoutSplitZoomA(clamp(Number(clip?.layout_split_zoom_a ?? clip?.layout_zoom ?? 1), 0.5, 2.5));
+    setLayoutSplitZoomA(clamp(Number(clip?.layout_split_zoom_a ?? clip?.layout_zoom ?? 1), nextZoomMin, 2.5));
     setLayoutSplitOffsetAX(clamp(Number(clip?.layout_split_offset_a_x ?? clip?.layout_offset_x ?? 0), -100, 100));
     setLayoutSplitOffsetAY(clamp(Number(clip?.layout_split_offset_a_y ?? clip?.layout_offset_y ?? 0), -100, 100));
-    setLayoutSplitZoomB(clamp(Number(clip?.layout_split_zoom_b ?? clip?.layout_zoom ?? 1), 0.5, 2.5));
+    setLayoutSplitZoomB(clamp(Number(clip?.layout_split_zoom_b ?? clip?.layout_zoom ?? 1), nextZoomMin, 2.5));
     setLayoutSplitOffsetBX(clamp(Number(clip?.layout_split_offset_b_x ?? (-(Number(clip?.layout_offset_x || 0)))), -100, 100));
     setLayoutSplitOffsetBY(clamp(Number(clip?.layout_split_offset_b_y ?? clip?.layout_offset_y ?? 0), -100, 100));
     setMusicEnabled(false);
@@ -843,11 +1057,51 @@ export default function ClipStudioModal({
     setEmojiSuggestFeedback('');
     setTimelineZoom(TIMELINE_ZOOM_DEFAULT);
     setTimelineMode(TIMELINE_MODE_MINI);
-    applyPreset(CAPTION_PRESETS[0].id);
-    const savedCaptionPosition = String(clip?.caption_position || '').toLowerCase();
-    if (savedCaptionPosition === 'top' || savedCaptionPosition === 'middle' || savedCaptionPosition === 'bottom') {
-      setPosition(savedCaptionPosition);
+
+    const hasClipStyle = [
+      clip?.caption_font_size,
+      clip?.caption_font_family,
+      clip?.caption_font_color,
+      clip?.caption_stroke_color,
+      clip?.caption_stroke_width,
+      clip?.caption_bold,
+      clip?.caption_box_color,
+      clip?.caption_box_opacity,
+      clip?.caption_karaoke_mode
+    ].some((v) => v !== undefined && v !== null && String(v) !== '');
+
+    if (hasClipStyle) {
+      const clipPosition = String(clip?.caption_position || '').toLowerCase();
+      setPosition(['top', 'middle', 'bottom'].includes(clipPosition) ? clipPosition : CAPTION_PRESETS[0].style.position);
+      setFontSize(clamp(Number(clip?.caption_font_size ?? CAPTION_PRESETS[0].style.fontSize), 12, 84));
+      setFontFamily(normalizeSubtitleFontFamily(clip?.caption_font_family || CAPTION_PRESETS[0].style.fontFamily));
+      setFontColor(String(clip?.caption_font_color || CAPTION_PRESETS[0].style.fontColor));
+      setStrokeColor(String(clip?.caption_stroke_color || CAPTION_PRESETS[0].style.strokeColor));
+      setStrokeWidth(clamp(Number(clip?.caption_stroke_width ?? CAPTION_PRESETS[0].style.strokeWidth), 0, 8));
+      setBold(typeof clip?.caption_bold === 'boolean' ? clip.caption_bold : Boolean(CAPTION_PRESETS[0].style.bold));
+      setBoxColor(String(clip?.caption_box_color || CAPTION_PRESETS[0].style.boxColor));
+      setBoxOpacity(clamp(Number(clip?.caption_box_opacity ?? CAPTION_PRESETS[0].style.boxOpacity), 0, 100));
+      setKaraokeMode(Boolean(clip?.caption_karaoke_mode));
+      setSelectedPreset('');
+    } else {
+      const brandKitStyle = readStoredBrandKitSubtitleStyle();
+      if (brandKitStyle) {
+        if (brandKitStyle.position) setPosition(brandKitStyle.position);
+        setFontSize(clamp(Number(brandKitStyle.fontSize), 12, 84));
+        setFontFamily(normalizeSubtitleFontFamily(brandKitStyle.fontFamily));
+        setFontColor(String(brandKitStyle.fontColor || '#FFFFFF'));
+        setStrokeColor(String(brandKitStyle.strokeColor || '#000000'));
+        setStrokeWidth(clamp(Number(brandKitStyle.strokeWidth), 0, 8));
+        setBold(Boolean(brandKitStyle.bold));
+        setBoxColor(String(brandKitStyle.boxColor || '#000000'));
+        setBoxOpacity(clamp(Number(brandKitStyle.boxOpacity), 0, 100));
+        setKaraokeMode(Boolean(brandKitStyle.karaokeMode));
+        setSelectedPreset('');
+      } else {
+        applyPreset(CAPTION_PRESETS[0].id);
+      }
     }
+
     setCaptionOffsetX(clamp(Number(clip?.caption_offset_x || 0), -100, 100));
     setCaptionOffsetY(clamp(Number(clip?.caption_offset_y || 0), -100, 100));
     loadTranscript();
@@ -873,7 +1127,18 @@ export default function ClipStudioModal({
     clip?.layout_split_offset_b_y,
     clip?.caption_position,
     clip?.caption_offset_x,
-    clip?.caption_offset_y
+    clip?.caption_offset_y,
+    clip?.caption_font_size,
+    clip?.caption_font_family,
+    clip?.caption_font_color,
+    clip?.caption_stroke_color,
+    clip?.caption_stroke_width,
+    clip?.caption_bold,
+    clip?.caption_box_color,
+    clip?.caption_box_opacity,
+    clip?.caption_karaoke_mode,
+    clip?.video_title_for_youtube_short,
+    clip?.title
   ]);
 
   useEffect(() => {
@@ -982,6 +1247,15 @@ export default function ClipStudioModal({
     }
   }, [isSplitLayout, previewCurrentTime, previewPlaying, previewVideoUrl, isOpen]);
 
+  useEffect(() => {
+    return () => {
+      if (fastPreviewStopTimerRef.current) {
+        clearTimeout(fastPreviewStopTimerRef.current);
+        fastPreviewStopTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const onSubtitleEntryChange = (entryId, nextText) => {
     setSubtitleEntries((prev) => prev.map((entry) => (
       entry.id === entryId ? { ...entry, text: nextText } : entry
@@ -1021,8 +1295,9 @@ export default function ClipStudioModal({
     setSavedPulse(false);
   };
 
-  const handleApply = async () => {
+  const handleApply = async ({ downloadAfter = false } = {}) => {
     if (!jobId) return;
+    setApplyAction(downloadAfter ? 'apply_download' : 'apply');
     setIsApplying(true);
     setError('');
     let workingFile = extractFilename(currentVideoUrl);
@@ -1031,6 +1306,18 @@ export default function ClipStudioModal({
     const autoSmartRequest = normalizedLayoutMode === 'single' ? Boolean(layoutAutoSmart) : false;
     let appliedLayoutMode = normalizedLayoutMode;
     let appliedLayoutAutoSmart = autoSmartRequest;
+    let appliedCaptionPosition = position;
+    let appliedCaptionOffsetX = Number(captionOffsetX);
+    let appliedCaptionOffsetY = Number(captionOffsetY);
+    let appliedCaptionFontSize = Number(fontSize);
+    let appliedCaptionFontFamily = normalizeSubtitleFontFamily(fontFamily);
+    let appliedCaptionFontColor = fontColor;
+    let appliedCaptionStrokeColor = strokeColor;
+    let appliedCaptionStrokeWidth = Number(strokeWidth);
+    let appliedCaptionBold = Boolean(bold);
+    let appliedCaptionBoxColor = boxColor;
+    let appliedCaptionBoxOpacity = Number(boxOpacity);
+    let appliedCaptionKaraokeMode = Boolean(karaokeMode);
 
     try {
       const clipStart = Number(clip?.start || 0);
@@ -1126,24 +1413,50 @@ export default function ClipStudioModal({
           body: JSON.stringify({
             job_id: jobId,
             clip_index: clipIndex,
-            position,
-            font_size: Number(fontSize),
-            font_family: fontFamily,
-            font_color: fontColor,
-            stroke_color: strokeColor,
-            stroke_width: Number(strokeWidth),
-            bold: Boolean(bold),
-            box_color: boxColor,
-            box_opacity: Number(boxOpacity),
-            karaoke_mode: Boolean(karaokeMode),
-            caption_offset_x: Number(captionOffsetX),
-            caption_offset_y: Number(captionOffsetY),
+            position: appliedCaptionPosition,
+            font_size: appliedCaptionFontSize,
+            font_family: appliedCaptionFontFamily,
+            font_color: appliedCaptionFontColor,
+            stroke_color: appliedCaptionStrokeColor,
+            stroke_width: appliedCaptionStrokeWidth,
+            bold: appliedCaptionBold,
+            box_color: appliedCaptionBoxColor,
+            box_opacity: appliedCaptionBoxOpacity,
+            karaoke_mode: appliedCaptionKaraokeMode,
+            caption_offset_x: appliedCaptionOffsetX,
+            caption_offset_y: appliedCaptionOffsetY,
             srt_content: srtContent || null,
             input_filename: workingFile || undefined
           })
         });
         if (!subtitleRes.ok) throw new Error(await subtitleRes.text());
         const subtitleData = await subtitleRes.json();
+        appliedCaptionPosition = String(subtitleData?.caption_position || appliedCaptionPosition);
+        appliedCaptionOffsetX = Number.isFinite(Number(subtitleData?.caption_offset_x))
+          ? Number(subtitleData.caption_offset_x)
+          : appliedCaptionOffsetX;
+        appliedCaptionOffsetY = Number.isFinite(Number(subtitleData?.caption_offset_y))
+          ? Number(subtitleData.caption_offset_y)
+          : appliedCaptionOffsetY;
+        appliedCaptionFontSize = Number.isFinite(Number(subtitleData?.caption_font_size))
+          ? Number(subtitleData.caption_font_size)
+          : appliedCaptionFontSize;
+        appliedCaptionFontFamily = normalizeSubtitleFontFamily(subtitleData?.caption_font_family || appliedCaptionFontFamily);
+        appliedCaptionFontColor = String(subtitleData?.caption_font_color || appliedCaptionFontColor);
+        appliedCaptionStrokeColor = String(subtitleData?.caption_stroke_color || appliedCaptionStrokeColor);
+        appliedCaptionStrokeWidth = Number.isFinite(Number(subtitleData?.caption_stroke_width))
+          ? Number(subtitleData.caption_stroke_width)
+          : appliedCaptionStrokeWidth;
+        appliedCaptionBold = typeof subtitleData?.caption_bold === 'boolean'
+          ? subtitleData.caption_bold
+          : appliedCaptionBold;
+        appliedCaptionBoxColor = String(subtitleData?.caption_box_color || appliedCaptionBoxColor);
+        appliedCaptionBoxOpacity = Number.isFinite(Number(subtitleData?.caption_box_opacity))
+          ? Number(subtitleData.caption_box_opacity)
+          : appliedCaptionBoxOpacity;
+        appliedCaptionKaraokeMode = typeof subtitleData?.caption_karaoke_mode === 'boolean'
+          ? subtitleData.caption_karaoke_mode
+          : appliedCaptionKaraokeMode;
         if (subtitleData?.new_video_url) {
           resultingUrl = getApiUrl(subtitleData.new_video_url);
           workingFile = extractFilename(subtitleData.new_video_url);
@@ -1190,16 +1503,131 @@ export default function ClipStudioModal({
           layout_split_zoom_b: Number(layoutSplitZoomB),
           layout_split_offset_b_x: Number(layoutSplitOffsetBX),
           layout_split_offset_b_y: Number(layoutSplitOffsetBY),
-          caption_position: position,
-          caption_offset_x: Number(captionOffsetX),
-          caption_offset_y: Number(captionOffsetY)
+          caption_position: appliedCaptionPosition,
+          caption_offset_x: appliedCaptionOffsetX,
+          caption_offset_y: appliedCaptionOffsetY,
+          caption_font_size: appliedCaptionFontSize,
+          caption_font_family: appliedCaptionFontFamily,
+          caption_font_color: appliedCaptionFontColor,
+          caption_stroke_color: appliedCaptionStrokeColor,
+          caption_stroke_width: appliedCaptionStrokeWidth,
+          caption_bold: appliedCaptionBold,
+          caption_box_color: appliedCaptionBoxColor,
+          caption_box_opacity: appliedCaptionBoxOpacity,
+          caption_karaoke_mode: appliedCaptionKaraokeMode
         }
       });
+      if (downloadAfter && resultingUrl) {
+        void downloadVideoWithFallback(resultingUrl);
+      }
       onClose && onClose();
     } catch (e) {
       setError(`No se pudo aplicar cambios: ${e.message}`);
     } finally {
       setIsApplying(false);
+      setApplyAction('apply');
+    }
+  };
+
+  const handleFastPreview = async () => {
+    if (!jobId) return;
+    setIsRenderingFastPreview(true);
+    setError('');
+
+    const runLocalFastPreview = async () => {
+      const primary = previewVideoRef.current;
+      if (!primary) throw new Error('Preview local no disponible en este momento.');
+      const clipStartAbs = Number(clip?.start || 0);
+      const requestedStartAbs = Number.isFinite(Number(layoutStart)) ? Number(layoutStart) : clipStartAbs;
+      const relativeStart = clamp(
+        requestedStartAbs - clipStartAbs,
+        0,
+        Math.max(0, Number(timelineDuration || 0) - 0.05)
+      );
+      try {
+        primary.currentTime = relativeStart;
+      } catch (_) {
+        // ignore seek issues
+      }
+      const secondary = previewSplitVideoRef.current;
+      if (secondary) {
+        try {
+          secondary.currentTime = relativeStart;
+        } catch (_) {
+          // ignore seek issues
+        }
+      }
+      const playPromise = primary.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        await playPromise.catch(() => {});
+      }
+      setVideoLoadError('');
+      setPreviewCurrentTime(relativeStart);
+      setPreviewPlaying(true);
+      setSavedPulse(false);
+      if (fastPreviewStopTimerRef.current) {
+        clearTimeout(fastPreviewStopTimerRef.current);
+      }
+      fastPreviewStopTimerRef.current = setTimeout(() => {
+        const pv = previewVideoRef.current;
+        const sv = previewSplitVideoRef.current;
+        if (pv) pv.pause();
+        if (sv) sv.pause();
+        setPreviewPlaying(false);
+        fastPreviewStopTimerRef.current = null;
+      }, 3200);
+    };
+
+    try {
+      const sourceName = extractFilename(currentVideoUrl);
+      const startCandidate = Number.isFinite(Number(layoutStart)) ? Number(layoutStart) : Number(clip?.start || 0);
+      const payload = {
+        job_id: jobId,
+        clip_index: clipIndex,
+        input_filename: sourceName || null,
+        start: Math.max(0, Number(startCandidate || 0)),
+        duration: 3.2,
+        aspect_ratio: layoutAspect
+      };
+      const res = await apiFetch('/api/clip/fast-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error(await parseApiErrorDetail(res));
+      const data = await res.json();
+      const nextUrl = getApiUrl(data?.preview_video_url || '');
+      if (!nextUrl) throw new Error('No se recibió URL de preview.');
+      setPreviewVideoUrl(nextUrl);
+      setVideoLoadError('');
+      setPreviewCurrentTime(0);
+      setPreviewPlaying(false);
+      setSavedPulse(false);
+    } catch (e) {
+      const msg = String(e?.message || 'error desconocido');
+      const lower = msg.toLowerCase();
+      const canFallbackLocal = (
+        lower.includes('not found')
+        || lower.includes('404')
+        || lower.includes('failed to fetch')
+        || lower.includes('networkerror')
+      );
+      if (canFallbackLocal) {
+        try {
+          await runLocalFastPreview();
+          setError('');
+          return;
+        } catch (localErr) {
+          const localMsg = String(localErr?.message || 'error local desconocido');
+          setError(`No se pudo generar preview rápido: ${localMsg}`);
+          setTimeout(() => setError(''), 3500);
+          return;
+        }
+      }
+      setError(`No se pudo generar preview rápido: ${msg}`);
+      setTimeout(() => setError(''), 3500);
+    } finally {
+      setIsRenderingFastPreview(false);
     }
   };
 
@@ -1472,12 +1900,34 @@ export default function ClipStudioModal({
             </button>
             <button
               type="button"
-              onClick={handleApply}
-              disabled={isApplying}
-              className="px-4 py-2 rounded-full bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-60 inline-flex items-center gap-2"
+              onClick={handleFastPreview}
+              disabled={isRenderingFastPreview || isApplying}
+              className="px-3 py-2 rounded-full border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-60 inline-flex items-center gap-1.5"
+              title="Render rápido de 3s con el layout actual"
             >
-              {isApplying ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
-              {isApplying ? 'Aplicando...' : 'Aplicar'}
+              {isRenderingFastPreview ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
+              {isRenderingFastPreview ? 'Render...' : 'Preview rápido'}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleApply({ downloadAfter: false })}
+              disabled={isApplying}
+              className="px-4 py-2 rounded-full bg-violet-600 hover:bg-violet-700 !text-white text-sm font-semibold shadow-sm shadow-violet-900/20 disabled:opacity-60 inline-flex items-center gap-2 transition-colors"
+            >
+              {isApplying && applyAction === 'apply' ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+              {isApplying ? (applyAction === 'apply' ? 'Aplicando...' : 'Procesando...') : 'Aplicar'}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleApply({ downloadAfter: true })}
+              disabled={isApplying}
+              className="px-4 py-2 rounded-full bg-emerald-600 hover:bg-emerald-700 !text-white text-sm font-semibold shadow-sm shadow-emerald-900/20 disabled:opacity-60 inline-flex items-center gap-2 transition-colors"
+              title="Aplica cambios y descarga el clip final"
+            >
+              {isApplying && applyAction === 'apply_download' ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+              {isApplying
+                ? (applyAction === 'apply_download' ? 'Aplicando y descargando...' : 'Procesando...')
+                : 'Aplicar y descargar'}
             </button>
           </div>
         </div>
@@ -1508,15 +1958,8 @@ export default function ClipStudioModal({
             <section className="border-r border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 overflow-y-auto custom-scrollbar">
               {section === 'transcript' && (
                 <div>
-                  <div className="flex items-center justify-between mb-3">
+                  <div className="mb-3">
                     <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">Transcripción</h3>
-                    <button
-                      type="button"
-                      onClick={loadTranscript}
-                      className="text-xs px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
-                    >
-                      {isLoadingTranscript ? 'Cargando...' : 'Recargar'}
-                    </button>
                   </div>
                   <div className="relative mb-3">
                     <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
@@ -1584,6 +2027,13 @@ export default function ClipStudioModal({
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
                         <h3 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100">Subtítulos</h3>
+                        <span
+                          className="inline-flex items-center justify-center rounded-full border border-amber-300/80 bg-amber-100/80 px-1.5 py-1 text-amber-700 dark:border-amber-700/80 dark:bg-amber-900/25 dark:text-amber-300"
+                          title="Tip: usa Opciones para editar visibilidad, puntuación, emojis y karaoke."
+                          aria-label="Tip de subtítulos"
+                        >
+                          <Lightbulb size={12} />
+                        </span>
                         {karaokeMode && (
                           <span className="text-[11px] px-2 py-0.5 rounded-full border border-violet-300 bg-violet-100 dark:border-violet-600 dark:bg-violet-900/35 text-violet-700 dark:text-violet-300">
                             Karaoke activo
@@ -1604,22 +2054,36 @@ export default function ClipStudioModal({
                         Opciones
                       </button>
                     </div>
-                    <div className="mt-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-900/50 p-3">
-                      <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">Ajustes de subtítulos</p>
-                      {!showCaptionSettings && (
-                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                          Haz clic en <span className="font-medium">Opciones</span> para editar visibilidad, puntuación, emojis y karaoke.
-                        </p>
-                      )}
-                      {showCaptionSettings && (
-                        <div className="space-y-2 mt-3">
-                          <SettingToggle label="Mostrar subtítulos" checked={captionsOn} onChange={() => setCaptionsOn((v) => !v)} />
-                          <SettingToggle label="Puntuación" checked={punctuationOn} onChange={() => setPunctuationOn((v) => !v)} />
-                          <SettingToggle label="Emoji" checked={emojiOn} onChange={() => setEmojiOn((v) => !v)} />
-                          <SettingToggle label="Modo karaoke" checked={karaokeMode} onChange={() => setKaraokeMode((v) => !v)} />
+                    {showCaptionSettings && (
+                      <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-900/50 p-3">
+                        <div className="grid grid-cols-2 gap-2">
+                          <SettingToggle
+                            label="Mostrar subtítulos"
+                            tooltip="Activa u oculta los subtítulos en la vista previa y en la exportación."
+                            checked={captionsOn}
+                            onChange={() => setCaptionsOn((v) => !v)}
+                          />
+                          <SettingToggle
+                            label="Puntuación"
+                            tooltip="Si lo desactivas, se eliminan signos como comas y puntos para un estilo más limpio."
+                            checked={punctuationOn}
+                            onChange={() => setPunctuationOn((v) => !v)}
+                          />
+                          <SettingToggle
+                            label="Emoji"
+                            tooltip="Muestra emojis sugeridos al inicio de cada línea cuando están disponibles."
+                            checked={emojiOn}
+                            onChange={() => setEmojiOn((v) => !v)}
+                          />
+                          <SettingToggle
+                            label="Modo karaoke"
+                            tooltip="Resalta palabra por palabra durante la reproducción para dar efecto karaoke."
+                            checked={karaokeMode}
+                            onChange={() => setKaraokeMode((v) => !v)}
+                          />
                         </div>
-                      )}
-                    </div>
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -1720,73 +2184,95 @@ export default function ClipStudioModal({
                     <p className="mt-2 text-[11px] text-zinc-500">Tip: arrastra el subtítulo sobre el video para ubicarlo con el mouse.</p>
                   </div>
 
-                  <div className="space-y-2">
-                    <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
-                      Mover horizontal ({Math.round(effectiveCaptionOffsetX)}% efectivo)
-                      <input
-                        type="range"
-                        min="-100"
-                        max="100"
-                        step="1"
-                        value={captionOffsetX}
-                        onChange={(e) => {
-                          setCaptionOffsetX(clamp(Number(e.target.value || 0), -100, 100));
-                          setSavedPulse(false);
-                        }}
-                        className="w-full mt-2"
-                      />
-                    </label>
-                    <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
-                      Mover vertical ({Math.round(effectiveCaptionOffsetY)}% efectivo)
-                      <input
-                        type="range"
-                        min="-100"
-                        max="100"
-                        step="1"
-                        value={captionOffsetY}
-                        onChange={(e) => {
-                          setCaptionOffsetY(clamp(Number(e.target.value || 0), -100, 100));
-                          setSavedPulse(false);
-                        }}
-                        className="w-full mt-2"
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCaptionOffsetX(0);
-                        setCaptionOffsetY(0);
-                        setSavedPulse(false);
-                      }}
-                      className="w-full rounded-lg border border-black/10 dark:border-white/10 px-3 py-2 text-xs text-zinc-600 dark:text-zinc-200 hover:bg-black/5 dark:hover:bg-white/5"
-                    >
-                      Reset posición de subtítulo
-                    </button>
-                  </div>
+                  <details className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/40 px-3 py-2">
+                    <summary className="cursor-pointer select-none text-xs font-semibold text-slate-600 dark:text-slate-300">
+                      Ajustes avanzados
+                    </summary>
+                    <div className="mt-3 space-y-3">
+                      <div className="space-y-2">
+                        <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
+                          Mover horizontal ({Math.round(effectiveCaptionOffsetX)}% efectivo)
+                          <input
+                            type="range"
+                            min="-100"
+                            max="100"
+                            step="1"
+                            value={captionOffsetX}
+                            onChange={(e) => {
+                              setCaptionOffsetX(clamp(Number(e.target.value || 0), -100, 100));
+                              setSavedPulse(false);
+                            }}
+                            className="w-full mt-2"
+                          />
+                        </label>
+                        <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
+                          Mover vertical ({Math.round(effectiveCaptionOffsetY)}% efectivo)
+                          <input
+                            type="range"
+                            min="-100"
+                            max="100"
+                            step="1"
+                            value={captionOffsetY}
+                            onChange={(e) => {
+                              setCaptionOffsetY(clamp(Number(e.target.value || 0), -100, 100));
+                              setSavedPulse(false);
+                            }}
+                            className="w-full mt-2"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCaptionOffsetX(0);
+                            setCaptionOffsetY(0);
+                            setSavedPulse(false);
+                          }}
+                          className="w-full rounded-lg border border-black/10 dark:border-white/10 px-3 py-2 text-xs text-zinc-600 dark:text-zinc-200 hover:bg-black/5 dark:hover:bg-white/5"
+                        >
+                          Reset posición de subtítulo
+                        </button>
+                      </div>
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <label className="text-xs text-zinc-600 dark:text-zinc-300">Tamaño
-                      <input type="number" min="12" max="84" value={fontSize} onChange={(e) => setFontSize(Number(e.target.value || 24))} className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm" />
-                    </label>
-                    <label className="text-xs text-zinc-600 dark:text-zinc-300">Fuente
-                      <input value={fontFamily} onChange={(e) => setFontFamily(e.target.value)} className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm" />
-                    </label>
-                    <label className="text-xs text-zinc-600 dark:text-zinc-300">Color texto
-                      <input type="color" value={fontColor} onChange={(e) => setFontColor(e.target.value)} className="mt-1 h-10 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-1" />
-                    </label>
-                    <label className="text-xs text-zinc-600 dark:text-zinc-300">Color contorno
-                      <input type="color" value={strokeColor} onChange={(e) => setStrokeColor(e.target.value)} className="mt-1 h-10 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-1" />
-                    </label>
-                    <label className="text-xs text-zinc-600 dark:text-zinc-300">Grosor contorno
-                      <input type="number" min="0" max="8" value={strokeWidth} onChange={(e) => setStrokeWidth(Number(e.target.value || 0))} className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm" />
-                    </label>
-                    <label className="text-xs text-zinc-600 dark:text-zinc-300">Caja (%)
-                      <input type="number" min="0" max="100" value={boxOpacity} onChange={(e) => setBoxOpacity(Number(e.target.value || 0))} className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm" />
-                    </label>
-                  </div>
-                  <label className="inline-flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
-                    <input type="checkbox" checked={bold} onChange={(e) => setBold(e.target.checked)} /> Negrita
-                  </label>
+                      <div className="grid grid-cols-2 gap-3">
+                        <label className="text-xs text-zinc-600 dark:text-zinc-300">Tamaño
+                          <input type="number" min="12" max="84" value={fontSize} onChange={(e) => setFontSize(Number(e.target.value || 40))} className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm" />
+                        </label>
+                        <label className="text-xs text-zinc-600 dark:text-zinc-300">Fuente
+                          <select
+                            value={fontFamily}
+                            onChange={(e) => setFontFamily(normalizeSubtitleFontFamily(e.target.value))}
+                            className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm"
+                          >
+                            <option value="Montserrat">Montserrat</option>
+                            <option value="Anton">Anton</option>
+                            <option value="Archivo Black">Archivo Black</option>
+                            <option value="Bebas Neue">Bebas Neue</option>
+                            <option value="Oswald">Oswald</option>
+                            <option value="Teko">Teko</option>
+                            <option value="Impact">Impact (mapeado a Anton)</option>
+                            <option value="Arial Black">Arial Black (mapeado a Anton)</option>
+                            <option value="Arial">Arial</option>
+                            <option value="Verdana">Verdana</option>
+                          </select>
+                        </label>
+                        <label className="text-xs text-zinc-600 dark:text-zinc-300">Color texto
+                          <input type="color" value={fontColor} onChange={(e) => setFontColor(e.target.value)} className="mt-1 h-10 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-1" />
+                        </label>
+                        <label className="text-xs text-zinc-600 dark:text-zinc-300">Color contorno
+                          <input type="color" value={strokeColor} onChange={(e) => setStrokeColor(e.target.value)} className="mt-1 h-10 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-1" />
+                        </label>
+                        <label className="text-xs text-zinc-600 dark:text-zinc-300">Grosor contorno
+                          <input type="number" min="0" max="8" value={strokeWidth} onChange={(e) => setStrokeWidth(Number(e.target.value || 0))} className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm" />
+                        </label>
+                        <label className="text-xs text-zinc-600 dark:text-zinc-300">Caja (%)
+                          <input type="number" min="0" max="100" value={boxOpacity} onChange={(e) => setBoxOpacity(Number(e.target.value || 0))} className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm" />
+                        </label>
+                      </div>
+                      <label className="inline-flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+                        <input type="checkbox" checked={bold} onChange={(e) => setBold(e.target.checked)} /> Negrita
+                      </label>
+                    </div>
+                  </details>
                 </div>
               )}
 
@@ -1794,24 +2280,15 @@ export default function ClipStudioModal({
                 <div>
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100">Editar subtítulos</h3>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={autoSuggestEmojis}
-                        className="text-xs px-2 py-1 rounded-md border border-emerald-300 bg-emerald-100/80 dark:border-emerald-700 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/30 inline-flex items-center gap-1"
-                        title="Auto-sugerencia local por contenido"
-                      >
-                        <Sparkles size={12} />
-                        IA local
-                      </button>
-                      <button
-                        type="button"
-                        onClick={loadSrt}
-                        className="text-xs px-2 py-1 rounded-md border border-black/10 dark:border-white/10 text-zinc-600 dark:text-zinc-300 hover:bg-black/5 dark:hover:bg-white/5"
-                      >
-                        {isLoadingSrt ? 'Cargando...' : 'Recargar SRT'}
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={autoSuggestEmojis}
+                      className="text-xs px-2 py-1 rounded-md border border-emerald-300 bg-emerald-100/80 dark:border-emerald-700 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/30 inline-flex items-center gap-1"
+                      title="Auto-sugerencia local por contenido"
+                    >
+                      <Sparkles size={12} />
+                      IA local
+                    </button>
                   </div>
                   {emojiSuggestFeedback && (
                     <div className="mb-2 rounded-md border border-emerald-300 bg-emerald-50/90 dark:border-emerald-700 dark:bg-emerald-900/20 px-2.5 py-1.5 text-[11px] text-emerald-700 dark:text-emerald-300">
@@ -2060,11 +2537,11 @@ export default function ClipStudioModal({
                         Zoom ({layoutZoom.toFixed(2)}x)
                         <input
                           type="range"
-                          min="0.5"
+                          min={String(layoutZoomMin)}
                           max="2.5"
                           step="0.01"
                           value={layoutZoom}
-                          onChange={(e) => setLayoutZoom(clamp(Number(e.target.value || 1), 0.5, 2.5))}
+                          onChange={(e) => setLayoutZoom(clamp(Number(e.target.value || 1), layoutZoomMin, 2.5))}
                           className="w-full mt-2"
                         />
                       </label>
@@ -2125,11 +2602,11 @@ export default function ClipStudioModal({
                             Zoom A ({layoutSplitZoomA.toFixed(2)}x)
                             <input
                               type="range"
-                              min="0.5"
+                              min={String(layoutZoomMin)}
                               max="2.5"
                               step="0.01"
                               value={layoutSplitZoomA}
-                              onChange={(e) => setLayoutSplitZoomA(clamp(Number(e.target.value || 1), 0.5, 2.5))}
+                              onChange={(e) => setLayoutSplitZoomA(clamp(Number(e.target.value || 1), layoutZoomMin, 2.5))}
                               className="w-full mt-2"
                             />
                           </label>
@@ -2165,11 +2642,11 @@ export default function ClipStudioModal({
                             Zoom B ({layoutSplitZoomB.toFixed(2)}x)
                             <input
                               type="range"
-                              min="0.5"
+                              min={String(layoutZoomMin)}
                               max="2.5"
                               step="0.01"
                               value={layoutSplitZoomB}
-                              onChange={(e) => setLayoutSplitZoomB(clamp(Number(e.target.value || 1), 0.5, 2.5))}
+                              onChange={(e) => setLayoutSplitZoomB(clamp(Number(e.target.value || 1), layoutZoomMin, 2.5))}
                               className="w-full mt-2"
                             />
                           </label>
@@ -2326,16 +2803,16 @@ export default function ClipStudioModal({
               )}
             </section>
 
-            <section className="bg-slate-100 dark:bg-slate-900 p-4 md:p-6 flex flex-col">
+            <section className="bg-slate-100 dark:bg-slate-900 p-4 md:p-6 flex flex-col min-h-0 overflow-y-auto custom-scrollbar">
               <div className="flex-1 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 flex flex-col items-center justify-start gap-3">
                 <div className="w-full px-1">
-                  <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
                     <div className="min-w-0">
                       <p className="text-[15px] md:text-[20px] font-semibold leading-tight text-slate-900 dark:text-white" title={previewClipTitle}>
                         {previewClipTitle}
                       </p>
                       <p
-                        className="mt-1.5 text-[10px] md:text-[11px] leading-snug text-slate-600 dark:text-slate-300"
+                        className="mt-1.5 text-[14px] leading-snug text-slate-600 dark:text-slate-300"
                         style={{
                           display: '-webkit-box',
                           WebkitLineClamp: 2,
@@ -2479,12 +2956,12 @@ export default function ClipStudioModal({
                   )}
 
                   {section === 'layout' && !layoutAutoSmart && !isSplitLayout && (
-                    <div className="absolute top-2 right-2 rounded-md bg-black/55 text-white text-[10px] px-2 py-1 pointer-events-none border border-white/20">
+                    <div className="absolute top-2 right-2 rounded-md bg-white/92 dark:bg-black/70 text-slate-900 dark:text-white text-[10px] px-2 py-1 pointer-events-none border border-slate-200/90 dark:border-white/20 shadow-sm">
                       Arrastra para mover
                     </div>
                   )}
                   {captionDragEnabled && (
-                    <div className="absolute top-2 left-2 rounded-md bg-black/55 text-white text-[10px] px-2 py-1 pointer-events-none border border-white/20">
+                    <div className="absolute top-2 left-2 rounded-md bg-white/92 dark:bg-black/70 text-slate-900 dark:text-white text-[10px] px-2 py-1 pointer-events-none border border-slate-200/90 dark:border-white/20 shadow-sm">
                       Arrastra subtítulo
                     </div>
                   )}
@@ -2531,7 +3008,7 @@ export default function ClipStudioModal({
                                   ? {
                                       color: karaokePreview.activeColor,
                                       display: 'inline-block',
-                                      marginRight: idx < karaokePreview.words.length - 1 ? '0.28em' : 0,
+                                      marginRight: idx < karaokePreview.words.length - 1 ? '0.42em' : 0,
                                       transform: 'scale(1.16)',
                                       fontWeight: 800,
                                       textShadow: `0 0 ${Math.max(2, Number(strokeWidth || 0) + 1)}px ${strokeColor}`,
@@ -2540,7 +3017,7 @@ export default function ClipStudioModal({
                                   : {
                                       opacity: 0.92,
                                       display: 'inline-block',
-                                      marginRight: idx < karaokePreview.words.length - 1 ? '0.28em' : 0,
+                                      marginRight: idx < karaokePreview.words.length - 1 ? '0.42em' : 0,
                                       transform: 'translateY(0px) scale(1)',
                                       transition: 'opacity 120ms ease'
                                     }}

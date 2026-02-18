@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Calendar, Clock, Scissors, Play, Pause, Pencil } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Calendar, Clock, Scissors, Play, Pause, Pencil, RefreshCw } from 'lucide-react';
 import { getApiUrl, apiFetch } from '../config';
 import ClipStudioModal from './ClipStudioModal';
+import { regenerateTitleWithGemini, buildFallbackTitleLocal } from '../geminiTitle';
 
 const transcriptSegmentsCache = new Map();
 
@@ -25,7 +26,7 @@ const buildTranscriptExcerpt = (segments, clipStart, clipEnd, maxChars = 420) =>
     return excerpt;
 };
 
-export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobId, uploadPostKey, uploadUserId, geminiApiKey, onPlay, onPause, onOpenStudio }) {
+export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobId, uploadPostKey, uploadUserId, geminiApiKey, onPlay, onPause, onOpenStudio, onSocialPosted }) {
     const [showModal, setShowModal] = useState(false);
     const [showStudioModal, setShowStudioModal] = useState(false);
     const [showRecutModal, setShowRecutModal] = useState(false);
@@ -60,28 +61,102 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
         const secs = total % 60;
         return `${mins}:${String(secs).padStart(2, '0')}`;
     };
-    const rawScore = Number(clip?.virality_score);
-    const clipScore = Number.isFinite(rawScore) ? Math.max(0, Math.min(100, Math.round(rawScore))) : 0;
-    const rawConfidence = Number(clip?.selection_confidence);
-    const clipConfidence = Number.isFinite(rawConfidence) ? Math.max(0, Math.min(1, rawConfidence)) : clipScore / 100;
     const topicTags = Array.isArray(clip?.topic_tags) ? clip.topic_tags.filter((t) => typeof t === 'string' && t.trim() !== '') : [];
-    const scoreBadgeClass = clipScore >= 80
-        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
-        : clipScore >= 65
-            ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
-            : 'bg-zinc-500/15 border-zinc-500/30 text-zinc-300';
     const [postResult, setPostResult] = useState(null);
 
     const [isEditing, setIsEditing] = useState(false);
     const [isRecutting, setIsRecutting] = useState(false);
+    const [isRegeneratingTitle, setIsRegeneratingTitle] = useState(false);
+    const [isRegeneratingSocial, setIsRegeneratingSocial] = useState(false);
     const [editError, setEditError] = useState(null);
     const [activeTextTab, setActiveTextTab] = useState('social');
     const [transcriptFallback, setTranscriptFallback] = useState('');
+    const [titleOverride, setTitleOverride] = useState('');
+    const [socialOverride, setSocialOverride] = useState('');
     const [recutStart, setRecutStart] = useState(clip.start);
     const [recutEnd, setRecutEnd] = useState(clip.end);
     const [editDuration, setEditDuration] = useState(0);
     const [editCurrentTime, setEditCurrentTime] = useState(0);
     const [editPlaying, setEditPlaying] = useState(false);
+
+    useEffect(() => {
+        const nextUrl = getApiUrl(String(clip?.video_url || '').trim());
+        if (!nextUrl) return;
+        setCurrentVideoUrl(nextUrl);
+        setBaseVideoUrl(nextUrl);
+        setSubtitledVideoUrl(null);
+        setSubtitlesEnabled(false);
+    }, [clip?.clip_index, clip?.video_url]);
+
+    const buildDownloadFilename = useCallback(() => {
+        const raw = String(
+            clip?.video_title_for_youtube_short
+            || clip?.title
+            || `clip-${displayIndex + 1}`
+        );
+        const safe = raw
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .slice(0, 72);
+        return `${safe || `clip-${displayIndex + 1}`}.mp4`;
+    }, [clip?.video_title_for_youtube_short, clip?.title, displayIndex]);
+
+    const triggerAnchorDownload = useCallback((href, filename) => {
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = href;
+        if (filename) a.download = filename;
+        a.rel = 'noopener noreferrer';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }, []);
+
+    const openDownloadFallback = useCallback(() => {
+        const sourceUrl = String(currentVideoUrl || '').trim();
+        if (!sourceUrl) return;
+        const popup = window.open(sourceUrl, '_blank', 'noopener,noreferrer');
+        if (!popup) {
+            triggerAnchorDownload(sourceUrl, undefined);
+        }
+    }, [currentVideoUrl, triggerAnchorDownload]);
+
+    const downloadCurrentVideo = useCallback(async () => {
+        const sourceUrl = String(currentVideoUrl || '').trim();
+        if (!sourceUrl) throw new Error('URL de video vacia');
+
+        const useDirectFetch = /^blob:|^data:/i.test(sourceUrl);
+        const response = await (useDirectFetch
+            ? fetch(sourceUrl, { method: 'GET' })
+            : apiFetch(sourceUrl, { method: 'GET' }));
+
+        if (!response.ok) {
+            throw new Error(`Descarga fallida (${response.status})`);
+        }
+
+        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+        if (contentType.includes('text/html')) {
+            throw new Error('El servidor devolvio HTML en lugar de video');
+        }
+
+        const blob = await response.blob();
+        const blobType = String(blob.type || '').toLowerCase();
+        if (blobType.includes('text/html')) {
+            throw new Error('Respuesta invalida al descargar video');
+        }
+
+        const objectUrl = window.URL.createObjectURL(blob);
+        try {
+            triggerAnchorDownload(objectUrl, buildDownloadFilename());
+        } finally {
+            setTimeout(() => {
+                window.URL.revokeObjectURL(objectUrl);
+            }, 1500);
+        }
+    }, [currentVideoUrl, triggerAnchorDownload, buildDownloadFilename]);
 
     useEffect(() => {
         const cleanupBlobUrl = () => {
@@ -137,16 +212,35 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
         };
     }, [currentVideoUrl]);
 
+    useEffect(() => {
+        setTitleOverride('');
+        setSocialOverride('');
+    }, [clip?.clip_index, clip?.video_url]);
+
+    const effectiveTitle = String(
+        titleOverride
+        || clip?.video_title_for_youtube_short
+        || clip?.title
+        || "Clip viral generado"
+    ).trim();
+    const socialText = String(
+        socialOverride
+        || clip?.video_description_for_tiktok
+        || clip?.video_description_for_instagram
+        || clip?.video_title_for_youtube_short
+        || "Sin descripción."
+    ).trim();
+
     // Initialize/Reset form when modal opens
     useEffect(() => {
         if (showModal) {
-            setPostTitle(clip.video_title_for_youtube_short || "Corto viral");
-            setPostDescription(clip.video_description_for_instagram || clip.video_description_for_tiktok || "");
+            setPostTitle(effectiveTitle || "Corto viral");
+            setPostDescription(socialText || "");
             setIsScheduling(false);
             setScheduleDate("");
             setPostResult(null);
         }
-    }, [showModal, clip]);
+    }, [showModal, effectiveTitle, socialText]);
 
     useEffect(() => {
         if (!showRecutModal || !editVideoRef.current) return;
@@ -168,8 +262,6 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
     }, [showRecutModal]);
 
     const clipDuration = Math.max(0, Number(clip?.end || 0) - Number(clip?.start || 0));
-    const viralityTen = (clipScore / 10).toFixed(1);
-    const socialText = clip.video_description_for_tiktok || clip.video_description_for_instagram || clip.video_title_for_youtube_short || "Sin descripción.";
     const baseTranscriptText = [
         clip?.transcript_excerpt,
         clip?.transcript_text,
@@ -177,15 +269,168 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
         typeof clip?.transcript === 'string' ? clip.transcript : null
     ].find((value) => typeof value === 'string' && value.trim()) || '';
     const transcriptDisplay = baseTranscriptText || transcriptFallback || "No hay transcripción disponible para este clip todavía.";
-    const viralityText = clip.score_reason || 'Este clip tiene buena combinación de claridad, gancho y potencial de engagement.';
     const hashtagsText = topicTags.length > 0 ? topicTags.map((tag) => `#${tag}`).join(' ') : 'Sin hashtags sugeridos.';
     const activePanelText = activeTextTab === 'transcript'
         ? transcriptDisplay
-        : activeTextTab === 'virality'
-            ? viralityText
-            : activeTextTab === 'hashtags'
+        : activeTextTab === 'hashtags'
                 ? hashtagsText
                 : socialText;
+
+    const parseApiErrorDetail = async (res) => {
+        const raw = await res.text();
+        let detail = '';
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+        } catch (_) {
+            // Non-JSON payloads are handled with raw text below.
+        }
+        return detail || raw || `HTTP ${res.status}`;
+    };
+
+    const handleRegenerateTitle = async () => {
+        if (!jobId || !Number.isFinite(Number(clipIndex))) return;
+        setIsRegeneratingTitle(true);
+        setEditError(null);
+        const apiKey = String(geminiApiKey || localStorage.getItem('gemini_key') || '').trim();
+        const applyLocalRetitle = (notice = '') => {
+            const nextTitle = buildFallbackTitleLocal({
+                currentTitle: effectiveTitle || 'Momento clave del video',
+                transcriptExcerpt: transcriptDisplay,
+                topicTags,
+                avoidTitle: effectiveTitle || ''
+            });
+            setTitleOverride(nextTitle);
+            setPostTitle(nextTitle);
+            if (notice) {
+                setEditError(notice);
+                setTimeout(() => setEditError(null), 3500);
+            } else {
+                setEditError(null);
+            }
+        };
+        const fallbackRetitle = async () => {
+            const nextTitle = await regenerateTitleWithGemini({
+                apiKey,
+                currentTitle: effectiveTitle || 'Momento clave del video',
+                transcriptExcerpt: transcriptDisplay,
+                socialExcerpt: socialText,
+                topicTags
+            });
+            setTitleOverride(nextTitle);
+            setPostTitle(nextTitle);
+            setEditError(null);
+        };
+        try {
+            const headers = { 'Content-Type': 'application/json' };
+            if (apiKey) headers['X-Gemini-Key'] = apiKey;
+
+            const res = await apiFetch('/api/clip/retitle', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                    job_id: jobId,
+                    clip_index: Number(clipIndex),
+                    current_title: effectiveTitle || null
+                })
+            });
+            if (!res.ok) throw new Error(await parseApiErrorDetail(res));
+            const data = await res.json();
+            const nextTitle = String(data?.new_title || '').trim();
+            if (!nextTitle) throw new Error('No se recibió un título nuevo.');
+            setTitleOverride(nextTitle);
+            setPostTitle(nextTitle);
+        } catch (e) {
+            const msg = String(e?.message || '');
+            const lower = msg.toLowerCase();
+            const isQuotaOrRateError = (
+                lower.includes('quota')
+                || lower.includes('rate limit')
+                || lower.includes('429')
+                || lower.includes('resource exhausted')
+                || lower.includes('too many requests')
+                || lower.includes('exceeded')
+            );
+            if (lower === 'not found') {
+                try {
+                    await fallbackRetitle();
+                    return;
+                } catch (fallbackError) {
+                    applyLocalRetitle('Backend desactualizado: se aplicó un título local.');
+                    return;
+                }
+            } else if (lower.includes('missing gemini api key')) {
+                applyLocalRetitle('Falta API key de Gemini: se aplicó un título local.');
+                return;
+            } else if (isQuotaOrRateError) {
+                applyLocalRetitle('Gemini sin cuota/rate-limit: se aplicó un título local.');
+                return;
+            } else if (
+                lower.includes('job not found')
+                || lower.includes('job output directory not found')
+                || lower.includes('metadata not found')
+                || (lower.includes('model') && lower.includes('not found'))
+                || (lower.includes('model') && lower.includes('not supported'))
+                || (lower.includes('for api version') && lower.includes('model'))
+            ) {
+                try {
+                    await fallbackRetitle();
+                    return;
+                } catch (fallbackError) {
+                    applyLocalRetitle('No fue posible usar Gemini: se aplicó un título local.');
+                    return;
+                }
+            } else {
+                setEditError(`No se pudo regenerar el título: ${msg}`);
+                setTimeout(() => setEditError(null), 5000);
+            }
+        } finally {
+            setIsRegeneratingTitle(false);
+        }
+    };
+
+    const handleRegenerateSocial = async () => {
+        if (!jobId || !Number.isFinite(Number(clipIndex))) return;
+        setIsRegeneratingSocial(true);
+        setEditError(null);
+        try {
+            const headers = { 'Content-Type': 'application/json' };
+            const apiKey = String(geminiApiKey || localStorage.getItem('gemini_key') || '').trim();
+            if (apiKey) headers['X-Gemini-Key'] = apiKey;
+
+            const res = await apiFetch('/api/clip/resocial', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                    job_id: jobId,
+                    clip_index: Number(clipIndex),
+                    current_social: socialText || null
+                })
+            });
+            if (!res.ok) throw new Error(await parseApiErrorDetail(res));
+            const data = await res.json();
+            const nextSocial = String(data?.new_social || '').trim();
+            if (!nextSocial) throw new Error('No se recibió texto social nuevo.');
+            setSocialOverride(nextSocial);
+            setPostDescription(nextSocial);
+            setActiveTextTab('social');
+        } catch (e) {
+            const msg = String(e?.message || '');
+            const lower = msg.toLowerCase();
+            if (lower === 'not found') {
+                setEditError('No se pudo regenerar el texto social: backend desactualizado o endpoint no disponible. Reinicia Colab con la versión nueva.');
+            } else if (lower.includes('missing gemini api key')) {
+                setEditError('No se pudo regenerar el texto social: falta la API key de Gemini en Configuración.');
+            } else if (lower.includes('job not found') || lower.includes('job output directory not found') || lower.includes('metadata not found')) {
+                setEditError('No se pudo regenerar el texto social: este proyecto no está cargado en este backend de Colab.');
+            } else {
+                setEditError(`No se pudo regenerar el texto social: ${msg}`);
+            }
+            setTimeout(() => setEditError(null), 5000);
+        } finally {
+            setIsRegeneratingSocial(false);
+        }
+    };
 
     const handleCopyActiveText = async () => {
         try {
@@ -229,21 +474,10 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
     const handleDownload = async (e) => {
         e.preventDefault();
         try {
-            const response = await fetch(currentVideoUrl);
-            if (!response.ok) throw new Error('Descarga fallida');
-            const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.style.display = 'none';
-            a.href = url;
-            a.download = `clip-${displayIndex + 1}.mp4`;
-            document.body.appendChild(a);
-            a.click();
-            window.URL.revokeObjectURL(url);
-            document.body.removeChild(a);
+            await downloadCurrentVideo();
         } catch (err) {
             console.error('Error de descarga:', err);
-            window.open(currentVideoUrl, '_blank');
+            openDownloadFallback();
         }
     };
 
@@ -396,6 +630,14 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
             }
 
             setPostResult({ success: true, msg: isScheduling ? "Programado correctamente." : "Publicado correctamente." });
+            if (typeof onSocialPosted === 'function') {
+                onSocialPosted({
+                    jobId,
+                    clipIndex,
+                    platforms: selectedPlatforms,
+                    scheduled: Boolean(isScheduling)
+                });
+            }
             setTimeout(() => {
                 setShowModal(false);
                 setPostResult(null);
@@ -438,13 +680,13 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                         }
                     }}
                 />
-                <div className="absolute top-3 left-3 bg-black/65 backdrop-blur-sm text-white text-[10px] font-bold px-2 py-1 rounded-md border border-white/10">
+                <div className="absolute top-3 left-3 bg-white/92 dark:bg-black/70 backdrop-blur-sm text-slate-900 dark:text-white text-[10px] font-bold px-2 py-1 rounded-md border border-slate-200/90 dark:border-white/20 shadow-sm">
                     #{displayIndex + 1}
                 </div>
-                <div className="absolute top-3 right-3 bg-black/65 backdrop-blur-sm text-white text-[10px] font-semibold px-2 py-1 rounded-md border border-white/10">
+                <div className="absolute top-3 right-3 bg-white/92 dark:bg-black/70 backdrop-blur-sm text-slate-900 dark:text-white text-[10px] font-semibold px-2 py-1 rounded-md border border-slate-200/90 dark:border-white/20 shadow-sm">
                     {clipAspectRatio}
                 </div>
-                <div className="absolute bottom-3 right-3 bg-black/70 text-white text-[10px] font-mono px-1.5 py-0.5 rounded">
+                <div className="absolute bottom-3 right-3 bg-white/92 dark:bg-black/75 text-slate-900 dark:text-white text-[10px] font-mono px-1.5 py-0.5 rounded border border-slate-200/90 dark:border-white/20 shadow-sm">
                     {formatTime(clipDuration)}
                 </div>
 
@@ -465,25 +707,25 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
             <div className="flex-1 p-4 md:p-5 flex flex-col min-w-0 bg-[#121214]">
                 <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                        <h3 className="text-lg font-bold text-white leading-tight line-clamp-2 break-words" title={clip.video_title_for_youtube_short}>
-                            {clip.video_title_for_youtube_short || "Clip viral generado"}
+                        <h3 className="text-lg font-bold text-white leading-tight line-clamp-2 break-words" title={effectiveTitle}>
+                            {effectiveTitle || "Clip viral generado"}
                         </h3>
                         <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-zinc-400">
-                            <span className={`px-2 py-1 rounded-md border ${scoreBadgeClass}`}>
-                                Puntaje {clipScore}/100
-                            </span>
-                            <span className="px-2 py-1 rounded-md border border-white/10 bg-white/5">
-                                Confianza {Math.round(clipConfidence * 100)}%
-                            </span>
                             <span className="px-2 py-1 rounded-md border border-white/10 bg-white/5">
                                 {formatTime(Number(clip.start || 0))} - {formatTime(Number(clip.end || 0))}
                             </span>
                         </div>
                     </div>
-                    <div className="shrink-0 text-right px-3 py-2 rounded-lg border border-white/10 bg-white/5">
-                        <div className="text-3xl leading-none font-bold text-white">{viralityTen}</div>
-                        <div className="text-[10px] uppercase tracking-wider text-zinc-400 mt-1">Virality</div>
-                    </div>
+                    <button
+                        type="button"
+                        onClick={handleRegenerateTitle}
+                        disabled={isRegeneratingTitle || !jobId}
+                        className="shrink-0 inline-flex items-center gap-1.5 rounded-md border border-white/15 bg-white/5 px-2 py-1 text-[11px] text-zinc-300 hover:bg-white/10 disabled:opacity-60 disabled:cursor-not-allowed"
+                        title="Regenerar título"
+                    >
+                        {isRegeneratingTitle ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                        {isRegeneratingTitle ? 'Generando...' : 'Regenerar'}
+                    </button>
                 </div>
 
                 <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
@@ -510,16 +752,6 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                                 Transcripción
                             </button>
                             <button
-                                onClick={() => setActiveTextTab('virality')}
-                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${
-                                    activeTextTab === 'virality'
-                                        ? 'text-primary border-primary'
-                                        : 'text-zinc-500 border-transparent hover:text-zinc-300'
-                                }`}
-                            >
-                                Puntaje viral
-                            </button>
-                            <button
                                 onClick={() => setActiveTextTab('hashtags')}
                                 className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${
                                     activeTextTab === 'hashtags'
@@ -530,32 +762,27 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                                 Etiquetas
                             </button>
                         </div>
-                        <button
-                            onClick={handleCopyActiveText}
-                            className="text-zinc-400 hover:text-zinc-200 p-1 rounded border border-white/10 bg-white/5"
-                            title="Copiar texto"
-                        >
-                            <Copy size={13} />
-                        </button>
-                    </div>
-                    {activeTextTab === 'virality' ? (
-                        <div className="space-y-3">
-                            <div className="flex items-center justify-between gap-3">
-                                <div className="text-xs text-zinc-400">Puntaje de viralidad</div>
-                                <div className="text-sm font-semibold text-white">{clipScore}/100</div>
-                            </div>
-                            <div className="h-2 w-full rounded-full bg-white/10 overflow-hidden">
-                                <div
-                                    className="h-full bg-gradient-to-r from-emerald-500 via-amber-400 to-rose-500"
-                                    style={{ width: `${clipScore}%` }}
-                                />
-                            </div>
-                            <div className="text-[11px] text-zinc-400">
-                                Confianza del modelo: <span className="text-zinc-200 font-semibold">{Math.round(clipConfidence * 100)}%</span>
-                            </div>
-                            <p className="text-sm text-zinc-300 leading-relaxed break-words">{viralityText}</p>
+                        <div className="flex items-center gap-1.5">
+                            {activeTextTab === 'social' && (
+                                <button
+                                    onClick={handleRegenerateSocial}
+                                    disabled={isRegeneratingSocial || !jobId}
+                                    className="text-zinc-400 hover:text-zinc-200 p-1 rounded border border-white/10 bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    title="Regenerar texto social"
+                                >
+                                    {isRegeneratingSocial ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                                </button>
+                            )}
+                            <button
+                                onClick={handleCopyActiveText}
+                                className="text-zinc-400 hover:text-zinc-200 p-1 rounded border border-white/10 bg-white/5"
+                                title="Copiar texto"
+                            >
+                                <Copy size={13} />
+                            </button>
                         </div>
-                    ) : activeTextTab === 'hashtags' ? (
+                    </div>
+                    {activeTextTab === 'hashtags' ? (
                         <div className="space-y-3">
                             <p className="text-xs text-zinc-400">Hashtags sugeridos para publicar este clip:</p>
                             {topicTags.length > 0 ? (
@@ -608,14 +835,6 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                 )}
 
                 <div className="mt-4 pt-4 border-t border-white/10 flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                        <button
-                            onClick={handleDownload}
-                            className="py-2.5 px-5 bg-gradient-to-r from-emerald-600 to-green-500 hover:from-emerald-500 hover:to-green-400 text-white rounded-lg text-sm font-semibold transition-all active:scale-[0.98] flex items-center gap-2 shadow-lg shadow-emerald-900/35"
-                        >
-                            <Download size={15} /> Descargar
-                        </button>
-                    </div>
                     <div className="flex items-center gap-2">
                         <button
                             onClick={handleAutoEdit}
@@ -639,12 +858,14 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                             <Pencil size={14} />
                             <span className="text-sm font-medium">Editar</span>
                         </button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 ml-auto">
                         <button
-                            onClick={() => setShowRecutModal(true)}
-                            className="p-2.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
-                            title="Recortar clip"
+                            onClick={handleDownload}
+                            className="py-2.5 px-5 bg-gradient-to-r from-emerald-600 to-green-500 hover:from-emerald-500 hover:to-green-400 rounded-lg transition-all active:scale-[0.98] inline-flex items-center gap-2 shadow-lg shadow-emerald-900/35 !text-white"
                         >
-                            <Scissors size={15} />
+                            <Download size={15} className="text-white" />
+                            <span className="text-sm font-semibold text-white">Descargar</span>
                         </button>
                     </div>
                 </div>
@@ -822,20 +1043,9 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                                     <button
                                         onClick={async () => {
                                             try {
-                                                const response = await fetch(currentVideoUrl);
-                                                if (!response.ok) throw new Error('Descarga fallida');
-                                                const blob = await response.blob();
-                                                const url = window.URL.createObjectURL(blob);
-                                                const a = document.createElement('a');
-                                                a.style.display = 'none';
-                                                a.href = url;
-                                                a.download = `clip-${displayIndex + 1}.mp4`;
-                                                document.body.appendChild(a);
-                                                a.click();
-                                                window.URL.revokeObjectURL(url);
-                                                document.body.removeChild(a);
+                                                await downloadCurrentVideo();
                                             } catch (err) {
-                                                window.open(currentVideoUrl, '_blank');
+                                                openDownloadFallback();
                                             }
                                         }}
                                         className="px-3 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 flex items-center gap-2"

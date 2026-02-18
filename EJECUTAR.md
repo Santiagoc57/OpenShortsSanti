@@ -1,74 +1,147 @@
 # EJECUTAR (Modo Colab-First)
 
-Este proyecto se usará **siempre conectado a Colab** para procesar videos (tu Mac solo levanta el frontend).
+Este flujo asume:
+- Backend corriendo en Colab (con ngrok).
+- Tu Mac solo corre el frontend.
 
-## Flujo recomendado
-
-1. Ve a la raíz del proyecto:
-
-```bash
-cd "/Users/santiagocordoba/GITHUBS/openshorts-main 2"
-```
-
-2. Configura la URL pública del backend de Colab:
+## 1) Frontend en tu Mac
 
 ```bash
-./set-colab-api.sh https://62cb-34-168-226-133.ngrok-free.app
-```
-
-3. Levanta el frontend (Vite):
-
-```bash
-cd "/Users/santiagocordoba/GITHUBS/openshorts-main 2/dashboard"
+cd "/Users/santiagocordoba/GITHUBS/-- 05 Openshorts-main 2"
+cd dashboard
 npm run dev -- --host 0.0.0.0 --port 5173
-
 ```
 
-4. Abre la app en:
+Abre:
 
 ```text
 http://localhost:5173
 ```
 
----
+En la app:
+- Ve a `Configuracion`.
+- Pega tu URL de Colab/ngrok en `Backend remoto (Colab / ngrok)`.
+- Pulsa `Guardar`.
 
-## ¿Debo cambiar la URL de ngrok cada vez?
-
-**Sí.**
-
-Cada vez que Colab se reinicia o recrea el túnel, la URL `https://...ngrok-free.app` puede cambiar.
-
-Cuando cambie:
-
-1. Ejecuta de nuevo:
+Alternativa por terminal (opcional):
 
 ```bash
-cd "/Users/santiagocordoba/GITHUBS/openshorts-main 2"
+cd "/Users/santiagocordoba/GITHUBS/-- 05 Openshorts-main 2"
+./set-colab-api.sh https://TU-NGROK.ngrok-free.app
+```
+
+## 2) Backend en Colab
+
+Ejemplo minimo en Colab:
+
+```python
+%cd /content
+!rm -rf OpenShortsSanti
+!git clone https://github.com/Santiagoc57/OpenShortsSanti.git
+%cd /content/OpenShortsSanti
+
+!apt-get update -y
+!apt-get install -y ffmpeg
+!python3 -m pip install -U pip
+!python3 -m pip install -r requirements.txt pyngrok
+```
+
+```python
+import os
+from pyngrok import ngrok
+
+os.environ["WHISPER_BACKEND"] = "openai"
+os.environ["WHISPER_MODEL"] = "base"
+os.environ["WHISPER_DEVICE"] = "cuda"
+
+ngrok.set_auth_token("TU_TOKEN")
+```
+
+```python
+!nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8000 > /content/backend.log 2>&1 &
+!sleep 5
+!tail -n 40 /content/backend.log
+```
+
+```python
+from pyngrok import ngrok
+import requests
+
+ngrok.kill()
+tunnel = ngrok.connect(8000, "http")
+public_url = tunnel.public_url
+print(public_url)
+
+print("docs:", requests.get(f"{public_url}/docs").status_code)
+print("health:", requests.get(f"{public_url}/api/status/__healthcheck__?ts=1").status_code)
+```
+
+Usa ese `public_url` en la UI (`Configuracion`) o en `./set-colab-api.sh`.
+
+## 3) Cuando cambia la URL ngrok
+
+Cada vez que Colab reinicia runtime o recrea tunel, la URL puede cambiar.
+
+Actualiza asi (recomendado):
+
+1. En la app, abre `Configuracion`.
+2. Pega la nueva URL `https://NUEVA-URL.ngrok-free.app`.
+3. Pulsa `Guardar`.
+
+Alternativa por terminal:
+
+```bash
+cd "/Users/santiagocordoba/GITHUBS/-- 05 Openshorts-main 2"
 ./set-colab-api.sh https://NUEVA-URL.ngrok-free.app
 ```
 
-2. Reinicia Vite (Ctrl+C y volver a correr):
+Nota:
+- Si cambias la URL desde la UI, no hace falta reiniciar Vite.
+- Si cambias la URL con `set-colab-api.sh`, si conviene reiniciar Vite.
+
+## 4) No usar en este modo
+
+- `./start-ngrok.sh` en tu Mac.
+- `./start.sh` para procesamiento pesado.
+- `python -m uvicorn ...` local para este flujo.
+
+## 5) Troubleshooting rapido
+
+### NetworkError / Failed to fetch / CORS
+
+Normalmente significa tunel caido, URL vieja o ngrok devolviendo error HTML.
+
+Valida desde tu Mac:
 
 ```bash
-cd dashboard
-npm run dev -- --host 0.0.0.0 --port 5173
+curl -i https://TU-NGROK.ngrok-free.app/docs
+curl -i "https://TU-NGROK.ngrok-free.app/api/status/__healthcheck__?ts=$(date +%s)"
 ```
 
----
+Si falla aqui, el problema esta en Colab/ngrok, no en Vite.
 
-## No usar en este modo
+### Frontend sigue usando URL vieja
 
-- `./start-ngrok.sh` (no hace falta si el backend corre en Colab).
-- Backend local (`./start.sh`) para procesamiento pesado.
+La app prioriza `localStorage` (`openshorts_api_base_url`) sobre `.env.local`.
 
----
+En consola del navegador:
 
-## Troubleshooting rápido
+```js
+localStorage.removeItem('openshorts_api_base_url');
+location.reload();
+```
 
-- Error `NetworkError when attempting to fetch resource`:
-  - URL de Colab/ngrok caída o vieja.
-  - Reconfigura con `./set-colab-api.sh <nueva_url>` y reinicia Vite.
+Luego vuelve a guardar la URL correcta en Configuracion.
 
-- Error `ECONNREFUSED` en consola de Vite:
-  - Frontend está intentando `localhost:8000`.
-  - Vuelve a correr `./set-colab-api.sh <url_colab>` y reinicia Vite.
+### `ERR_NGROK_324` (max endpoints)
+
+Tienes demasiados tuneles activos en esa sesion.
+
+En Colab:
+
+```python
+from pyngrok import ngrok
+ngrok.kill()
+```
+
+Y crea solo un tunel con `ngrok.connect(8000, "http")`.

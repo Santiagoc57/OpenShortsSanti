@@ -2,6 +2,100 @@ import os
 import re
 import subprocess
 import unicodedata
+from functools import lru_cache
+
+_FONT_ALIAS_MAP = {
+    "montserrat": "Montserrat Bold",
+    "montserrat bold": "Montserrat Bold",
+    "anton": "Anton",
+    "archivo black": "Archivo Black",
+    "bebas neue": "Bebas Neue",
+    "bebas": "Bebas Neue",
+    "oswald": "Oswald Bold",
+    "teko": "Teko Bold",
+    "teko light": "Teko Bold",
+    "arial": "Arial",
+    "arial black": "Anton",
+    "verdana": "Verdana",
+    "georgia": "Georgia",
+    "impact": "Anton",
+}
+
+def _normalize_font_key(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+@lru_cache(maxsize=1)
+def _load_available_font_families():
+    families = set()
+    try:
+        proc = subprocess.run(
+            ["fc-list", "-f", "%{family}\n%{fullname}\n"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False
+        )
+        for raw in (proc.stdout or "").splitlines():
+            for part in raw.split(","):
+                name = str(part or "").strip()
+                if name:
+                    families.add(_normalize_font_key(name))
+    except Exception:
+        pass
+    # Include bundled families shipped with the project for deterministic exports.
+    fonts_dir = os.path.join(os.path.dirname(__file__), "dashboard", "public", "fonts")
+    bundled = {
+        "Montserrat-Bold.ttf": ["montserrat", "montserrat regular", "montserrat semibold", "montserrat bold", "montserrat extrabold", "montserrat black"],
+        "Anton-Regular.ttf": ["anton", "anton regular"],
+        "ArchivoBlack-Regular.ttf": ["archivo black", "archivo black regular"],
+        "BebasNeue-Regular.ttf": ["bebas neue", "bebas neue regular"],
+        "Oswald-Variable.ttf": ["oswald", "oswald regular", "oswald semibold", "oswald bold"],
+        "Teko-Variable.ttf": ["teko", "teko regular", "teko semibold", "teko bold"],
+    }
+    for filename, family_names in bundled.items():
+        if os.path.isfile(os.path.join(fonts_dir, filename)):
+            for family in family_names:
+                families.add(_normalize_font_key(family))
+    return families
+
+def _sanitize_font_name(font_name: str, fallback: str = "Anton") -> str:
+    requested = str(font_name or "").strip()
+    available = _load_available_font_families()
+
+    def pick_available(name: str) -> str:
+        candidate_name = str(name or "").strip()
+        if not candidate_name:
+            return ""
+        key = _normalize_font_key(candidate_name)
+        mapped = _FONT_ALIAS_MAP.get(key, candidate_name)
+        mapped_key = _normalize_font_key(mapped)
+        if mapped_key in available:
+            return mapped
+        return ""
+
+    if not requested:
+        # Never return an unavailable font name; that can trigger decorative system fallback in libass.
+        for pref in [fallback, "Anton", "Archivo Black", "Bebas Neue", "Oswald", "Teko", "Montserrat", "Arial", "Verdana", "DejaVu Sans", "Noto Sans"]:
+            chosen = pick_available(pref)
+            if chosen:
+                return chosen
+        return "Arial"
+
+    key = _normalize_font_key(requested)
+    candidate = _FONT_ALIAS_MAP.get(key, requested)
+    candidate_key = _normalize_font_key(candidate)
+    if candidate_key in available:
+        return candidate
+    # Stable fallback chain to avoid random decorative system fonts in headless envs.
+    for pref in [fallback, "Anton", "Archivo Black", "Bebas Neue", "Oswald", "Teko", "Montserrat", "Arial", "Verdana", "DejaVu Sans", "Noto Sans"]:
+        chosen = pick_available(pref)
+        if chosen:
+            return chosen
+    return "Arial"
 
 def generate_srt(transcript, clip_start, clip_end, output_path, max_chars=20, max_duration=2.0):
     """
@@ -209,7 +303,7 @@ def generate_styled_ass_from_srt(
     srt_text: str,
     output_path: str,
     alignment="bottom",
-    font_size: int = 34,
+    font_size: int = 40,
     font_name: str = "Montserrat",
     font_color: str = "#FFFFFF",
     stroke_color: str = "#000000",
@@ -226,6 +320,7 @@ def generate_styled_ass_from_srt(
 
     ass_alignment = _ass_alignment_from_position(alignment)
     final_fontsize = max(10, int(font_size))
+    safe_font_name = _sanitize_font_name(font_name)
     box_alpha = int(255 * (1 - max(0, min(100, int(box_opacity))) / 100))
     primary = _hex_to_ass_color(font_color, alpha=0)
     outline = _hex_to_ass_color(stroke_color, alpha=0)
@@ -246,7 +341,7 @@ Style: Default,{font_name},{font_size},{primary},{primary},{outline},{back},{bol
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """.format(
-        font_name=font_name,
+        font_name=safe_font_name,
         font_size=final_fontsize,
         primary=primary,
         outline=outline,
@@ -280,7 +375,7 @@ def generate_karaoke_ass_from_srt(
     srt_text: str,
     output_path: str,
     alignment="bottom",
-    font_size: int = 44,
+    font_size: int = 40,
     font_name: str = "Montserrat",
     font_color: str = "#FFFFFF",
     active_word_color: str = "#39FF14",
@@ -299,6 +394,7 @@ def generate_karaoke_ass_from_srt(
 
     ass_alignment = _ass_alignment_from_position(alignment)
     final_fontsize = max(12, int(font_size))
+    safe_font_name = _sanitize_font_name(font_name)
     box_alpha = int(255 * (1 - max(0, min(100, int(box_opacity))) / 100))
     primary = _hex_to_ass_color(font_color, alpha=0)
     use_auto_emotion = str(active_word_color or "").strip().lower() == "auto"
@@ -309,6 +405,10 @@ def generate_karaoke_ass_from_srt(
     border_style = 3 if int(box_opacity) > 0 else 1
     bold_flag = -1 if bool(bold) else 0
     safe_pop_scale = max(105, min(150, int(pop_scale)))
+    # Slight extra letter spacing helps condensed display fonts (Anton/Bebas) breathe in karaoke.
+    style_spacing = 1.2 if final_fontsize >= 34 else 0.8
+    # Extra hard-space gap to avoid words visually "touching" when active word scales up.
+    word_gap_token = r"\h\h" if safe_pop_scale >= 112 else r"\h"
 
     header = """[Script Info]
 ScriptType: v4.00+
@@ -318,18 +418,19 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{font_size},{primary},{secondary},{outline},{back},{bold_flag},0,0,0,100,100,0,0,{border_style},{stroke_width},0,{alignment},30,30,38,1
+Style: Default,{font_name},{font_size},{primary},{secondary},{outline},{back},{bold_flag},0,0,0,100,100,{style_spacing},0,{border_style},{stroke_width},0,{alignment},30,30,38,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """.format(
-        font_name=font_name,
+        font_name=safe_font_name,
         font_size=final_fontsize,
         primary=primary,
         secondary=secondary,
         outline=outline,
         back=back,
         bold_flag=bold_flag,
+        style_spacing=f"{style_spacing:.2f}",
         border_style=border_style,
         stroke_width=max(0, int(stroke_width)),
         alignment=ass_alignment
@@ -373,7 +474,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     )
                 else:
                     line_tokens.append(safe_w)
-            line_text = " ".join(line_tokens)
+            line_text = word_gap_token.join(line_tokens)
             intro_tag = f"{{\\fad(45,65)\\move({anchor_x},{anchor_from_y},{anchor_x},{anchor_to_y},0,130)}}"
 
             dialogue_lines.append(
@@ -427,6 +528,7 @@ def burn_subtitles(
     # Let's use a reasonable default if user says "small/medium/large".
     
     ass_alignment = _ass_alignment_from_position(alignment)
+    safe_font_name = _sanitize_font_name(font_name)
 
     # Font size logic
     # Scale: Libass uses 384x288 virtual resolution unless PlayResX/Y set.
@@ -461,7 +563,7 @@ def burn_subtitles(
     bold_flag = 1 if bool(bold) else 0
 
     style_string = (
-        f"Alignment={ass_alignment},Fontname={font_name},Fontsize={final_fontsize},"
+        f"Alignment={ass_alignment},Fontname={safe_font_name},Fontsize={final_fontsize},"
         f"PrimaryColour={primary},OutlineColour={outline},BackColour={back},"
         f"BorderStyle={border_style},Outline={stroke_width},Shadow=0,MarginV=25,Bold={bold_flag}"
     )
