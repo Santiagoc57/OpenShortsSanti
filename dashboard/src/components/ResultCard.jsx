@@ -751,10 +751,6 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                         </div>
                     </div>
                     <div className="shrink-0 flex items-start gap-2">
-                        <div className="text-right px-3 py-2 rounded-lg border border-white/10 bg-white/5">
-                            <div className="text-3xl leading-none font-bold text-white">{viralityTen}</div>
-                            <div className="text-[10px] uppercase tracking-wider text-zinc-400 mt-1">Virality</div>
-                        </div>
                         <button
                             type="button"
                             onClick={handleRegenerateTitle}
@@ -765,6 +761,10 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                             {isRegeneratingTitle ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
                             {isRegeneratingTitle ? 'Generando...' : 'Regenerar'}
                         </button>
+                        <div className="text-right px-3 py-2 rounded-lg border border-white/10 bg-white/5">
+                            <div className="text-3xl leading-none font-bold text-white">{viralityTen}</div>
+                            <div className="text-[10px] uppercase tracking-wider text-zinc-400 mt-1">Virality</div>
+                        </div>
                     </div>
                 </div>
 

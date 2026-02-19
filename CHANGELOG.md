@@ -408,3 +408,11 @@
 - Para que sirve:
   - Recupera visibilidad del scoring para decidir rápido qué clips priorizar.
   - Alinea la UI con el flujo anterior que el usuario venía usando.
+
+### Ajustado: Orden visual entre "Regenerar" y bloque de Virality
+- Que cambiamos:
+  - En `dashboard/src/components/ResultCard.jsx` se invirtió el orden del header derecho para mostrar:
+    - botón `Regenerar` primero
+    - bloque `Virality` a la derecha
+- Para que sirve:
+  - Evita lectura visual rara en cards angostos y mantiene jerarquía de acción > métrica.
