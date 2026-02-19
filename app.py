@@ -16,6 +16,7 @@ import math
 import struct
 import zlib
 import sqlite3
+import unicodedata
 from urllib.parse import unquote
 from dotenv import load_dotenv
 from typing import Dict, Optional, List, Any, Tuple
@@ -1196,6 +1197,12 @@ def _apply_search_mode_override(profile: Dict[str, Any], search_mode: str) -> Di
 def _safe_float(value, default: float = 0.0) -> float:
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
     except (TypeError, ValueError):
         return default
 
@@ -4714,7 +4721,7 @@ def _build_semantic_highlight_queries(
         ):
             add_query(fallback)
 
-    return queries[:max(1, min(16, int(max_queries)))]
+    return queries[:max(1, min(120, int(max_queries)))]
 
 def _select_highlight_reel_segments_semantic(
     job_id: str,
@@ -4727,8 +4734,8 @@ def _select_highlight_reel_segments_semantic(
     max_segment_seconds: float,
     min_gap_seconds: float
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    safe_max_segments = max(1, min(12, int(max_segments)))
-    safe_target_duration = max(8.0, min(240.0, _safe_float(target_duration, 50.0)))
+    safe_max_segments = max(1, min(240, int(max_segments)))
+    safe_target_duration = max(8.0, min(10800.0, _safe_float(target_duration, 50.0)))
     safe_min_segment = max(1.0, min(20.0, _safe_float(min_segment_seconds, 4.5)))
     safe_max_segment = max(safe_min_segment, min(35.0, _safe_float(max_segment_seconds, 11.0)))
     safe_min_gap = max(0.0, min(80.0, _safe_float(min_gap_seconds, 7.0)))
@@ -4767,7 +4774,7 @@ def _select_highlight_reel_segments_semantic(
     )
 
     by_unit: Dict[int, Dict[str, Any]] = {}
-    max_matches_per_query = max(2, min(5, safe_max_segments))
+    max_matches_per_query = max(2, min(10, max(4, (safe_max_segments // 5) + 2)))
     for q_index, query in enumerate(queries):
         keywords = _tokenize_query(query)
         phrases = _extract_query_phrases(query, keywords)
@@ -4960,7 +4967,10 @@ def _select_highlight_reel_segments_semantic(
 
     selected: List[Dict[str, Any]] = []
     selected_total = 0.0
-    max_per_query = max(1, min(2, safe_max_segments // 2 if safe_max_segments > 2 else 1))
+    if safe_max_segments >= 24:
+        max_per_query = max(2, min(6, safe_max_segments // 8))
+    else:
+        max_per_query = max(1, min(2, safe_max_segments // 2 if safe_max_segments > 2 else 1))
     query_counts: Dict[str, int] = {}
     for candidate in candidates:
         if len(selected) >= safe_max_segments:
@@ -5077,8 +5087,8 @@ def _select_highlight_reel_segments(
     min_gap_seconds: float
 ) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
-    safe_max_segments = max(1, min(12, int(max_segments)))
-    safe_target_duration = max(8.0, min(240.0, _safe_float(target_duration, 50.0)))
+    safe_max_segments = max(1, min(240, int(max_segments)))
+    safe_target_duration = max(8.0, min(10800.0, _safe_float(target_duration, 50.0)))
     safe_min_segment = max(1.0, min(20.0, _safe_float(min_segment_seconds, 4.5)))
     safe_max_segment = max(safe_min_segment, min(35.0, _safe_float(max_segment_seconds, 11.0)))
     safe_min_gap = max(0.0, min(80.0, _safe_float(min_gap_seconds, 7.0)))
@@ -5665,8 +5675,6 @@ async def generate_highlight_reel(req: HighlightReelRequest):
     target_w, target_h = (1080, 1920) if target_aspect_ratio == "9:16" else (1920, 1080)
     segment_vf = f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h}"
 
-    safe_max_segments = max(1, min(12, int(req.max_segments)))
-    safe_target_duration = max(12.0, min(240.0, _safe_float(req.target_duration, 50.0)))
     safe_min_segment = max(1.0, min(20.0, _safe_float(req.min_segment_seconds, 4.5)))
     safe_max_segment = max(safe_min_segment, min(35.0, _safe_float(req.max_segment_seconds, 11.0)))
     safe_min_gap = max(0.0, min(80.0, _safe_float(req.min_gap_seconds, 7.0)))
@@ -5686,6 +5694,45 @@ async def generate_highlight_reel(req: HighlightReelRequest):
         output_dir=output_dir,
         metadata=metadata if isinstance(metadata, dict) else {}
     )
+    source_video_duration = _probe_media_duration_seconds(source_video_path) if source_video_path else 0.0
+    timeline_duration = 0.0
+    if normalized_clips:
+        min_start = min(max(0.0, _safe_float(c.get("start", 0.0), 0.0)) for c in normalized_clips)
+        max_end = max(
+            max(max(0.0, _safe_float(c.get("start", 0.0), 0.0)), _safe_float(c.get("end", 0.0), 0.0))
+            for c in normalized_clips
+        )
+        timeline_duration = max(0.0, max_end - min_start)
+
+    raw_max_segments = _safe_int(req.max_segments, 0)
+    if raw_max_segments <= 0:
+        # Auto mode: estimate segments by source/timeline length.
+        basis = source_video_duration if source_video_duration > 0 else timeline_duration
+        if basis > 0:
+            safe_max_segments = max(6, min(240, int(math.ceil(basis / max(2.5, safe_min_segment * 0.9)))))
+        elif normalized_clips:
+            safe_max_segments = max(6, min(240, len(normalized_clips) * 2))
+        else:
+            safe_max_segments = 80
+    else:
+        safe_max_segments = max(1, min(240, raw_max_segments))
+
+    raw_target_duration = _safe_float(req.target_duration, 0.0)
+    if raw_target_duration <= 0:
+        basis = source_video_duration if source_video_duration > 0 else timeline_duration
+        if basis > 0:
+            safe_target_duration = max(12.0, min(10800.0, basis))
+        elif normalized_clips:
+            clips_total = sum(
+                max(0.0, _safe_float(c.get("end", 0.0), 0.0) - _safe_float(c.get("start", 0.0), 0.0))
+                for c in normalized_clips
+            )
+            safe_target_duration = max(12.0, min(10800.0, clips_total or 1200.0))
+        else:
+            safe_target_duration = 1200.0
+    else:
+        safe_target_duration = max(12.0, min(10800.0, raw_target_duration))
+
     planned_segments: List[Dict[str, Any]] = []
     transcript_segments = transcript_data.get("segments") if isinstance(transcript_data, dict) else []
     has_transcript_segments = isinstance(transcript_segments, list) and len(transcript_segments) > 0

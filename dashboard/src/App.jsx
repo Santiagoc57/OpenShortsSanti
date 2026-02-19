@@ -1331,13 +1331,9 @@ function App() {
 
   const handleGenerateHighlightReel = useCallback(async () => {
     if (!jobId) return;
-    if (!Array.isArray(sortedClips) || sortedClips.length < 1) {
-      setLogs((prev) => [...prev, 'No hay clips disponibles para armar un highlight reel.']);
-      return;
-    }
-    const suggestedSegments = Math.max(3, Math.min(8, Number(batchTopCount) || 5));
+    const suggestedSegments = 0; // backend auto (sin límite fijo)
     setIsGeneratingHighlightReel(true);
-    setLogs((prev) => [...prev, `Generando highlight reel (${suggestedSegments} momentos max, ${highlightAspectRatio})...`]);
+    setLogs((prev) => [...prev, `Generando highlight reel (duración libre, ${highlightAspectRatio})...`]);
 
     try {
       const readErrorDetail = (rawText) => {
@@ -1350,7 +1346,7 @@ function App() {
       const payload = {
         job_id: jobId,
         max_segments: suggestedSegments,
-        target_duration: 52,
+        target_duration: 0,
         min_segment_seconds: 4.5,
         max_segment_seconds: 11,
         min_gap_seconds: 7,
@@ -1422,21 +1418,20 @@ function App() {
     } finally {
       setIsGeneratingHighlightReel(false);
     }
-  }, [apiKey, batchTopCount, highlightAspectRatio, jobId, sortedClips]);
+  }, [apiKey, highlightAspectRatio, jobId]);
 
   useEffect(() => {
     const outputMode = normalizeOutputMode(processingMedia?.aspectRatio);
     if (outputMode !== 'highlight') return;
     if (status !== 'complete') return;
     if (!jobId) return;
-    if (!Array.isArray(sortedClips) || sortedClips.length < 1) return;
     if (isGeneratingHighlightReel) return;
     if (autoHighlightTriggeredJobRef.current === jobId) return;
 
     autoHighlightTriggeredJobRef.current = jobId;
     setLogs((prev) => [...prev, 'Modo Highlight reel: generando montaje automático...']);
     handleGenerateHighlightReel();
-  }, [status, processingMedia?.aspectRatio, jobId, sortedClips, isGeneratingHighlightReel, handleGenerateHighlightReel]);
+  }, [status, processingMedia?.aspectRatio, jobId, isGeneratingHighlightReel, handleGenerateHighlightReel]);
 
   const handleClipSearch = async () => {
     if (!jobId) return;
@@ -3073,7 +3068,7 @@ function App() {
                     </select>
                     <button
                       onClick={handleGenerateHighlightReel}
-                      disabled={isGeneratingHighlightReel || !jobId || status !== 'complete' || sortedClips.length < 1}
+                      disabled={isGeneratingHighlightReel || !jobId || status !== 'complete'}
                       className="text-xs bg-cyan-100 dark:bg-cyan-500/20 border border-cyan-300 dark:border-cyan-500/40 text-cyan-700 dark:text-cyan-300 rounded-md px-2 py-1 hover:bg-cyan-200 dark:hover:bg-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
                       title="Compone un reel corto con varios momentos top para impulsar el video completo"
                     >

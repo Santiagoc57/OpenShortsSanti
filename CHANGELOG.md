@@ -378,3 +378,23 @@
   - Permite que el highlight reel encuentre momentos nuevos fuera de los clips ya existentes.
   - Reduce errores por dependencia de un set limitado de clips.
   - Mantiene compatibilidad con jobs viejos gracias al fallback.
+
+### Corregido: Error `name 'unicodedata' is not defined` en ejecucion
+- Que cambiamos:
+  - Se agrego `import unicodedata` en `app.py`.
+- Para que sirve:
+  - Evita caida del backend al normalizar fingerprints de titulos durante la generacion/regeneracion.
+
+### Actualizado: Highlight reel sin limite rigido de duracion
+- Que cambiamos:
+  - `POST /api/highlight/reel` ahora interpreta:
+    - `target_duration <= 0` como duracion automatica libre (usa duracion de fuente/timeline).
+    - `max_segments <= 0` como seleccion automatica amplia de segmentos.
+  - Se removieron topes internos cortos (antes 12 segmentos / 240s), ampliando limites operativos para reels largos.
+  - En frontend (`dashboard/src/App.jsx`) el payload de highlight ahora envia:
+    - `target_duration: 0`
+    - `max_segments: 0`
+  - El boton de highlight ya no bloquea por cantidad de clips en UI (solo por estado/job).
+- Para que sirve:
+  - Permite generar highlight reels largos sin tope fijo de tiempo.
+  - Reduce la necesidad de reintentar manualmente para “sumar” duracion.
