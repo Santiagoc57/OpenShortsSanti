@@ -1354,17 +1354,22 @@ function App() {
         min_segment_seconds: 4.5,
         max_segment_seconds: 11,
         min_gap_seconds: 7,
-        aspect_ratio: highlightAspectRatio
+        aspect_ratio: highlightAspectRatio,
+        source_mode: 'semantic'
       };
       const endpoints = ['/api/highlight/reel', '/api/highlight-reel'];
       let data = null;
       let lastError = null;
+      const headers = { 'Content-Type': 'application/json' };
+      if (apiKey?.trim()) {
+        headers['X-Gemini-Key'] = apiKey.trim();
+      }
 
       for (let i = 0; i < endpoints.length; i += 1) {
         const endpoint = endpoints[i];
         const res = await apiFetch(endpoint, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify(payload)
         });
         if (res.ok) {
@@ -1417,7 +1422,7 @@ function App() {
     } finally {
       setIsGeneratingHighlightReel(false);
     }
-  }, [batchTopCount, highlightAspectRatio, jobId, sortedClips]);
+  }, [apiKey, batchTopCount, highlightAspectRatio, jobId, sortedClips]);
 
   useEffect(() => {
     const outputMode = normalizeOutputMode(processingMedia?.aspectRatio);

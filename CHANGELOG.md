@@ -363,3 +363,18 @@
   - `onError` ahora ignora casos donde ya hay frame decodificado valido.
 - Para que sirve:
   - Elimina alertas confusas en la vista previa de Clip Studio.
+
+### Agregado: Highlight reel semantico independiente de clips existentes
+- Que cambiamos:
+  - En `app.py` se agrego `source_mode` a `HighlightReelRequest` (default `semantic`).
+  - El endpoint `POST /api/highlight/reel` ahora intenta primero descubrir momentos desde transcript/timeline completo (modo semantico), en vez de depender solo de `shorts` ya generados.
+  - Se agrego resolucion de fuente para highlight:
+    - prioriza `job.input_path`
+    - si no existe, busca video maestro en `output/<job_id>` excluyendo artefactos generados (`*_clip_*`, `highlight_reel_*`, `reclip_*`, `subtitled_*`, `temp_*`, etc.).
+  - Se agrego fallback automatico al modo legacy por clips cuando no hay fuente o no hay transcript suficiente.
+  - En `process_endpoint` se fuerza `--keep-original` para jobs por URL, de modo que el backend conserve el video fuente necesario para recortes semanticos.
+  - En `dashboard/src/App.jsx`, `handleGenerateHighlightReel` ahora envia `source_mode: "semantic"` al backend.
+- Para que sirve:
+  - Permite que el highlight reel encuentre momentos nuevos fuera de los clips ya existentes.
+  - Reduce errores por dependencia de un set limitado de clips.
+  - Mantiene compatibilidad con jobs viejos gracias al fallback.

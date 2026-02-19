@@ -3319,6 +3319,7 @@ async def process_endpoint(
     
     if url:
         cmd.extend(["-u", url])
+        cmd.append("--keep-original")
     else:
         # Save uploaded file with size limit check
         input_path = os.path.join(UPLOAD_DIR, f"{job_id}_{file.filename}")
@@ -4573,6 +4574,499 @@ def _safe_slug(value: str, fallback: str = "asset") -> str:
 def _ffmpeg_concat_escape(path: str) -> str:
     return str(path or "").replace("\\", "\\\\").replace(" ", "\\ ").replace("'", "\\'")
 
+def _normalize_highlight_source_mode(raw_mode: Optional[str]) -> str:
+    value = str(raw_mode or "semantic").strip().lower()
+    aliases = {
+        "semantic": "semantic",
+        "semantico": "semantic",
+        "semántico": "semantic",
+        "auto": "semantic",
+        "default": "semantic",
+        "clips": "clips",
+        "clip": "clips",
+        "legacy": "clips",
+    }
+    return aliases.get(value, "semantic")
+
+def _is_generated_video_artifact_name(filename: str) -> bool:
+    name = str(filename or "").strip().lower()
+    if not name:
+        return True
+    if "_clip_" in name:
+        return True
+    generated_prefixes = (
+        "temp_",
+        "reclip_",
+        "subtitled_",
+        "highlight_reel_",
+        "social_",
+        "preview_",
+        "platform_",
+    )
+    if name.startswith(generated_prefixes):
+        return True
+    return False
+
+def _resolve_highlight_source_video_path(
+    job: Dict[str, Any],
+    output_dir: str,
+    metadata: Dict[str, Any]
+) -> Tuple[Optional[str], str]:
+    candidates: List[Tuple[int, float, str, str]] = []
+    seen_paths = set()
+    allowed_ext = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".mpg", ".mpeg"}
+
+    def add_candidate(raw_path: Optional[str], priority: int, reason: str):
+        path = str(raw_path or "").strip()
+        if not path:
+            return
+        path = os.path.abspath(path)
+        if path in seen_paths:
+            return
+        seen_paths.add(path)
+        if not os.path.isfile(path):
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext and ext not in allowed_ext:
+            return
+        try:
+            size = float(os.path.getsize(path))
+        except Exception:
+            size = 0.0
+        candidates.append((priority, size, path, reason))
+
+    add_candidate(job.get("input_path"), 0, "job_input_path")
+
+    if isinstance(metadata, dict):
+        for key in (
+            "source_video_path",
+            "original_video_path",
+            "input_video_path",
+            "input_path",
+            "source_path",
+            "source_file_path",
+        ):
+            add_candidate(metadata.get(key), 1, f"metadata:{key}")
+
+    for path in sorted(glob.glob(os.path.join(output_dir, "*"))):
+        if not os.path.isfile(path):
+            continue
+        name = os.path.basename(path)
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in allowed_ext:
+            continue
+        if _is_generated_video_artifact_name(name):
+            continue
+        name_l = name.lower()
+        priority = 2 if name_l.endswith("_vertical.mp4") else 3
+        add_candidate(path, priority, "output_scan")
+
+    if not candidates:
+        return None, "not_found"
+
+    candidates.sort(key=lambda item: (item[0], -item[1]))
+    _, _, best_path, reason = candidates[0]
+    return best_path, reason
+
+def _build_semantic_highlight_queries(
+    transcript_text: str,
+    chapters: List[Dict[str, Any]],
+    clips: List[Dict[str, Any]],
+    max_queries: int = 10
+) -> List[str]:
+    queries: List[str] = []
+    seen = set()
+
+    def add_query(raw_value: str):
+        text = _normalize_space(raw_value)
+        if len(text) < 4:
+            return
+        key = text.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        queries.append(text[:180])
+
+    for chapter in (chapters or [])[:6]:
+        add_query(chapter.get("title", ""))
+
+    keywords = _extract_topic_keywords(transcript_text or "", limit=10)
+    for i in range(0, max(0, len(keywords) - 1), 2):
+        add_query(f"{keywords[i]} {keywords[i + 1]}")
+    for kw in keywords[:4]:
+        add_query(f"momento clave sobre {kw}")
+
+    if isinstance(clips, list) and clips:
+        ranked = sorted(
+            clips,
+            key=lambda c: _safe_float((c or {}).get("virality_score", 0.0), 0.0),
+            reverse=True
+        )
+        for clip in ranked[:4]:
+            add_query(str((clip or {}).get("video_title_for_youtube_short", "")))
+
+    if not queries:
+        for fallback in (
+            "momento clave del video",
+            "idea principal del debate",
+            "punto mas fuerte del episodio",
+            "frase mas importante",
+        ):
+            add_query(fallback)
+
+    return queries[:max(1, min(16, int(max_queries)))]
+
+def _select_highlight_reel_segments_semantic(
+    job_id: str,
+    metadata_path: str,
+    transcript: Dict[str, Any],
+    clips: List[Dict[str, Any]],
+    max_segments: int,
+    target_duration: float,
+    min_segment_seconds: float,
+    max_segment_seconds: float,
+    min_gap_seconds: float
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    safe_max_segments = max(1, min(12, int(max_segments)))
+    safe_target_duration = max(8.0, min(240.0, _safe_float(target_duration, 50.0)))
+    safe_min_segment = max(1.0, min(20.0, _safe_float(min_segment_seconds, 4.5)))
+    safe_max_segment = max(safe_min_segment, min(35.0, _safe_float(max_segment_seconds, 11.0)))
+    safe_min_gap = max(0.0, min(80.0, _safe_float(min_gap_seconds, 7.0)))
+
+    index = _ensure_search_index(
+        job_id=job_id,
+        metadata_path=metadata_path,
+        transcript=transcript if isinstance(transcript, dict) else {},
+        clips=clips or [],
+        semantic_api_key=None
+    )
+
+    units = index.get("units") or []
+    unit_embeddings = index.get("unit_embeddings") or []
+    duration = _safe_float(index.get("duration", 0.0), 0.0)
+    transcript_text = _normalize_space(index.get("transcript_text", ""))
+    index_clips = index.get("clips") or []
+    chapters = index.get("chapters") or []
+    if duration <= 0.8 and units:
+        duration = max(_safe_float(u.get("end", 0.0), 0.0) for u in units)
+
+    if not units or duration <= 0.8:
+        return [], {
+            "provider": "local",
+            "queries": [],
+            "candidates": 0,
+            "selected": 0,
+            "reason": "missing_transcript_units"
+        }
+
+    queries = _build_semantic_highlight_queries(
+        transcript_text=transcript_text,
+        chapters=chapters,
+        clips=index_clips,
+        max_queries=max(4, safe_max_segments + 3)
+    )
+
+    by_unit: Dict[int, Dict[str, Any]] = {}
+    max_matches_per_query = max(2, min(5, safe_max_segments))
+    for q_index, query in enumerate(queries):
+        keywords = _tokenize_query(query)
+        phrases = _extract_query_phrases(query, keywords)
+        if not keywords and not phrases:
+            continue
+        profile = _apply_search_mode_override(_analyze_query_profile(query, keywords, phrases), "broad")
+        query_embedding = _local_semantic_embedding(query)
+
+        matches = _build_semantic_matches(
+            query=query,
+            keywords=keywords,
+            phrases=phrases,
+            query_profile=profile,
+            units=units,
+            unit_embeddings=unit_embeddings,
+            query_embedding=query_embedding,
+            transcript_text=transcript_text,
+            clips=index_clips,
+            duration=duration,
+            limit=max_matches_per_query
+        )
+
+        if len(matches) < max(2, math.ceil(max_matches_per_query * 0.5)):
+            relaxed = _relax_query_profile(profile)
+            relaxed_matches = _build_semantic_matches(
+                query=query,
+                keywords=keywords,
+                phrases=phrases,
+                query_profile=relaxed,
+                units=units,
+                unit_embeddings=unit_embeddings,
+                query_embedding=query_embedding,
+                transcript_text=transcript_text,
+                clips=index_clips,
+                duration=duration,
+                limit=max_matches_per_query
+            )
+            if len(relaxed_matches) > len(matches):
+                matches = relaxed_matches
+
+        for m_index, match in enumerate(matches[:max_matches_per_query]):
+            unit_index = int(_safe_float(match.get("unit_index", -1), -1))
+            if unit_index < 0 or unit_index >= len(units):
+                continue
+            unit = units[unit_index]
+
+            window_start = max(0.0, _safe_float(match.get("start", unit.get("start", 0.0)), 0.0))
+            window_end = max(window_start + 0.8, _safe_float(match.get("end", unit.get("end", window_start + 0.8)), window_start + 0.8))
+            if duration > 0:
+                window_end = min(window_end, duration)
+            if window_end - window_start < 0.8:
+                continue
+
+            unit_start = max(window_start, _safe_float(unit.get("start", window_start), window_start))
+            unit_end = min(window_end, max(unit_start + 0.4, _safe_float(unit.get("end", unit_start + 0.4), unit_start + 0.4)))
+            if unit_end <= unit_start:
+                unit_start = window_start
+                unit_end = min(window_end, unit_start + 1.2)
+
+            match_score = max(0.0, min(1.0, _safe_float(match.get("match_score", 0.0), 0.0)))
+            semantic_score = max(0.0, min(1.0, _safe_float(match.get("semantic_score", 0.0), 0.0)))
+            keyword_score = max(0.0, min(1.0, _safe_float(match.get("keyword_score", 0.0), 0.0)))
+            phrase_score = max(0.0, min(1.0, _safe_float(match.get("phrase_score", 0.0), 0.0)))
+            virality_boost = max(0.0, min(1.0, _safe_float(match.get("virality_boost", 0.0), 0.0)))
+            confidence = max(
+                0.0,
+                min(
+                    1.0,
+                    (match_score * 0.68)
+                    + (semantic_score * 0.12)
+                    + (keyword_score * 0.10)
+                    + (phrase_score * 0.05)
+                    + (virality_boost * 0.05)
+                )
+            )
+
+            cap = min(safe_max_segment, max(0.8, window_end - window_start))
+            floor = min(cap, safe_min_segment)
+            desired = min(
+                cap,
+                max(
+                    floor,
+                    safe_min_segment
+                    + ((safe_max_segment - safe_min_segment) * (0.36 + (confidence * 0.64)))
+                )
+            )
+
+            center = (unit_start + unit_end) / 2.0
+            seg_start = max(window_start, min(center - (desired * 0.48), window_end - desired))
+            seg_end = min(window_end, seg_start + desired)
+            if seg_end - seg_start < 0.8:
+                seg_start = window_start
+                seg_end = min(window_end, seg_start + max(0.8, floor))
+            if seg_end - seg_start < 0.8:
+                continue
+
+            candidate = {
+                "clip_index": int(_safe_float(match.get("source_clip_index", unit_index), unit_index)),
+                "unit_index": unit_index,
+                "score": round(confidence * 100.0, 4),
+                "confidence": round(confidence, 6),
+                "timeline_start": round(window_start, 4),
+                "timeline_end": round(window_end, 4),
+                "timeline_center": round((window_start + window_end) / 2.0, 4),
+                "segment_floor": round(floor, 4),
+                "segment_cap": round(cap, 4),
+                "desired": round(min(desired, max(0.8, seg_end - seg_start)), 4),
+                "segment_local_start": round(seg_start, 4),
+                "segment_local_end_cap": round(seg_end, 4),
+                "title": _normalize_space(match.get("snippet", ""))[:120] or f"Moment {unit_index + 1}",
+                "transcript_excerpt": _normalize_space(match.get("snippet", ""))[:280],
+                "seed_query": query,
+                "query_rank": q_index,
+                "match_rank": m_index,
+                "source_clip_index": match.get("source_clip_index")
+            }
+
+            prev = by_unit.get(unit_index)
+            if not prev or _safe_float(candidate.get("score", 0.0), 0.0) > _safe_float(prev.get("score", 0.0), 0.0):
+                by_unit[unit_index] = candidate
+
+    candidates = list(by_unit.values())
+    if not candidates:
+        # Fallback semantic ranking without explicit query (still transcript-level).
+        for unit_index, unit in enumerate(units):
+            unit_text = _normalize_space(unit.get("text", ""))
+            if len(unit_text) < 4:
+                continue
+            start = max(0.0, _safe_float(unit.get("start", 0.0), 0.0))
+            end = max(start + 0.8, _safe_float(unit.get("end", start + 0.8), start + 0.8))
+            if duration > 0:
+                end = min(end, duration)
+            if end - start < 0.8:
+                continue
+            virality_boost, overlap_clip = _virality_overlap_score(start, end, index_clips)
+            emphasis_bonus = 0.10 if ("?" in unit_text or "!" in unit_text) else 0.0
+            length_bonus = min(0.22, len(unit_text) / 260.0)
+            confidence = min(0.88, 0.34 + (virality_boost * 0.28) + emphasis_bonus + length_bonus)
+
+            cap = min(safe_max_segment, max(0.8, end - start))
+            floor = min(cap, safe_min_segment)
+            desired = min(
+                cap,
+                max(floor, safe_min_segment + ((safe_max_segment - safe_min_segment) * (0.3 + (confidence * 0.7))))
+            )
+            seg_start = start
+            seg_end = min(end, seg_start + desired)
+            if seg_end - seg_start < 0.8:
+                continue
+
+            candidates.append({
+                "clip_index": int(_safe_float((overlap_clip or {}).get("clip_index", unit_index), unit_index)),
+                "unit_index": unit_index,
+                "score": round(confidence * 100.0, 4),
+                "confidence": round(confidence, 6),
+                "timeline_start": round(start, 4),
+                "timeline_end": round(end, 4),
+                "timeline_center": round((start + end) / 2.0, 4),
+                "segment_floor": round(floor, 4),
+                "segment_cap": round(cap, 4),
+                "desired": round(min(desired, max(0.8, seg_end - seg_start)), 4),
+                "segment_local_start": round(seg_start, 4),
+                "segment_local_end_cap": round(seg_end, 4),
+                "title": unit_text[:120] or f"Moment {unit_index + 1}",
+                "transcript_excerpt": unit_text[:280],
+                "seed_query": "fallback",
+                "query_rank": 999,
+                "match_rank": unit_index,
+                "source_clip_index": (overlap_clip or {}).get("clip_index")
+            })
+
+    if not candidates:
+        return [], {
+            "provider": "local",
+            "queries": queries,
+            "candidates": 0,
+            "selected": 0,
+            "reason": "no_semantic_candidates"
+        }
+
+    candidates.sort(
+        key=lambda item: (
+            _safe_float(item.get("score", 0.0), 0.0),
+            _safe_float(item.get("confidence", 0.0), 0.0),
+            -_safe_float(item.get("query_rank", 999.0), 999.0),
+            -_safe_float(item.get("timeline_start", 0.0), 0.0)
+        ),
+        reverse=True
+    )
+
+    selected: List[Dict[str, Any]] = []
+    selected_total = 0.0
+    max_per_query = max(1, min(2, safe_max_segments // 2 if safe_max_segments > 2 else 1))
+    query_counts: Dict[str, int] = {}
+    for candidate in candidates:
+        if len(selected) >= safe_max_segments:
+            break
+        q_key = str(candidate.get("seed_query", "")).lower()
+        if q_key and query_counts.get(q_key, 0) >= max_per_query:
+            continue
+
+        is_conflicting = False
+        for prev in selected:
+            overlap = _temporal_overlap_ratio(
+                _safe_float(candidate.get("timeline_start", 0.0), 0.0),
+                _safe_float(candidate.get("timeline_end", 0.0), 0.0),
+                _safe_float(prev.get("timeline_start", 0.0), 0.0),
+                _safe_float(prev.get("timeline_end", 0.0), 0.0),
+            )
+            centers_too_close = abs(
+                _safe_float(candidate.get("timeline_center", 0.0), 0.0)
+                - _safe_float(prev.get("timeline_center", 0.0), 0.0)
+            ) < safe_min_gap
+            if overlap >= 0.42 or centers_too_close:
+                is_conflicting = True
+                break
+        if is_conflicting:
+            continue
+
+        selected.append(dict(candidate))
+        selected_total += _safe_float(candidate.get("desired", 0.0), 0.0)
+        if q_key:
+            query_counts[q_key] = query_counts.get(q_key, 0) + 1
+        if selected_total >= safe_target_duration:
+            break
+
+    if not selected:
+        selected = [dict(candidates[0])]
+        selected_total = _safe_float(selected[0].get("desired", 0.0), 0.0)
+
+    if len(selected) < safe_max_segments and selected_total < (safe_target_duration * 0.82):
+        used = {
+            int(_safe_float(item.get("unit_index", -1), -1))
+            for item in selected
+        }
+        for candidate in candidates:
+            if len(selected) >= safe_max_segments:
+                break
+            marker = int(_safe_float(candidate.get("unit_index", -1), -1))
+            if marker in used:
+                continue
+            selected.append(dict(candidate))
+            used.add(marker)
+            selected_total += _safe_float(candidate.get("desired", 0.0), 0.0)
+            if selected_total >= safe_target_duration:
+                break
+
+    selected.sort(key=lambda item: _safe_float(item.get("timeline_start", 0.0), 0.0))
+
+    planned: List[Dict[str, Any]] = []
+    remaining = safe_target_duration
+    for i, candidate in enumerate(selected):
+        if remaining <= 0.35:
+            break
+        reserve_for_rest = 0.0
+        for future in selected[i + 1:]:
+            reserve_for_rest += min(
+                _safe_float(future.get("segment_floor", 0.8), 0.8),
+                _safe_float(future.get("segment_cap", safe_max_segment), safe_max_segment)
+            )
+
+        seg_cap = _safe_float(candidate.get("segment_cap", safe_max_segment), safe_max_segment)
+        seg_floor = min(seg_cap, _safe_float(candidate.get("segment_floor", safe_min_segment), safe_min_segment))
+        desired = _safe_float(candidate.get("desired", seg_floor), seg_floor)
+        max_for_this = min(seg_cap, max(0.8, remaining - reserve_for_rest))
+        seg_duration = min(desired, max_for_this)
+        if seg_duration < seg_floor:
+            if planned and remaining - reserve_for_rest <= 0.8:
+                continue
+            seg_duration = min(seg_cap, max(0.8, remaining - reserve_for_rest))
+
+        window_start = max(0.0, _safe_float(candidate.get("timeline_start", 0.0), 0.0))
+        window_end = max(window_start + 0.8, _safe_float(candidate.get("timeline_end", window_start + 0.8), window_start + 0.8))
+        if duration > 0:
+            window_end = min(window_end, duration)
+        if window_end - window_start < 0.8:
+            continue
+
+        center = _safe_float(candidate.get("timeline_center", (window_start + window_end) / 2.0), (window_start + window_end) / 2.0)
+        seg_start = max(window_start, min(center - (seg_duration * 0.5), window_end - seg_duration))
+        seg_end = min(window_end, seg_start + seg_duration)
+        actual_duration = seg_end - seg_start
+        if actual_duration < 0.8:
+            continue
+
+        item = dict(candidate)
+        item["segment_local_start"] = round(seg_start, 3)
+        item["segment_local_end"] = round(seg_end, 3)
+        item["segment_duration"] = round(actual_duration, 3)
+        planned.append(item)
+        remaining -= actual_duration
+
+    return planned, {
+        "provider": "local",
+        "queries": queries,
+        "candidates": len(candidates),
+        "selected": len(planned),
+    }
+
 def _select_highlight_reel_segments(
     normalized_clips: List[Dict[str, Any]],
     output_dir: str,
@@ -5120,11 +5614,15 @@ class HighlightReelRequest(BaseModel):
     max_segment_seconds: float = 11.0
     min_gap_seconds: float = 7.0
     aspect_ratio: Optional[str] = None
+    source_mode: Optional[str] = "semantic"
 
 @app.post("/api/highlight/reel")
 @app.post("/api/highlight-reel")
 async def generate_highlight_reel(req: HighlightReelRequest):
-    _ensure_job_context(req.job_id)
+    job = _ensure_job_context(req.job_id)
+    if not isinstance(job, dict):
+        raise HTTPException(status_code=404, detail="Job not found")
+
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     if not os.path.isdir(output_dir):
         raise HTTPException(status_code=404, detail="Job output directory not found")
@@ -5140,14 +5638,13 @@ async def generate_highlight_reel(req: HighlightReelRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read metadata: {e}")
 
-    job = _ensure_job_context(req.job_id)
     clips = []
     if isinstance(job, dict) and isinstance(job.get("result"), dict):
         clips = job["result"].get("clips", []) or []
     if not clips and isinstance(metadata, dict):
         clips = metadata.get("shorts", []) or []
-    if not isinstance(clips, list) or not clips:
-        raise HTTPException(status_code=400, detail="No clips available to compose a highlight reel")
+    if not isinstance(clips, list):
+        clips = []
 
     transcript_data = metadata.get("transcript") if isinstance(metadata, dict) else None
     normalized_clips = [
@@ -5174,17 +5671,71 @@ async def generate_highlight_reel(req: HighlightReelRequest):
     safe_max_segment = max(safe_min_segment, min(35.0, _safe_float(req.max_segment_seconds, 11.0)))
     safe_min_gap = max(0.0, min(80.0, _safe_float(req.min_gap_seconds, 7.0)))
 
-    planned_segments = _select_highlight_reel_segments(
-        normalized_clips=normalized_clips,
+    requested_source_mode = _normalize_highlight_source_mode(req.source_mode)
+    selection_mode = "clips"
+    warnings: List[str] = []
+    semantic_context: Dict[str, Any] = {
+        "provider": "local",
+        "queries": [],
+        "candidates": 0,
+        "selected": 0
+    }
+
+    source_video_path, source_path_reason = _resolve_highlight_source_video_path(
+        job=job,
         output_dir=output_dir,
-        max_segments=safe_max_segments,
-        target_duration=safe_target_duration,
-        min_segment_seconds=safe_min_segment,
-        max_segment_seconds=safe_max_segment,
-        min_gap_seconds=safe_min_gap
+        metadata=metadata if isinstance(metadata, dict) else {}
     )
-    if len(planned_segments) < 1:
-        raise HTTPException(status_code=400, detail="No se encontraron momentos suficientes para componer el highlight reel")
+    planned_segments: List[Dict[str, Any]] = []
+    transcript_segments = transcript_data.get("segments") if isinstance(transcript_data, dict) else []
+    has_transcript_segments = isinstance(transcript_segments, list) and len(transcript_segments) > 0
+
+    if requested_source_mode == "semantic":
+        if not source_video_path:
+            warnings.append("No se encontró video fuente completo para highlight semántico; se usará modo clips.")
+        elif not has_transcript_segments:
+            warnings.append("No hay transcript segmentado para highlight semántico; se usará modo clips.")
+        else:
+            planned_segments, semantic_context = _select_highlight_reel_segments_semantic(
+                job_id=req.job_id,
+                metadata_path=metadata_path,
+                transcript=transcript_data if isinstance(transcript_data, dict) else {},
+                clips=normalized_clips,
+                max_segments=safe_max_segments,
+                target_duration=safe_target_duration,
+                min_segment_seconds=safe_min_segment,
+                max_segment_seconds=safe_max_segment,
+                min_gap_seconds=safe_min_gap
+            )
+            if planned_segments:
+                selection_mode = "semantic"
+                for segment in planned_segments:
+                    segment["source_file_path"] = source_video_path
+                    segment["segment_source_start"] = _safe_float(segment.get("segment_local_start", 0.0), 0.0)
+                    segment["segment_source_end"] = _safe_float(
+                        segment.get("segment_local_end", segment.get("segment_local_end_cap", 0.0)),
+                        0.0
+                    )
+            else:
+                warnings.append("No hubo suficientes momentos semánticos; se usará modo clips.")
+
+    if selection_mode != "semantic":
+        if not normalized_clips:
+            raise HTTPException(
+                status_code=400,
+                detail="No hay clips disponibles para modo legacy y tampoco fue posible usar modo semántico."
+            )
+        planned_segments = _select_highlight_reel_segments(
+            normalized_clips=normalized_clips,
+            output_dir=output_dir,
+            max_segments=safe_max_segments,
+            target_duration=safe_target_duration,
+            min_segment_seconds=safe_min_segment,
+            max_segment_seconds=safe_max_segment,
+            min_gap_seconds=safe_min_gap
+        )
+        if not planned_segments:
+            raise HTTPException(status_code=400, detail="No se encontraron momentos suficientes para componer el highlight reel")
 
     ts = int(time.time())
     reel_id = f"hl_{ts}_{uuid.uuid4().hex[:8]}"
@@ -5193,18 +5744,36 @@ async def generate_highlight_reel(req: HighlightReelRequest):
     concat_file = os.path.join(output_dir, f"temp_highlight_concat_{ts}_{uuid.uuid4().hex[:6]}.txt")
     temp_segments: List[str] = []
     stitched_segments: List[Dict[str, Any]] = []
-    warnings: List[str] = []
 
     try:
         for i, item in enumerate(planned_segments):
             seg_path = os.path.join(output_dir, f"temp_highlight_seg_{ts}_{i+1}.mp4")
-            start_local = max(0.0, _safe_float(item.get("segment_local_start", 0.0), 0.0))
-            end_local = max(start_local + 0.08, _safe_float(item.get("segment_local_end", start_local + 0.08), start_local + 0.08))
+            segment_source_path = str(item.get("source_file_path") or "").strip()
+            if not segment_source_path and selection_mode == "semantic":
+                segment_source_path = str(source_video_path or "").strip()
+            if not segment_source_path or not os.path.exists(segment_source_path):
+                warnings.append(f"Segmento {i + 1} no tiene fuente de video válida y se omitió.")
+                continue
+
+            start_local = max(
+                0.0,
+                _safe_float(
+                    item.get("segment_source_start", item.get("segment_local_start", 0.0)),
+                    0.0
+                )
+            )
+            end_local = max(
+                start_local + 0.08,
+                _safe_float(
+                    item.get("segment_source_end", item.get("segment_local_end", start_local + 0.08)),
+                    start_local + 0.08
+                )
+            )
             cut_cmd = [
                 "ffmpeg", "-y",
                 "-ss", f"{start_local:.3f}",
                 "-to", f"{end_local:.3f}",
-                "-i", item["source_file_path"],
+                "-i", segment_source_path,
                 "-vf", segment_vf,
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
                 "-c:a", "aac",
@@ -5230,13 +5799,17 @@ async def generate_highlight_reel(req: HighlightReelRequest):
                 "order": len(stitched_segments) + 1,
                 "clip_index": int(item["clip_index"]),
                 "virality_score": int(round(_safe_float(item.get("score", 0.0), 0.0))),
+                "selection_mode": selection_mode,
                 "clip_start": round(_safe_float(item.get("timeline_start", 0.0), 0.0), 3),
                 "clip_end": round(_safe_float(item.get("timeline_end", 0.0), 0.0), 3),
                 "segment_start_in_clip": round(start_local, 3),
                 "segment_end_in_clip": round(end_local, 3),
+                "segment_start_in_source": round(start_local, 3),
+                "segment_end_in_source": round(end_local, 3),
                 "duration": round(dur, 3),
                 "title": item.get("title", ""),
-                "transcript_excerpt": item.get("transcript_excerpt", "")
+                "transcript_excerpt": item.get("transcript_excerpt", ""),
+                "seed_query": item.get("seed_query", None)
             })
 
         if len(temp_segments) < 1:
@@ -5286,10 +5859,20 @@ async def generate_highlight_reel(req: HighlightReelRequest):
             "target_duration": round(safe_target_duration, 3),
             "min_segment_seconds": round(safe_min_segment, 3),
             "max_segment_seconds": round(safe_max_segment, 3),
-            "min_gap_seconds": round(safe_min_gap, 3)
+            "min_gap_seconds": round(safe_min_gap, 3),
+            "source_mode_requested": requested_source_mode,
+            "selection_mode": selection_mode,
+            "source_resolution": source_path_reason
         },
         "warnings": warnings
     }
+    if selection_mode == "semantic":
+        highlight_entry["semantic_context"] = {
+            "provider": semantic_context.get("provider", "local"),
+            "queries": semantic_context.get("queries", []),
+            "candidates": int(_safe_float(semantic_context.get("candidates", 0), 0)),
+            "selected": int(_safe_float(semantic_context.get("selected", 0), 0)),
+        }
     if len(stitched_segments) == 1:
         highlight_entry["warnings"].append("Solo se detectó 1 momento utilizable; se generó highlight reel de 1 segmento.")
 
