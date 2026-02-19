@@ -398,3 +398,13 @@
 - Para que sirve:
   - Permite generar highlight reels largos sin tope fijo de tiempo.
   - Reduce la necesidad de reintentar manualmente para “sumar” duracion.
+
+### Restaurado: Métricas de viralidad en tarjeta de clip
+- Que cambiamos:
+  - En `dashboard/src/components/ResultCard.jsx` se restauraron:
+    - badges superiores de `Puntaje` y `Confianza`
+    - bloque lateral `Virality` (escala 0.0-10.0)
+    - pestaña `Puntaje viral` con barra, confianza y `score_reason`
+- Para que sirve:
+  - Recupera visibilidad del scoring para decidir rápido qué clips priorizar.
+  - Alinea la UI con el flujo anterior que el usuario venía usando.

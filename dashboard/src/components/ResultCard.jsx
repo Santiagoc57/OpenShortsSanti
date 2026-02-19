@@ -61,7 +61,16 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
         const secs = total % 60;
         return `${mins}:${String(secs).padStart(2, '0')}`;
     };
+    const rawScore = Number(clip?.virality_score);
+    const clipScore = Number.isFinite(rawScore) ? Math.max(0, Math.min(100, Math.round(rawScore))) : 0;
+    const rawConfidence = Number(clip?.selection_confidence);
+    const clipConfidence = Number.isFinite(rawConfidence) ? Math.max(0, Math.min(1, rawConfidence)) : clipScore / 100;
     const topicTags = Array.isArray(clip?.topic_tags) ? clip.topic_tags.filter((t) => typeof t === 'string' && t.trim() !== '') : [];
+    const scoreBadgeClass = clipScore >= 80
+        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+        : clipScore >= 65
+            ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+            : 'bg-zinc-500/15 border-zinc-500/30 text-zinc-300';
     const [postResult, setPostResult] = useState(null);
 
     const [isEditing, setIsEditing] = useState(false);
@@ -223,6 +232,7 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
         || clip?.title
         || "Clip viral generado"
     ).trim();
+    const viralityTen = (clipScore / 10).toFixed(1);
     const socialText = String(
         socialOverride
         || clip?.video_description_for_tiktok
@@ -230,6 +240,7 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
         || clip?.video_title_for_youtube_short
         || "Sin descripción."
     ).trim();
+    const viralityText = clip.score_reason || 'Este clip tiene buena combinación de claridad, gancho y potencial de engagement.';
 
     // Initialize/Reset form when modal opens
     useEffect(() => {
@@ -272,6 +283,8 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
     const hashtagsText = topicTags.length > 0 ? topicTags.map((tag) => `#${tag}`).join(' ') : 'Sin hashtags sugeridos.';
     const activePanelText = activeTextTab === 'transcript'
         ? transcriptDisplay
+        : activeTextTab === 'virality'
+            ? viralityText
         : activeTextTab === 'hashtags'
                 ? hashtagsText
                 : socialText;
@@ -726,21 +739,33 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                             {effectiveTitle || "Clip viral generado"}
                         </h3>
                         <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-zinc-400">
+                            <span className={`px-2 py-1 rounded-md border ${scoreBadgeClass}`}>
+                                Puntaje {clipScore}/100
+                            </span>
+                            <span className="px-2 py-1 rounded-md border border-white/10 bg-white/5">
+                                Confianza {Math.round(clipConfidence * 100)}%
+                            </span>
                             <span className="px-2 py-1 rounded-md border border-white/10 bg-white/5">
                                 {formatTime(Number(clip.start || 0))} - {formatTime(Number(clip.end || 0))}
                             </span>
                         </div>
                     </div>
-                    <button
-                        type="button"
-                        onClick={handleRegenerateTitle}
-                        disabled={isRegeneratingTitle || !jobId}
-                        className="shrink-0 inline-flex items-center gap-1.5 rounded-md border border-white/15 bg-white/5 px-2 py-1 text-[11px] text-zinc-300 hover:bg-white/10 disabled:opacity-60 disabled:cursor-not-allowed"
-                        title="Regenerar título"
-                    >
-                        {isRegeneratingTitle ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-                        {isRegeneratingTitle ? 'Generando...' : 'Regenerar'}
-                    </button>
+                    <div className="shrink-0 flex items-start gap-2">
+                        <div className="text-right px-3 py-2 rounded-lg border border-white/10 bg-white/5">
+                            <div className="text-3xl leading-none font-bold text-white">{viralityTen}</div>
+                            <div className="text-[10px] uppercase tracking-wider text-zinc-400 mt-1">Virality</div>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={handleRegenerateTitle}
+                            disabled={isRegeneratingTitle || !jobId}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-white/15 bg-white/5 px-2 py-1 text-[11px] text-zinc-300 hover:bg-white/10 disabled:opacity-60 disabled:cursor-not-allowed"
+                            title="Regenerar título"
+                        >
+                            {isRegeneratingTitle ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                            {isRegeneratingTitle ? 'Generando...' : 'Regenerar'}
+                        </button>
+                    </div>
                 </div>
 
                 <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
@@ -776,6 +801,16 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                             >
                                 Etiquetas
                             </button>
+                            <button
+                                onClick={() => setActiveTextTab('virality')}
+                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${
+                                    activeTextTab === 'virality'
+                                        ? 'text-primary border-primary'
+                                        : 'text-zinc-500 border-transparent hover:text-zinc-300'
+                                }`}
+                            >
+                                Puntaje viral
+                            </button>
                         </div>
                         <div className="flex items-center gap-1.5">
                             {activeTextTab === 'social' && (
@@ -797,7 +832,24 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                             </button>
                         </div>
                     </div>
-                    {activeTextTab === 'hashtags' ? (
+                    {activeTextTab === 'virality' ? (
+                        <div className="space-y-3">
+                            <div className="flex items-center justify-between gap-3">
+                                <div className="text-xs text-zinc-400">Puntaje de viralidad</div>
+                                <div className="text-sm font-semibold text-white">{clipScore}/100</div>
+                            </div>
+                            <div className="h-2 w-full rounded-full bg-white/10 overflow-hidden">
+                                <div
+                                    className="h-full bg-gradient-to-r from-emerald-500 via-amber-400 to-rose-500"
+                                    style={{ width: `${clipScore}%` }}
+                                />
+                            </div>
+                            <div className="text-[11px] text-zinc-400">
+                                Confianza del modelo: <span className="text-zinc-200 font-semibold">{Math.round(clipConfidence * 100)}%</span>
+                            </div>
+                            <p className="text-sm text-zinc-300 leading-relaxed break-words">{viralityText}</p>
+                        </div>
+                    ) : activeTextTab === 'hashtags' ? (
                         <div className="space-y-3">
                             <p className="text-xs text-zinc-400">Hashtags sugeridos para publicar este clip:</p>
                             {topicTags.length > 0 ? (
