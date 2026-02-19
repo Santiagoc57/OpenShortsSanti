@@ -343,6 +343,13 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
         } catch (e) {
             const msg = String(e?.message || '');
             const lower = msg.toLowerCase();
+            const isNetworkIssue = (
+                lower.includes('networkerror')
+                || lower.includes('failed to fetch')
+                || lower.includes('load failed')
+                || lower.includes('fetch resource')
+                || lower.includes('cors')
+            );
             const isQuotaOrRateError = (
                 lower.includes('quota')
                 || lower.includes('rate limit')
@@ -357,6 +364,14 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                     return;
                 } catch (fallbackError) {
                     applyLocalRetitle('Backend desactualizado: se aplicó un título local.');
+                    return;
+                }
+            } else if (isNetworkIssue) {
+                try {
+                    await fallbackRetitle();
+                    return;
+                } catch (fallbackError) {
+                    applyLocalRetitle('Backend no disponible (ngrok/red): se aplicó un título local.');
                     return;
                 }
             } else if (lower.includes('missing gemini api key')) {
