@@ -1,6 +1,178 @@
 # Registro de Cambios
 
+## 2026-02-19
+
+### Corregido: resolución de tipografías más robusta en entornos Colab/headless
+- Que cambiamos:
+  - En `subtitles.py` se mejoró el mapeo de familias para preferir variantes reales disponibles (ej. `Montserrat Bold`, `Oswald Bold`, `Teko Bold`) y luego fallback a familia base.
+  - Se agregó registro de fuentes bundle en fontconfig de usuario (`~/.local/share/fonts/openshorts`) para mejorar detección de fuentes al exportar.
+- Para que sirve:
+  - Reduce casos donde el render final ignora `Montserrat` u otras fuentes y cae en tipografías no deseadas.
+  - Mejora consistencia de estilo entre UI y video exportado.
+
+### Corregido: paneo manual de layout con mayor rango real (preview + render)
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se ajustó `LAYOUT_OFFSET_FACTOR` de `0.35` a `1.0`.
+  - En `app.py` se ajustó `_LAYOUT_OFFSET_FACTOR` de `0.35` a `1.0` para mantener consistencia con el preview.
+- Para que sirve:
+  - Permite mover el encuadre manualmente (izquierda/derecha/arriba/abajo) con rango completo útil.
+  - Evita la sensación de que sliders/drag “no hacen nada” en algunos clips.
+
+### Corregido: paneo en Cover con offsets guardados ahora aplica zoom mínimo útil
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se agregó una protección para subir automáticamente el zoom a `1.06` cuando:
+    - el modo es `single`
+    - `Auto smart reframe` está apagado
+    - `fit` está en `Cover`
+    - ya existe offset manual X/Y distinto de cero.
+  - Se mantiene la misma regla al iniciar drag o al mover sliders de offset.
+  - En `app.py` ya está alineado el render final: si hay offsets en `Cover` con zoom ~`1.0`, aplica zoom implícito `1.06` para que el paneo no se pierda al exportar.
+- Para que sirve:
+  - Evita que un clip “parezca fijo” lateralmente cuando vuelves a abrirlo con offsets guardados.
+  - Garantiza que lo que ves al mover encuadre en la UI se parezca al resultado exportado.
+
+### Corregido: cambio de formato 9:16/16:9 ahora limpia encuadre heredado
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se agregó `handleLayoutAspectChange`.
+  - Al cambiar formato:
+    - se limpian offsets/zoom heredados que distorsionaban la vista (`offset_x/y` a 0, zoom base).
+    - en modo `single`, si pasas a `16:9` con `Cover`, se ajusta a `Contain` para evitar recorte agresivo inicial.
+    - en `split`, se resetean zoom/offset por panel para arrancar limpio.
+- Para que sirve:
+  - Evita que al pasar a `16:9` parezca que el video “no cambia” o queda mal encuadrado por arrastre de ajustes previos.
+  - Da una base consistente para hacer ajustes finos después del cambio de formato.
+
+### Ajustado: en 16:9 se mantiene orientación natural (sin girar 90°)
+- Que cambiamos:
+  - Se revirtió la rotación automática en `ClipStudioModal` para evitar que el sujeto se vea acostado.
+  - Se revirtió el `transpose=1` en `/api/recut` para que el export conserve orientación natural.
+- Para que sirve:
+  - El formato `16:9` ahora significa lienzo horizontal, no rotación forzada del contenido.
+  - Evita el efecto visual incorrecto reportado por el usuario.
+
+### Corregido: Preview rápido ahora prioriza fuente original del proyecto
+- Que cambiamos:
+  - En `app.py` (`POST /api/clip/fast-preview`) la resolución de fuente ahora prioriza:
+    1) `input_filename` válido
+    2) `job.input_path` (video original)
+    3) `clip.video_url` como fallback
+  - En `dashboard/src/components/ClipStudioModal.jsx`, `handleFastPreview` ya no fuerza `input_filename` del clip actual.
+- Para que sirve:
+  - Evita que el preview rápido herede un recorte vertical viejo cuando estás ajustando a `16:9`.
+  - Muestra una referencia más fiel del material original al cambiar formato.
+
+### Ajustado: al cambiar formato 9:16/16:9 se dispara preview rápido automáticamente
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx`, al pulsar un botón de formato se ejecuta:
+    - `handleLayoutAspectChange(...)`
+    - `handleFastPreview(...)` con el ratio seleccionado.
+  - `handleFastPreview` ahora acepta `targetAspect` explícito para render inmediato del formato elegido.
+- Para que sirve:
+  - Evita quedarse viendo el video previo mientras cambias de formato.
+  - Al pasar a `16:9`, la vista se actualiza enseguida hacia una referencia horizontal.
+
+### Corregido: preview rápido evita archivos vacíos/no reproducibles
+- Que cambiamos:
+  - En `app.py` (`POST /api/clip/fast-preview`) ahora se prueban múltiples fuentes candidatas de forma robusta.
+  - Se ajusta `start` automáticamente según la duración real de cada fuente para evitar renders en tramo inexistente.
+  - Se valida la salida generada (dimensiones + duración mínima) antes de devolverla al frontend.
+- Para que sirve:
+  - Evita la pantalla gris con “El navegador no pudo reproducir este archivo...” al cambiar formato.
+  - Mejora la confiabilidad del preview en proyectos antiguos o con rutas mixtas (original/clip).
+
+### Ajustado: aclaración visual en modos Cover/Contain del editor de layout
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se renombraron botones:
+    - `Cover` -> `Cover (llenar)`
+    - `Contain` -> `Contain (completo)`
+  - Se agregó texto de ayuda bajo ese selector explicando que:
+    - `Contain` puede mostrar barras para respetar proporción.
+    - `Cover` llena todo el cuadro recortando excedentes.
+- Para que sirve:
+  - Evita confusión cuando se edita 16:9 con video vertical y parece “cortado”.
+  - Hace explícito qué comportamiento esperar en cada modo.
+
+### Ajustado: Se removió el panel de "Métricas sociales" en resultados
+- Que cambiamos:
+  - En `dashboard/src/App.jsx` se eliminó la tarjeta visual de `Métricas sociales` (incluyendo botón `Recargar métricas`).
+  - También se removieron estados y llamadas automáticas a `/api/social/metrics/{job_id}` que alimentaban ese bloque.
+- Para que sirve:
+  - Limpia la interfaz en la vista de proyecto.
+  - Reduce consultas innecesarias al backend.
+
+### Corregido: render de subtítulos más fiel al preset (fuentes + ASS)
+- Que cambiamos:
+  - En `subtitles.py` se ajustó el mapeo de fuentes para usar familias canónicas estables (`Montserrat`, `Oswald`, `Teko`) en lugar de variantes tipo `* Bold` que podían disparar fallback inesperado en `libass`.
+  - Se corrigió el mapeo de alineación ASS a valores estándar:
+    - `top` -> `8`
+    - `middle` -> `5`
+    - `bottom` -> `2`
+  - Al quemar archivos `.ass`, ahora se usa el filtro `ass` de FFmpeg (en vez de `subtitles`) para respetar mejor estilos karaoke/caja/fuente.
+- Para que sirve:
+  - Reduce casos donde el video exportado salía con tipografía distinta o “rara” respecto al preset elegido en UI.
+  - Mejora consistencia entre preview del editor y render final.
+
+### Ajustado: Se removieron textos de score/confianza del panel "Puntaje viral"
+- Que cambiamos:
+  - En `dashboard/src/components/ResultCard.jsx` se quitaron del panel de `Puntaje viral` los textos:
+    - `Puntaje de viralidad`
+    - `Confianza del modelo`
+  - El panel ahora muestra solo el texto explicativo de viralidad.
+- Para que sirve:
+  - Simplifica la vista y reduce ruido visual en el tab.
+
+### Corregido: warning de React por estructura HTML inválida en Configuración
+- Que cambiamos:
+  - En `dashboard/src/App.jsx` se reemplazó un bloque `<p>...</p>` que contenía un `<div>` interno por una estructura válida con contenedor `<div>` y párrafos separados.
+- Para que sirve:
+  - Elimina el warning `validateDOMNesting(...): <div> cannot appear as a descendant of <p>.`
+  - Evita ruido en consola durante desarrollo.
+
 ## 2026-02-18
+
+### Ajustado: Se removio la barra visual en "Puntaje viral"
+- Que cambiamos:
+  - En `dashboard/src/components/ResultCard.jsx` se quitó la barra de progreso (gradiente) del tab `Puntaje viral`.
+  - Se mantiene el valor numérico `score/100`, la confianza del modelo y la explicación textual.
+- Para que sirve:
+  - Reduce ruido visual y libera espacio en la tarjeta del clip.
+  - Mantiene la lectura del puntaje sin duplicar información.
+
+### Documentado: bootstrap robusto para Colab (evita errores de ruta/repo)
+- Que cambiamos:
+  - En `EJECUTAR.md` se agregó una celda recomendada para Colab que:
+    - si `/content/OpenShortsSanti/.git` existe: hace `git checkout main` + `git pull --ff-only`.
+    - si no existe: hace `git clone` limpio en `/content/OpenShortsSanti`.
+  - Se documentó secuencia completa `instalar -> uvicorn -> ngrok -> validación (docs/openapi/health)`.
+  - Se añadió troubleshooting específico para:
+    - `[Errno 2] No such file or directory: '/content/OpenShortsSanti'`
+    - `fatal: not a git repository`
+    - `Could not open requirements file: requirements.txt`
+- Para que sirve:
+  - Evita romper el flujo cuando Colab reinicia runtime o se pierde el directorio del repo.
+  - Reduce errores por ejecutar comandos fuera de `/content/OpenShortsSanti`.
+
+### Corregido: Regenerar ahora rota sobre pools precargados (5 títulos + 5 sociales)
+- Que cambiamos:
+  - Backend ahora usa por defecto `TITLE_VARIANTS_PER_CLIP=5` y `SOCIAL_VARIANTS_PER_CLIP=5`.
+  - Se agregó pool de copy social por clip:
+    - `social_variants` (lista)
+    - `social_variant_index` (posición activa)
+  - En finalización de job, además del pool de títulos, se precarga también el pool social para cada clip.
+  - `POST /api/clip/retitle` ahora rota en ciclo sobre el pool existente (sin pedir IA en cada click).
+  - `POST /api/clip/resocial` ahora rota en ciclo sobre el pool social existente (sin pedir IA en cada click).
+- Para que sirve:
+  - `Regenerar` se vuelve instantáneo y estable: cambia entre opciones ya preparadas por backend.
+  - Reduce fallas por cuota/rate-limit al evitar llamada a Gemini en cada regeneración.
+  - Cumple flujo esperado: 1º, 2º, 3º, 4º, 5º y luego vuelve a la primera opción.
+
+### Corregido: Subtítulos desfasados tras recut/layout
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx`, cuando `Aplicar` ejecuta un recorte (`/api/recut`) y cambia el rango `inicio/fin`, ahora se refresca el SRT con `POST /api/subtitle/preview` antes de llamar `POST /api/subtitle`.
+  - El `srt_content` que se envía al backend ya no reutiliza el buffer viejo del modal si el rango del clip cambió.
+- Para que sirve:
+  - Evita que el export final queme subtítulos de un tramo anterior del video.
+  - Alinea el texto exportado con el rango real que quedó después de editar layout/tiempos.
 
 ### Agregado: Persistencia de jobs y recuperación tras reinicio
 - Que cambiamos:

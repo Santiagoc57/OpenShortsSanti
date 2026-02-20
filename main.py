@@ -87,8 +87,11 @@ STRICT EXCLUSIONS:
 - No clips < 15 s or > 60 s.
 
 OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst).
-LANGUAGE RULE (STRICT): all textual fields MUST be in Spanish (español neutro): score_reason, topic_tags, video_description_for_tiktok, video_description_for_instagram, video_title_for_youtube_short.
-In the descriptions, ALWAYS include a CTA in Spanish like "Sígueme y comenta X y te envío el workflow" (especially if discussing an n8n workflow):
+LANGUAGE RULE (STRICT): all textual fields MUST be in Spanish (español neutro): score_reason, topic_tags, title_variants, social_variants.
+STYLE RULES:
+- Titles: Use "Sentence case" (e.g., "Así me recibe la gente en Argentina"), only the first letter and proper names in uppercase. NO excessive capitalization.
+- Emojis: You MAY use relevant emojis in titles and social variants to increase engagement.
+- CTA: In the social descriptions, ALWAYS include a CTA in Spanish like "Sígueme y comenta X y te envío el workflow".
 {{
   "shorts": [
     {{
@@ -98,9 +101,8 @@ In the descriptions, ALWAYS include a CTA in Spanish like "Sígueme y comenta X 
       "selection_confidence": <number between 0 and 1 indicating confidence in this selection>,
       "score_reason": "<razón corta en español de por qué este clip puede rendir>",
       "topic_tags": ["<hasta 5 etiquetas cortas en español, sin #, ej: politica, debate, economia>"],
-      "video_description_for_tiktok": "<descripción en español orientada a views para TikTok>",
-      "video_description_for_instagram": "<descripción en español orientada a views para Instagram>",
-      "video_title_for_youtube_short": "<título en español para YouTube Short orientado a views, máximo 100 caracteres>"
+      "title_variants": ["<array de 5 títulos distintos en español, máximo 100 caracteres cada uno, sentence case, emojis permitidos>"],
+      "social_variants": ["<array de 5 descripciones sociales distintas en español, incluyendo CTA, emojis permitidos, orientas a views para TikTok/IGReels>"]
     }}
   ]
 }}
@@ -213,6 +215,36 @@ def normalize_shorts_payload(result_json):
         if not reason:
             reason = f"Ranking IA #{i+1}: buen gancho inicial y alto potencial de retención."
         clip['score_reason'] = str(reason).strip()[:220]
+        
+        # Variants logic
+        t_vars = clip.get('title_variants') or clip.get('video_title_variants')
+        if not isinstance(t_vars, list) or not t_vars:
+            # Check old single field
+            fallback = clip.get('video_title_for_youtube_short') or clip.get('title') or f"Clip viral #{i+1}"
+            t_vars = [fallback]
+        
+        s_vars = clip.get('social_variants') or clip.get('video_social_variants')
+        if not isinstance(s_vars, list) or not s_vars:
+            # Check old single fields
+            fallback = clip.get('video_description_for_tiktok') or clip.get('video_description_for_instagram') or ""
+            s_vars = [fallback] if fallback else []
+
+        clip['title_variants'] = [str(v).strip() for v in t_vars if str(v).strip()][:8]
+        clip['social_variants'] = [str(v).strip() for v in s_vars if str(v).strip()][:8]
+
+        # Primary fields for backward compatibility
+        if clip['title_variants']:
+            primary_title = clip['title_variants'][0]
+            clip['video_title_for_youtube_short'] = primary_title
+            clip['title'] = primary_title
+            clip['title_variant_index'] = 0
+        
+        if clip['social_variants']:
+            primary_social = clip['social_variants'][0]
+            clip['video_description_for_tiktok'] = primary_social
+            clip['video_description_for_instagram'] = primary_social
+            clip['social_variant_index'] = 0
+
         tags = _normalize_topic_tags(clip.get('topic_tags'))
         if not tags:
             tags = _default_topic_tags(clip)
@@ -1865,11 +1897,13 @@ if __name__ == '__main__':
                 
                 # Cut clip
                 clip_filename = f"{video_title}_clip_{i+1}.mp4"
-                clip_temp_path = os.path.join(output_dir, f"temp_{clip_filename}")
+                clip_uncut_filename = f"{video_title}_clip_{i+1}_uncut.mp4"
                 clip_final_path = os.path.join(output_dir, clip_filename)
+                clip_uncut_path = os.path.join(output_dir, clip_uncut_filename)
                 
                 # ffmpeg cut
                 # Using re-encoding for precision as requested by strict seconds
+                # Save directly to the uncut path first so we preserve the original frame.
                 cut_command = [
                     'ffmpeg', '-y', 
                     '-ss', str(start), 
@@ -1878,19 +1912,17 @@ if __name__ == '__main__':
                     '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', str(args.ffmpeg_crf), '-preset', str(args.ffmpeg_preset),
                     '-c:a', 'aac',
                     '-movflags', '+faststart',
-                    clip_temp_path
+                    clip_uncut_path
                 ]
                 subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 
-                # Process vertical
-                success = process_video_to_vertical(clip_temp_path, clip_final_path, args.ffmpeg_preset, args.ffmpeg_crf, args.aspect_ratio)
+                # Process vertical from the uncut source instead of input_video to save processing time
+                # but input_video would also work if uncut_path is deleted. Let's use uncut_path.
+                success = process_video_to_vertical(clip_uncut_path, clip_final_path, args.ffmpeg_preset, args.ffmpeg_crf, args.aspect_ratio)
                 
                 if success:
                     print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
-                
-                # Clean up temp cut
-                if os.path.exists(clip_temp_path):
-                    os.remove(clip_temp_path)
+                    print(f"   ✅ Uncut Clip {i+1} saved: {clip_uncut_path}")
 
     # Clean up original if requested
     if args.url and not args.keep_original and os.path.exists(input_video):

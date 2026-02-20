@@ -300,8 +300,6 @@ function App() {
   const [packExportReport, setPackExportReport] = useState(null);
   const [isGeneratingHighlightReel, setIsGeneratingHighlightReel] = useState(false);
   const [highlightAspectRatio, setHighlightAspectRatio] = useState('9:16');
-  const [socialMetrics, setSocialMetrics] = useState(null);
-  const [isLoadingSocialMetrics, setIsLoadingSocialMetrics] = useState(false);
   const [clipSearchQuery, setClipSearchQuery] = useState('');
   const [isSearchingClips, setIsSearchingClips] = useState(false);
   const [clipSearchResults, setClipSearchResults] = useState([]);
@@ -734,7 +732,6 @@ function App() {
     setResults(null);
     setBatchScheduleReport(null);
     setPackExportReport(null);
-    setSocialMetrics(null);
     setIsGeneratingHighlightReel(false);
     setClipSearchResults([]);
     setClipSearchKeywords([]);
@@ -866,7 +863,6 @@ function App() {
     setResults(null);
     setBatchScheduleReport(null);
     setPackExportReport(null);
-    setSocialMetrics(null);
     setIsGeneratingHighlightReel(false);
     setClipSearchResults([]);
     setClipSearchKeywords([]);
@@ -910,7 +906,6 @@ function App() {
       setResults(null);
       setBatchScheduleReport(null);
       setPackExportReport(null);
-      setSocialMetrics(null);
       setIsGeneratingHighlightReel(false);
       setStatus('processing');
       setProcessUiPhase('queued');
@@ -1057,24 +1052,6 @@ function App() {
       setHighlightAspectRatio(firstAspect);
     }
   }, [results?.clips]);
-
-  const loadSocialMetrics = useCallback(async (targetJobId = jobId, { silent = false } = {}) => {
-    if (!targetJobId) return;
-    if (!silent) setIsLoadingSocialMetrics(true);
-    try {
-      const res = await apiFetch(`/api/social/metrics/${targetJobId}`);
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setSocialMetrics(data);
-    } catch (e) {
-      if (!silent) {
-        setLogs((prev) => [...prev, `No se pudo cargar métricas sociales: ${e.message}`]);
-      }
-      setSocialMetrics(null);
-    } finally {
-      if (!silent) setIsLoadingSocialMetrics(false);
-    }
-  }, [jobId]);
 
   const applyBatchStrategy = (strategy) => {
     setBatchStrategy(strategy);
@@ -1282,7 +1259,6 @@ function App() {
     } else {
       setLogs((prev) => [...prev, `Cola batch completada con incidencias: ${success}/${candidates.length} programados.`]);
     }
-    loadSocialMetrics(jobId, { silent: true });
     setIsBatchScheduling(false);
   };
 
@@ -1530,11 +1506,6 @@ function App() {
     if (transcriptSegments.length > 0) return;
     loadTranscriptSegments(jobId);
   }, [status, jobId]);
-
-  useEffect(() => {
-    if (status !== 'complete' || !jobId) return;
-    loadSocialMetrics(jobId, { silent: true });
-  }, [status, jobId, loadSocialMetrics]);
 
   const visibleTranscriptSegments = useMemo(() => {
     if (!Array.isArray(transcriptSegments) || transcriptSegments.length === 0) return [];
@@ -1930,7 +1901,6 @@ function App() {
     setIsPollingPaused(false);
     setProcessUiPhase('running');
     setResults(null);
-    setSocialMetrics(null);
     setIsGeneratingHighlightReel(false);
     setLogs(['Cargando proyecto guardado...']);
     setProcessingMedia({
@@ -2232,8 +2202,8 @@ function App() {
                       Conectar
                     </button>
                   </div>
-                  <p className="text-xs text-zinc-500 leading-relaxed">
-                    Conecta tu cuenta de Upload-Post para publicar con un clic.
+                  <div className="text-xs text-zinc-500 leading-relaxed">
+                    <p>Conecta tu cuenta de Upload-Post para publicar con un clic.</p>
                     <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
                         <span className="text-zinc-400 font-medium">1. Login</span>
@@ -2248,11 +2218,10 @@ function App() {
                         <span className="text-[10px] text-zinc-600">Generar llave</span>
                       </a>
                     </div>
-                    <br />
-                    <span className="text-zinc-600 italic">
+                    <p className="mt-3 text-zinc-600 italic">
                       Las llaves se guardan solo en tu navegador. Se envían al backend únicamente para procesar tu solicitud y no se almacenan del lado del servidor.
-                    </span>
-                  </p>
+                    </p>
+                  </div>
                 </div>
               </div>
 
@@ -3398,28 +3367,6 @@ function App() {
                       : <p>{`Paquete listo: ${packExportReport.video_files_added} videos, ${packExportReport.srt_files_added} SRT, ${packExportReport.thumbnail_files_added || 0} miniaturas, ${packExportReport.platform_variant_rows || 0} filas de copy por plataforma, ${packExportReport.platform_video_variant_files_added || 0} videos variante por plataforma, ${packExportReport.clips_in_manifest} clips en el manifiesto.`}</p>}
                   </div>
                 )}
-                {status === 'complete' && jobId && (
-                  <div className="mb-4 rounded-lg border border-violet-300/40 dark:border-violet-500/35 bg-violet-50/80 dark:bg-violet-500/10 p-3">
-                    <div className="flex flex-wrap items-center gap-2 justify-between">
-                      <p className="text-xs text-violet-700 dark:text-violet-200 font-medium">Métricas sociales</p>
-                      <button
-                        onClick={() => loadSocialMetrics(jobId)}
-                        disabled={isLoadingSocialMetrics}
-                        className="text-[11px] bg-white/80 dark:bg-white/10 border border-violet-300/60 dark:border-violet-400/40 text-violet-700 dark:text-violet-200 rounded px-2 py-1 hover:bg-white dark:hover:bg-white/20 disabled:opacity-50"
-                      >
-                        {isLoadingSocialMetrics ? 'Cargando...' : 'Recargar métricas'}
-                      </button>
-                    </div>
-                    {socialMetrics ? (
-                      <div className="mt-2 text-[11px] text-violet-800 dark:text-violet-100 space-y-1">
-                        <p>{`Intentos: ${socialMetrics.total_attempts || 0} | Exitosos: ${socialMetrics.successful_attempts || 0} | Fallidos: ${socialMetrics.failed_attempts || 0} | Éxito: ${Math.round((Number(socialMetrics.success_rate || 0) * 100))}%`}</p>
-                        <p>{`TikTok: ${socialMetrics?.by_platform?.tiktok?.success || 0}/${socialMetrics?.by_platform?.tiktok?.attempted || 0} · Instagram: ${socialMetrics?.by_platform?.instagram?.success || 0}/${socialMetrics?.by_platform?.instagram?.attempted || 0} · YouTube: ${socialMetrics?.by_platform?.youtube?.success || 0}/${socialMetrics?.by_platform?.youtube?.attempted || 0}`}</p>
-                      </div>
-                    ) : (
-                      <p className="mt-2 text-[11px] text-violet-700/80 dark:text-violet-200/80">Sin datos aún para este proyecto.</p>
-                    )}
-                  </div>
-                )}
                 {latestHighlightReel?.video_url && (
                   <div className="mb-4 rounded-lg border border-cyan-500/35 bg-cyan-500/10 p-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -3487,7 +3434,6 @@ function App() {
                                    onOpenStudio={openClipStudio}
                                    onPlay={(time) => handleClipPlay(time)}
                                    onPause={handleClipPause}
-                                   onSocialPosted={() => loadSocialMetrics(jobId, { silent: true })}
                                  />
                                </div>
                              );

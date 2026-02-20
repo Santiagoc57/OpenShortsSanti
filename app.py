@@ -19,7 +19,7 @@ import sqlite3
 import unicodedata
 from urllib.parse import unquote
 from dotenv import load_dotenv
-from typing import Dict, Optional, List, Any, Tuple
+from typing import Dict, Optional, List, Any, Tuple, Set
 from collections import Counter
 from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header
@@ -102,8 +102,9 @@ SOCIAL_REWRITE_MODELS = _parse_model_candidates(
     os.environ.get("SOCIAL_REWRITE_MODELS") or os.environ.get("SOCIAL_REWRITE_MODEL"),
     TITLE_REWRITE_MODELS
 )
-TITLE_VARIANTS_PER_CLIP = max(2, min(8, int(os.environ.get("TITLE_VARIANTS_PER_CLIP", "4"))))
+TITLE_VARIANTS_PER_CLIP = max(2, min(8, int(os.environ.get("TITLE_VARIANTS_PER_CLIP", "5"))))
 TITLE_VARIANTS_TOPUP_COUNT = max(1, min(6, int(os.environ.get("TITLE_VARIANTS_TOPUP_COUNT", "3"))))
+SOCIAL_VARIANTS_PER_CLIP = max(2, min(8, int(os.environ.get("SOCIAL_VARIANTS_PER_CLIP", "5"))))
 ALLOWED_ASPECT_RATIOS = {"9:16", "16:9"}
 ALLOWED_CLIP_LENGTH_TARGETS = {"short", "balanced", "long"}
 _SMART_REF_YOLO_MODEL = None
@@ -161,13 +162,26 @@ def _probe_media_duration_seconds(media_path: str) -> float:
         "-of", "default=noprint_wrappers=1:nokey=1",
         media_path
     ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if proc.returncode != 0:
-        return 0.0
     try:
-        return max(0.0, float((proc.stdout or "").strip() or 0.0))
-    except Exception:
-        return 0.0
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if proc.returncode == 0:
+            return max(0.0, float((proc.stdout or "").strip() or 0.0))
+    except (FileNotFoundError, Exception):
+        # Fallback to ffmpeg -i if ffprobe is missing
+        try:
+            cmd_fallback = ["ffmpeg", "-i", media_path]
+            proc_fb = subprocess.run(cmd_fallback, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            # Duration is in stderr for ffmpeg -i
+            err_out = proc_fb.stderr or ""
+            # Look for "Duration: 00:00:10.50"
+            import re
+            match = re.search(r"Duration:\s+(\d+):(\d+):(\d+\.\d+)", err_out)
+            if match:
+                h, m, s = match.groups()
+                return float(h)*3600 + float(m)*60 + float(s)
+        except Exception:
+            pass
+    return 0.0
 
 def _probe_video_dimensions(media_path: str) -> Tuple[int, int]:
     cmd = [
@@ -178,19 +192,27 @@ def _probe_video_dimensions(media_path: str) -> Tuple[int, int]:
         "-of", "csv=p=0:s=x",
         media_path
     ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if proc.returncode != 0:
-        return 0, 0
-    raw = str(proc.stdout or "").strip()
-    if "x" not in raw:
-        return 0, 0
     try:
-        w_raw, h_raw = raw.split("x", 1)
-        w = int(float(w_raw))
-        h = int(float(h_raw))
-        return max(0, w), max(0, h)
-    except Exception:
-        return 0, 0
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if proc.returncode == 0:
+            raw = str(proc.stdout or "").strip()
+            if "x" in raw:
+                w_raw, h_raw = raw.split("x", 1)
+                return int(float(w_raw)), int(float(h_raw))
+    except (FileNotFoundError, Exception):
+        # Fallback to ffmpeg -i if ffprobe is missing
+        try:
+            cmd_fallback = ["ffmpeg", "-i", media_path]
+            proc_fb = subprocess.run(cmd_fallback, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            err_out = proc_fb.stderr or ""
+            # Look for "Video: ..., 1280x720 ..."
+            import re
+            match = re.search(r"Video:.*?\s(\d+)x(\d+)", err_out)
+            if match:
+                return int(match.group(1)), int(match.group(2))
+        except Exception:
+            pass
+    return 0, 0
 
 def _even_int(value: float) -> int:
     iv = int(round(float(value)))
@@ -201,11 +223,12 @@ def _even_int(value: float) -> int:
     return max(2, iv)
 
 # Keep manual pan intensity aligned with editor preview (ClipStudioModal.jsx).
-_LAYOUT_OFFSET_FACTOR = 0.35
+# 1.0 lets users reach the full pan range allowed by current crop/pad math.
+_LAYOUT_OFFSET_FACTOR = 1.0
 
 def _normalize_layout_fit_mode(fit_mode: Optional[str]) -> str:
     fit = str(fit_mode or "cover").strip().lower()
-    if fit not in {"cover", "contain"}:
+    if fit not in {"cover", "contain", "blur"}:
         fit = "cover"
     return fit
 
@@ -226,53 +249,121 @@ def _build_manual_layout_ops_for_target(
     fit_mode: str = "cover",
     zoom: float = 1.0,
     offset_x: float = 0.0,
-    offset_y: float = 0.0
-) -> List[str]:
+    offset_y: float = 0.0,
+    input_label: Optional[str] = None
+) -> str:
     fit = _normalize_layout_fit_mode(fit_mode)
     z = _coerce_layout_zoom(zoom, 1.0, fit)
     ox_raw = _coerce_layout_offset(offset_x, 0.0) / 100.0
     oy_raw = _coerce_layout_offset(offset_y, 0.0) / 100.0
+    
+    if fit == "cover" and z <= 1.0001 and (abs(ox_raw) > 1e-6 or abs(oy_raw) > 1e-6):
+        z = 1.06
     ox = ox_raw * _LAYOUT_OFFSET_FACTOR
     oy = oy_raw * _LAYOUT_OFFSET_FACTOR
 
     out_w = _even_int(out_w)
     out_h = _even_int(out_h)
 
-    if fit == "cover":
-        base_scale = max(out_w / max(1, in_w), out_h / max(1, in_h))
-    else:
-        base_scale = min(out_w / max(1, in_w), out_h / max(1, in_h))
+    # 1. Standard Linear modes (cover, contain)
+    if fit in {"cover", "contain"}:
+        if fit == "cover":
+            base_scale = max(out_w / max(1, in_w), out_h / max(1, in_h))
+        else:
+            base_scale = min(out_w / max(1, in_w), out_h / max(1, in_h))
 
-    scale_factor = max(0.1, base_scale * z)
-    scaled_w = _even_int(in_w * scale_factor)
-    scaled_h = _even_int(in_h * scale_factor)
+        # How much of the original frame do we want to capture?
+        # A zoom of 1.0 means we capture the full frame (or as much as fits the aspect ratio).
+        # A zoom of 2.0 means we capture half the frame.
+        # A zoom of 0.5 means we capture twice the frame (impossible, so we pad later).
+        scale_factor = max(0.1, base_scale * z)
+        
+        # Calculate the size of the "capture box" on the original source image
+        capture_w = int(out_w / scale_factor)
+        capture_h = int(out_h / scale_factor)
+        
+        filters = []
+        stage_w, stage_h = in_w, in_h
 
-    filters = [f"scale={scaled_w}:{scaled_h}"]
-    stage_w = scaled_w
-    stage_h = scaled_h
+        # 1. Crop: If the capture box is smaller than the input, we crop the input.
+        # This is where pan (offset) applies.
+        if capture_w < stage_w or capture_h < stage_h:
+            actual_crop_w = min(stage_w, capture_w)
+            actual_crop_h = min(stage_h, capture_h)
+            
+            max_crop_x = stage_w - actual_crop_w
+            max_crop_y = stage_h - actual_crop_h
+            
+            crop_x = int(round((max_crop_x / 2.0) + (ox * (max_crop_x / 2.0))))
+            crop_y = int(round((max_crop_y / 2.0) + (oy * (max_crop_y / 2.0))))
+            
+            # Ensure crop doesn't go out of bounds
+            crop_x = max(0, min(max_crop_x, crop_x))
+            crop_y = max(0, min(max_crop_y, crop_y))
+            
+            filters.append(f"crop={actual_crop_w}:{actual_crop_h}:{crop_x}:{crop_y}")
+            stage_w, stage_h = actual_crop_w, actual_crop_h
 
-    crop_w = min(stage_w, out_w)
-    crop_h = min(stage_h, out_h)
-    if crop_w < stage_w or crop_h < stage_h:
-        max_crop_x = max(0, stage_w - crop_w)
-        max_crop_y = max(0, stage_h - crop_h)
-        crop_x = int(round((max_crop_x / 2.0) + (ox * (max_crop_x / 2.0))))
-        crop_y = int(round((max_crop_y / 2.0) + (oy * (max_crop_y / 2.0))))
-        crop_x = max(0, min(max_crop_x, crop_x))
-        crop_y = max(0, min(max_crop_y, crop_y))
-        filters.append(f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y}")
-        stage_w, stage_h = crop_w, crop_h
+        # 2. Scale: Now scale the cropped portion (or the full image if capture box was larger)
+        scaled_w = _even_int(stage_w * scale_factor)
+        scaled_h = _even_int(stage_h * scale_factor)
+        filters.append(f"scale={scaled_w}:{scaled_h}")
+        stage_w, stage_h = scaled_w, scaled_h
 
-    if stage_w < out_w or stage_h < out_h:
-        max_pad_x = max(0, out_w - stage_w)
-        max_pad_y = max(0, out_h - stage_h)
-        pad_x = int(round((max_pad_x / 2.0) + (ox * (max_pad_x / 2.0))))
-        pad_y = int(round((max_pad_y / 2.0) + (oy * (max_pad_y / 2.0))))
-        pad_x = max(0, min(max_pad_x, pad_x))
-        pad_y = max(0, min(max_pad_y, pad_y))
-        filters.append(f"pad={out_w}:{out_h}:{pad_x}:{pad_y}:black")
+        # 3. Pad: If the scaled result is smaller than the output box, we pad with black.
+        # This happens in Contain mode, or if zoomed out (z < 1.0).
+        if stage_w < out_w or stage_h < out_h:
+            max_pad_x = max(0, out_w - stage_w)
+            max_pad_y = max(0, out_h - stage_h)
+            
+            # If we crop AND pad (e.g. weird aspect ratios), offset shouldn't double dip, 
+            # but usually it's one or the other per axis.
+            # When padding, panning moves the image within the black box.
+            pad_x = int(round((max_pad_x / 2.0) + (ox * (max_pad_x / 2.0))))
+            pad_y = int(round((max_pad_y / 2.0) + (oy * (max_pad_y / 2.0))))
+            
+            pad_x = max(0, min(max_pad_x, pad_x))
+            pad_y = max(0, min(max_pad_y, pad_y))
+            
+            filters.append(f"pad={out_w}:{out_h}:{pad_x}:{pad_y}:black")
 
-    return filters
+        return ",".join(filters)
+
+
+    # 2. Blur Fill Mode
+    # background cover + blur, then overlay contain on top
+    # Note: We use unique labels to avoid collision if used multiple times in same filter complex
+    lbl = f"blur_{uuid.uuid4().hex[:4]}"
+    bg_scale = max(out_w / max(1, in_w), out_h / max(1, in_h))
+    bg_scaled_w = _even_int(in_w * bg_scale)
+    bg_scaled_h = _even_int(in_h * bg_scale)
+    
+    fg_scale = min(out_w / max(1, in_w), out_h / max(1, in_h))
+    fg_scaled_w = _even_int(in_w * fg_scale * z)
+    fg_scaled_h = _even_int(in_h * fg_scale * z)
+    
+    # Background branch
+    bg_filters = [
+        f"scale={bg_scaled_w}:{bg_scaled_h}",
+        f"crop={out_w}:{out_h}",
+        "boxblur=40:10"
+    ]
+    # Foreground branch
+    fg_filters = [
+        f"scale={fg_scaled_w}:{fg_scaled_h}"
+    ]
+    # Center or offset FG
+    fg_x = f"(W-w)/2+{ox*out_w/2}"
+    fg_y = f"(H-h)/2+{oy*out_h/2}"
+    
+    # Combine
+    in_prefix = f"[{input_label}]" if input_label else ""
+    return (
+        f"{in_prefix}split[v{lbl}_bg][v{lbl}_fg];"
+        f"[v{lbl}_bg]{','.join(bg_filters)}[v{lbl}_out_bg];"
+        f"[v{lbl}_fg]{','.join(fg_filters)}[v{lbl}_out_fg];"
+        f"[v{lbl}_out_bg][v{lbl}_out_fg]overlay={fg_x}:{fg_y}"
+    )
 
 def _build_manual_layout_filter(
     in_w: int,
@@ -302,10 +393,11 @@ def _build_manual_layout_filter(
         fit_mode=fit_mode,
         zoom=zoom,
         offset_x=offset_x,
-        offset_y=offset_y
+        offset_y=offset_y,
+        input_label="0:v"
     )
 
-    return ",".join(filters), out_w, out_h
+    return f"{filters}[out_v]", out_w, out_h
 
 def _build_split_layout_filter_complex(
     in_w: int,
@@ -335,7 +427,8 @@ def _build_split_layout_filter_complex(
             fit_mode=fit_mode,
             zoom=zoom_a,
             offset_x=offset_a_x,
-            offset_y=offset_a_y
+            offset_y=offset_a_y,
+            input_label="vsplit_a"
         )
         pane_b_ops = _build_manual_layout_ops_for_target(
             in_w=in_w,
@@ -345,13 +438,14 @@ def _build_split_layout_filter_complex(
             fit_mode=fit_mode,
             zoom=zoom_b,
             offset_x=offset_b_x,
-            offset_y=offset_b_y
+            offset_y=offset_b_y,
+            input_label="vsplit_b"
         )
         out_label = "vsplit_out"
         filter_complex = (
             f"[0:v]split=2[vsplit_a][vsplit_b];"
-            f"[vsplit_a]{','.join(pane_a_ops)}[vsplit_top];"
-            f"[vsplit_b]{','.join(pane_b_ops)}[vsplit_bottom];"
+            f"{pane_a_ops}[vsplit_top];"
+            f"{pane_b_ops}[vsplit_bottom];"
             f"[vsplit_top][vsplit_bottom]vstack=inputs=2[{out_label}]"
         )
         return filter_complex, out_w, out_h, out_label
@@ -367,7 +461,8 @@ def _build_split_layout_filter_complex(
         fit_mode=fit_mode,
         zoom=zoom_a,
         offset_x=offset_a_x,
-        offset_y=offset_a_y
+        offset_y=offset_a_y,
+        input_label="hsplit_a"
     )
     pane_b_ops = _build_manual_layout_ops_for_target(
         in_w=in_w,
@@ -377,13 +472,14 @@ def _build_split_layout_filter_complex(
         fit_mode=fit_mode,
         zoom=zoom_b,
         offset_x=offset_b_x,
-        offset_y=offset_b_y
+        offset_y=offset_b_y,
+        input_label="hsplit_b"
     )
     out_label = "hsplit_out"
     filter_complex = (
         f"[0:v]split=2[hsplit_a][hsplit_b];"
-        f"[hsplit_a]{','.join(pane_a_ops)}[hsplit_left];"
-        f"[hsplit_b]{','.join(pane_b_ops)}[hsplit_right];"
+        f"{pane_a_ops}[hsplit_left];"
+        f"{pane_b_ops}[hsplit_right];"
         f"[hsplit_left][hsplit_right]hstack=inputs=2[{out_label}]"
     )
     return filter_complex, out_w, out_h, out_label
@@ -1325,6 +1421,70 @@ def _parse_title_variants_payload(raw_text: str) -> List[str]:
             fallback_candidates.append(cleaned)
     return _dedupe_title_candidates(fallback_candidates)
 
+def _social_fingerprint(raw_text: str) -> str:
+    clean = _sanitize_social_copy(raw_text, max_chars=360).lower()
+    clean = unicodedata.normalize("NFD", clean)
+    clean = "".join(ch for ch in clean if unicodedata.category(ch) != "Mn")
+    return re.sub(r"[^a-z0-9]+", "", clean)
+
+def _dedupe_social_candidates(candidates: List[str], blocked: Optional[List[str]] = None) -> List[str]:
+    blocked_keys = {
+        _social_fingerprint(item)
+        for item in (blocked or [])
+        if _social_fingerprint(item)
+    }
+    seen = set()
+    out: List[str] = []
+    for raw in (candidates or []):
+        clean = _sanitize_social_copy(raw, max_chars=320)
+        if not clean:
+            continue
+        key = _social_fingerprint(clean)
+        if not key or key in seen or key in blocked_keys:
+            continue
+        seen.add(key)
+        out.append(clean)
+    return out
+
+def _parse_social_variants_payload(raw_text: str) -> List[str]:
+    payload = str(raw_text or "").strip()
+    if not payload:
+        return []
+
+    block = payload
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", payload, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        block = fenced.group(1).strip()
+
+    parsed_candidates: List[str] = []
+    try:
+        parsed = json.loads(block)
+        if isinstance(parsed, list):
+            parsed_candidates = [str(item) for item in parsed]
+        elif isinstance(parsed, dict):
+            for key in ("socials", "copies", "variants", "options", "captions"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    parsed_candidates = [str(item) for item in value]
+                    break
+                if isinstance(value, str):
+                    parsed_candidates = [value]
+                    break
+    except Exception:
+        parsed_candidates = []
+
+    if parsed_candidates:
+        return _dedupe_social_candidates(parsed_candidates)
+
+    rough_lines = re.split(r"[\r\n]+|(?<!\d)\.\s+", block)
+    fallback_candidates: List[str] = []
+    for line in rough_lines:
+        cleaned = re.sub(r"^\s*[-*•\d\)\.\:]+\s*", "", str(line or "")).strip(" \"'`")
+        cleaned = _sanitize_social_copy(cleaned, max_chars=320)
+        if cleaned:
+            fallback_candidates.append(cleaned)
+    return _dedupe_social_candidates(fallback_candidates)
+
 def _build_fallback_title(
     current_title: str,
     transcript_excerpt: str,
@@ -1463,7 +1623,8 @@ def _generate_rewritten_title_variants(
             prompt = (
                 f"Genera exactamente {safe_target} títulos distintos para un clip vertical.\n"
                 "Responde SOLO como JSON array de strings y nada más.\n"
-                "Reglas: español neutro, 55-95 caracteres, sin emojis, sin hashtags, sin comillas extra.\n"
+                "Reglas: español neutro, 55-95 caracteres, puedes usar emojis relevantes, sin hashtags, sin comillas extra.\n"
+                "Estilo: Usa 'Sentence case' (ej: 'Así me recibe la gente en Argentina'), evita mayúsculas en cada palabra.\n"
                 f"Evita repetir literalmente estos títulos: {blocked_line}\n"
                 f"Título base: {clean_current or 'n/a'}\n"
                 f"Contexto social: {clean_social or 'n/a'}\n"
@@ -1521,6 +1682,48 @@ def _generate_rewritten_title_variants(
         if deduped:
             results.extend(deduped)
         filler_guard += 1
+
+    if len(results) < safe_target:
+        keyword = ""
+        for tag in safe_tags:
+            if len(tag) >= 4:
+                keyword = tag
+                break
+        if not keyword:
+            words = re.findall(r"[a-zA-ZÀ-ÿ0-9]{4,}", clean_transcript.lower())
+            for word in words:
+                if word not in {"esto", "esta", "este", "para", "como", "cuando", "donde", "sobre", "porque", "video", "clip"}:
+                    keyword = word
+                    break
+
+        lead_opts = [
+            "Lo que no te contaron",
+            "La parte más fuerte",
+            "El momento que explica todo",
+            "Esta frase lo resume",
+            "Así lo dijo sin filtro",
+            "El dato que cambia la lectura"
+        ]
+        hook_opts = [
+            "abre una discusión fuerte",
+            "cambia el debate",
+            "deja una alerta clara",
+            "explica el punto clave",
+            "resumen el punto central",
+            "marca la conversación"
+        ]
+        synth_idx = 0
+        while len(results) < safe_target and synth_idx < (len(lead_opts) * len(hook_opts) + 8):
+            lead = lead_opts[synth_idx % len(lead_opts)]
+            hook = hook_opts[(synth_idx // max(1, len(lead_opts))) % len(hook_opts)]
+            if keyword:
+                candidate = f"{lead}: {keyword} y por qué {hook}"
+            else:
+                candidate = f"{lead}: por qué {hook}"
+            deduped = _dedupe_title_candidates([candidate], blocked=blocked + results)
+            if deduped:
+                results.extend(deduped)
+            synth_idx += 1
 
     return _dedupe_title_candidates(results, blocked=blocked)[:safe_target]
 
@@ -1642,6 +1845,126 @@ def _generate_rewritten_social_copy(
         score_reason=clean_reason,
         topic_tags=safe_tags
     )
+
+def _generate_rewritten_social_variants(
+    current_social: str,
+    current_title: str,
+    transcript_excerpt: str,
+    score_reason: str,
+    topic_tags: List[str],
+    avoid_socials: Optional[List[str]],
+    target_count: int,
+    api_key: Optional[str]
+) -> List[str]:
+    safe_target = max(1, min(8, int(target_count or 1)))
+    clean_current = _sanitize_social_copy(current_social, max_chars=320)
+    clean_title = _sanitize_short_title(current_title or "")
+    clean_transcript = _normalize_space(transcript_excerpt)[:460]
+    clean_reason = _normalize_space(score_reason)[:240]
+    safe_tags = [str(tag).strip().lower()[:24] for tag in (topic_tags or []) if str(tag).strip()]
+    blocked = _dedupe_social_candidates(list(avoid_socials or []) + ([clean_current] if clean_current else []))
+    results: List[str] = []
+
+    if api_key:
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            blocked_line = " || ".join(blocked[:8]) if blocked else "n/a"
+            tag_line = ", ".join(safe_tags[:6]) if safe_tags else "n/a"
+            prompt = (
+                f"Genera exactamente {safe_target} copies sociales distintas para un clip vertical.\n"
+                "Responde SOLO como JSON array de strings y nada más.\n"
+                "Reglas: español neutro, 150-280 caracteres, tono natural con emojis relevantes, sin inventar datos, máximo 2 hashtags.\n"
+                "Cada copy debe terminar con CTA en formato: Sígueme y comenta \"PALABRA\" y te envío más análisis.\n"
+                f"Evita repetir literalmente estas copies: {blocked_line}\n"
+                f"Título del clip: {clean_title or 'n/a'}\n"
+                f"Copy base: {clean_current or 'n/a'}\n"
+                f"Transcript: {clean_transcript or 'n/a'}\n"
+                f"Razón de viralidad: {clean_reason or 'n/a'}\n"
+                f"Etiquetas: {tag_line}"
+            )
+            for model_name in SOCIAL_REWRITE_MODELS:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt
+                    )
+                except Exception as model_err:
+                    if _is_gemini_model_unavailable_error(model_err):
+                        continue
+                    raise
+                raw = _extract_generated_text(response)
+                parsed = _parse_social_variants_payload(raw)
+                parsed = [_ensure_social_cta(_sanitize_social_copy(item, max_chars=320), token_hint="CLIP") for item in parsed]
+                parsed = _dedupe_social_candidates(parsed, blocked=blocked + results)
+                if parsed:
+                    results.extend(parsed)
+                    results = _dedupe_social_candidates(results, blocked=blocked)
+                if len(results) >= safe_target:
+                    break
+        except Exception:
+            pass
+
+    filler_guard = 0
+    while len(results) < safe_target and filler_guard < (safe_target * 6):
+        salt = f"{int(time.time() * 1000)}-{len(results)}-{filler_guard}"
+        candidate = _build_fallback_social_copy(
+            current_social=clean_current,
+            current_title=clean_title,
+            transcript_excerpt=clean_transcript,
+            score_reason=f"{clean_reason} {salt}".strip(),
+            topic_tags=safe_tags
+        )
+        candidate = _sanitize_social_copy(candidate, max_chars=320)
+        deduped = _dedupe_social_candidates([candidate], blocked=blocked + results)
+        if deduped:
+            results.extend(deduped)
+        filler_guard += 1
+
+    if len(results) < safe_target:
+        token_hint = "CLIP"
+        for tag in safe_tags:
+            if len(tag) >= 4:
+                token_hint = tag.upper()
+                break
+        if token_hint == "CLIP":
+            words = re.findall(r"[a-zA-ZÀ-ÿ0-9]{4,}", clean_transcript)
+            if words:
+                token_hint = words[0].upper()
+        short_tag = safe_tags[0] if safe_tags else ""
+        hashtag = f" #{short_tag}" if short_tag else ""
+        base_title = clean_title or "Este clip"
+        openers = [
+            "resume el punto más fuerte",
+            "abre el debate en segundos",
+            "explica una parte clave del tema",
+            "muestra por qué este tema está en tendencia",
+            "deja una lectura clara del contexto",
+            "te da el momento exacto del debate"
+        ]
+        questions = [
+            "¿Qué opinas tú?",
+            "¿Te pasó algo parecido?",
+            "¿Estás de acuerdo con este punto?",
+            "¿Lo compartirías con tu equipo?",
+            "¿Qué agregarías a este análisis?"
+        ]
+        synth_idx = 0
+        while len(results) < safe_target and synth_idx < (len(openers) * len(questions) + 8):
+            opener = openers[synth_idx % len(openers)]
+            question = questions[(synth_idx // max(1, len(openers))) % len(questions)]
+            body = _sanitize_social_copy(
+                f"{base_title}: {opener}. {question}{hashtag}",
+                max_chars=260
+            )
+            candidate = _ensure_social_cta(body, token_hint=token_hint[:18] if token_hint else "CLIP")
+            candidate = _sanitize_social_copy(candidate, max_chars=320)
+            deduped = _dedupe_social_candidates([candidate], blocked=blocked + results)
+            if deduped:
+                results.extend(deduped)
+            synth_idx += 1
+
+    return _dedupe_social_candidates(results, blocked=blocked)[:safe_target]
 
 def _vector_norm(vec: List[float]) -> float:
     return math.sqrt(sum(v * v for v in vec))
@@ -2574,6 +2897,106 @@ def _ensure_clip_title_variant_pool(
 
     return variants, idx, changed
 
+def _ensure_clip_social_variant_pool(
+    clip: Dict[str, Any],
+    transcript: Optional[Dict[str, Any]],
+    api_key: Optional[str],
+    target_size: int = SOCIAL_VARIANTS_PER_CLIP
+) -> Tuple[List[str], int, bool]:
+    if not isinstance(clip, dict):
+        return [], 0, False
+
+    safe_target = max(2, min(8, int(target_size or SOCIAL_VARIANTS_PER_CLIP)))
+    current_social = _sanitize_social_copy(
+        clip.get("video_description_for_tiktok")
+        or clip.get("video_description_for_instagram")
+        or "",
+        max_chars=320
+    )
+    current_title = _sanitize_short_title(
+        clip.get("video_title_for_youtube_short")
+        or clip.get("title")
+        or "Momento clave del video"
+    ) or "Momento clave del video"
+    transcript_excerpt = _normalize_space(
+        clip.get("transcript_excerpt")
+        or _clip_transcript_excerpt(clip, transcript, max_chars=420, max_segments=10)
+    )
+    score_reason = _normalize_space(clip.get("score_reason") or "")
+    tags = _normalize_topic_tags(clip.get("topic_tags"))
+
+    if not current_social:
+        current_social = _build_fallback_social_copy(
+            current_social="",
+            current_title=current_title,
+            transcript_excerpt=transcript_excerpt,
+            score_reason=score_reason,
+            topic_tags=tags
+        )
+
+    current_fp = _social_fingerprint(current_social)
+    raw_variants = clip.get("social_variants") if isinstance(clip.get("social_variants"), list) else []
+    variants = _dedupe_social_candidates(raw_variants)
+    variant_keys = {_social_fingerprint(v) for v in variants if _social_fingerprint(v)}
+    if current_fp and current_fp not in variant_keys:
+        variants = _dedupe_social_candidates([current_social] + variants)
+    elif not variants:
+        variants = [current_social]
+
+    changed = False
+    if len(variants) < safe_target:
+        missing = safe_target - len(variants)
+        generated = _generate_rewritten_social_variants(
+            current_social=current_social,
+            current_title=current_title,
+            transcript_excerpt=transcript_excerpt,
+            score_reason=score_reason,
+            topic_tags=tags,
+            avoid_socials=variants,
+            target_count=missing,
+            api_key=api_key
+        )
+        if generated:
+            variants = _dedupe_social_candidates(variants + generated)
+            changed = True
+
+    raw_idx = clip.get("social_variant_index")
+    idx: Optional[int] = None
+    if raw_idx is not None:
+        try:
+            idx = int(raw_idx)
+        except Exception:
+            idx = None
+    if idx is None:
+        idx = 0
+        if current_fp:
+            for i, candidate in enumerate(variants):
+                if _social_fingerprint(candidate) == current_fp:
+                    idx = i
+                    break
+    idx = max(0, min(len(variants) - 1, idx)) if variants else 0
+
+    active_social = variants[idx] if variants else current_social
+    if clip.get("video_description_for_tiktok") != active_social:
+        clip["video_description_for_tiktok"] = active_social
+        changed = True
+    if clip.get("video_description_for_instagram") != active_social:
+        clip["video_description_for_instagram"] = active_social
+        changed = True
+    if clip.get("social_variants") != variants:
+        clip["social_variants"] = variants
+        changed = True
+    prev_idx_raw = clip.get("social_variant_index")
+    try:
+        prev_idx = int(prev_idx_raw)
+    except Exception:
+        prev_idx = None
+    if prev_idx != idx:
+        clip["social_variant_index"] = idx
+        changed = True
+
+    return variants, idx, changed
+
 def _normalize_clip_payload(clip: Dict, rank: int, transcript: Optional[Dict[str, Any]] = None) -> Dict:
     """
     Ensure clip carries stable metadata used by the dashboard:
@@ -3221,6 +3644,7 @@ async def run_job(job_id, job_data):
 
                 transcript_data = data.get('transcript') if isinstance(data, dict) else None
                 title_variants_changed = False
+                social_variants_changed = False
                 title_variant_api_key = _normalize_space(
                     (jobs.get(job_id, {}).get("env", {}) or {}).get("GEMINI_API_KEY", "")
                 ) or _normalize_space(os.environ.get("GEMINI_API_KEY", ""))
@@ -3233,10 +3657,17 @@ async def run_job(job_id, job_data):
                          target_size=TITLE_VARIANTS_PER_CLIP
                      )
                      title_variants_changed = bool(title_variants_changed or clip_changed)
+                     _, _, social_changed = _ensure_clip_social_variant_pool(
+                         clip,
+                         transcript=transcript_data,
+                         api_key=title_variant_api_key,
+                         target_size=SOCIAL_VARIANTS_PER_CLIP
+                     )
+                     social_variants_changed = bool(social_variants_changed or social_changed)
                      clip_filename = f"{base_name}_clip_{i+1}.mp4"
                      clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
 
-                if title_variants_changed and isinstance(data, dict):
+                if (title_variants_changed or social_variants_changed) and isinstance(data, dict):
                     try:
                         data["shorts"] = clips
                         with open(target_json, "w", encoding="utf-8") as f:
@@ -3863,6 +4294,10 @@ class FastPreviewRequest(BaseModel):
     start: Optional[float] = None
     duration: float = 3.0
     aspect_ratio: Optional[str] = None
+    fit_mode: Optional[str] = None
+    zoom: Optional[float] = None
+    offset_x: Optional[float] = None
+    offset_y: Optional[float] = None
 
 @app.post("/api/clip/fast-preview")
 async def generate_fast_preview(req: FastPreviewRequest):
@@ -3885,52 +4320,138 @@ async def generate_fast_preview(req: FastPreviewRequest):
         raise HTTPException(status_code=404, detail="Clip not found")
     clip_data = clips[req.clip_index] if isinstance(clips[req.clip_index], dict) else {}
 
+    source_candidates: List[Tuple[str, str]] = []
+    seen_sources: Set[str] = set()
+
+    def _add_source_candidate(path_value: str, reason: str):
+        p = str(path_value or "").strip()
+        if not p:
+            return
+        try:
+            rp = os.path.realpath(p)
+        except Exception:
+            rp = p
+        if rp in seen_sources:
+            return
+        if not os.path.exists(rp):
+            return
+        seen_sources.add(rp)
+        source_candidates.append((rp, reason))
+
     if req.input_filename:
         source_name = _safe_input_filename(req.input_filename)
-    else:
-        source_name = _safe_input_filename(clip_data.get("video_url", ""))
-        if not source_name:
-            base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
-            source_name = f"{base_name}_clip_{req.clip_index + 1}.mp4"
-    source_path = os.path.join(output_dir, source_name)
-    if not os.path.exists(source_path):
-        raise HTTPException(status_code=404, detail=f"Video file not found: {source_path}")
+        if source_name:
+            _add_source_candidate(os.path.join(output_dir, source_name), "input_filename")
+
+    job_input_path = str(job.get("input_path") or "").strip()
+    if job_input_path:
+        _add_source_candidate(job_input_path, "job_input_path")
+
+    source_name = _safe_input_filename(clip_data.get("video_url", ""))
+    if not source_name:
+        base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
+        source_name = f"{base_name}_clip_{req.clip_index + 1}.mp4"
+    
+    # Prioritize uncut version for layout flexibility
+    uncut_name = source_name.replace(".mp4", "_uncut.mp4")
+    _add_source_candidate(os.path.join(output_dir, uncut_name), "clip_uncut")
+    _add_source_candidate(os.path.join(output_dir, source_name), "clip_video_url")
+
+    if not source_candidates:
+        raise HTTPException(status_code=404, detail="Video source not found for fast preview")
 
     clip_start = max(0.0, _safe_float(clip_data.get("start", 0.0), 0.0))
-    requested_start = max(0.0, _safe_float(req.start, clip_start))
-    duration = max(0.6, min(8.0, _safe_float(req.duration, 3.0)))
+    requested_start_raw = max(0.0, _safe_float(req.start, clip_start))
+    duration_target = max(0.6, min(8.0, _safe_float(req.duration, 3.0)))
     aspect_ratio = normalize_aspect_ratio(req.aspect_ratio, default=str(clip_data.get("aspect_ratio", "9:16"))) or "9:16"
-    target_w, target_h = (1080, 1920) if aspect_ratio == "9:16" else (1920, 1080)
-    vf_filter = f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h}"
+    fit_mode = _normalize_layout_fit_mode(req.fit_mode or clip_data.get("layout_fit_mode", "cover"))
+    zoom = _coerce_layout_zoom(req.zoom if req.zoom is not None else clip_data.get("layout_zoom"), 1.0, fit_mode)
+    offset_x = _coerce_layout_offset(req.offset_x if req.offset_x is not None else clip_data.get("layout_offset_x"), 0.0)
+    offset_y = _coerce_layout_offset(req.offset_y if req.offset_y is not None else clip_data.get("layout_offset_y"), 0.0)
 
-    out_name = f"fast_preview_clip_{req.clip_index+1}_{int(time.time())}_{uuid.uuid4().hex[:6]}.mp4"
-    out_path = os.path.join(output_dir, out_name)
-    cmd = [
-        "ffmpeg", "-y",
-        "-ss", f"{requested_start:.3f}",
-        "-t", f"{duration:.3f}",
-        "-i", source_path,
-        "-vf", vf_filter,
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-crf", "24",
-        "-preset", "veryfast",
-        "-c:a", "aac",
-        "-movflags", "+faststart",
-        out_path
-    ]
-    run = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    if run.returncode != 0 or not os.path.exists(out_path):
-        raise HTTPException(status_code=500, detail=run.stderr.decode("utf-8", errors="ignore") or "Failed to render fast preview")
+    last_error = "Failed to render fast preview"
 
-    return {
-        "success": True,
-        "clip_index": req.clip_index,
-        "aspect_ratio": aspect_ratio,
-        "start": round(requested_start, 3),
-        "duration": round(_probe_media_duration_seconds(out_path), 3),
-        "preview_video_url": f"/videos/{req.job_id}/{out_name}"
-    }
+    for source_path, source_reason in source_candidates:
+        in_w, in_h = _probe_video_dimensions(source_path)
+        if in_w <= 0 or in_h <= 0:
+            continue
+            
+        vf_filter, target_w, target_h = _build_manual_layout_filter(
+            in_w=in_w,
+            in_h=in_h,
+            aspect_ratio=aspect_ratio,
+            fit_mode=fit_mode,
+            zoom=zoom,
+            offset_x=offset_x,
+            offset_y=offset_y
+        )
+        source_duration = _probe_media_duration_seconds(source_path)
+        requested_start = requested_start_raw
+        if source_duration > 0:
+            max_start = max(0.0, source_duration - 0.25)
+            if requested_start > max_start:
+                # If candidate is already a clipped file, restart from 0.
+                if source_reason in {"clip_video_url", "input_filename"}:
+                    requested_start = 0.0
+                else:
+                    requested_start = max_start
+            remaining = max(0.0, source_duration - requested_start)
+            if remaining > 0:
+                duration = max(0.6, min(duration_target, remaining))
+            else:
+                duration = duration_target
+        else:
+            duration = duration_target
+
+        out_name = f"fast_preview_clip_{req.clip_index+1}_{int(time.time())}_{uuid.uuid4().hex[:6]}.mp4"
+        out_path = os.path.join(output_dir, out_name)
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{requested_start:.3f}",
+            "-t", f"{duration:.3f}",
+            "-i", source_path,
+            "-filter_complex", vf_filter,
+            "-map", "[out_v]",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-crf", "24",
+            "-preset", "veryfast",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            out_path
+        ]
+        run = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if run.returncode != 0 or not os.path.exists(out_path):
+            last_error = run.stderr.decode("utf-8", errors="ignore") or f"Failed rendering from {source_reason}"
+            try:
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+            except Exception:
+                pass
+            continue
+
+        out_w, out_h = _probe_video_dimensions(out_path)
+        out_duration = _probe_media_duration_seconds(out_path)
+        if out_w <= 0 or out_h <= 0 or out_duration < 0.2:
+            last_error = f"Invalid fast preview output from {source_reason} ({out_w}x{out_h}, {out_duration:.3f}s)"
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
+            continue
+
+        return {
+            "success": True,
+            "clip_index": req.clip_index,
+            "aspect_ratio": aspect_ratio,
+            "start": round(requested_start, 3),
+            "duration": round(out_duration, 3),
+            "source_reason": source_reason,
+            "preview_video_url": f"/videos/{req.job_id}/{out_name}"
+        }
+
+    raise HTTPException(status_code=500, detail=last_error or "Failed to render fast preview")
 
 class RetitleRequest(BaseModel):
     job_id: str
@@ -3990,17 +4511,6 @@ async def retitle_clip(
         or "Momento clave del video"
     ) or "Momento clave del video"
 
-    social_excerpt = _normalize_space(" ".join([
-        str(clip_payload.get("video_description_for_tiktok", "")),
-        str(clip_payload.get("video_description_for_instagram", "")),
-        str(clip_payload.get("score_reason", ""))
-    ]))
-    transcript_excerpt = _normalize_space(
-        clip_payload.get("transcript_excerpt")
-        or _clip_transcript_excerpt(clip_payload, transcript_data, max_chars=420, max_segments=10)
-    )
-    tags = _normalize_topic_tags(clip_payload.get("topic_tags"))
-
     variants, active_index, _ = _ensure_clip_title_variant_pool(
         clip_payload,
         transcript=transcript_data,
@@ -4020,21 +4530,7 @@ async def retitle_clip(
             variants = _dedupe_title_candidates([current_title] + variants)
             active_index = 0
 
-    next_index = active_index + 1
-    if next_index >= len(variants):
-        extra_variants = _generate_rewritten_title_variants(
-            current_title=current_title,
-            transcript_excerpt=transcript_excerpt,
-            social_excerpt=social_excerpt,
-            topic_tags=tags,
-            avoid_titles=variants,
-            target_count=TITLE_VARIANTS_TOPUP_COUNT,
-            api_key=final_api_key
-        )
-        if extra_variants:
-            variants = _dedupe_title_candidates(variants + extra_variants)
-        if next_index >= len(variants):
-            next_index = 0 if len(variants) > 1 else 0
+    next_index = (active_index + 1) % max(1, len(variants))
 
     new_title = _sanitize_short_title(variants[next_index] if variants else current_title) or current_title
     if not new_title:
@@ -4108,41 +4604,51 @@ async def rewrite_clip_social(
     clip_payload = metadata_clips[req.clip_index] if isinstance(metadata_clips[req.clip_index], dict) else {}
     transcript_data = data.get("transcript") if isinstance(data, dict) else None
 
-    current_social = _normalize_space(
+    current_social = _sanitize_social_copy(
         req.current_social
         or clip_payload.get("video_description_for_tiktok")
         or clip_payload.get("video_description_for_instagram")
-        or ""
+        or "",
+        max_chars=320
     )
-    current_title = _normalize_space(
-        clip_payload.get("video_title_for_youtube_short")
-        or clip_payload.get("title")
-        or ""
-    )
-    transcript_excerpt = _normalize_space(
-        clip_payload.get("transcript_excerpt")
-        or _clip_transcript_excerpt(clip_payload, transcript_data, max_chars=420, max_segments=10)
-    )
-    score_reason = _normalize_space(clip_payload.get("score_reason") or "")
-    tags = _normalize_topic_tags(clip_payload.get("topic_tags"))
     final_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
-    if not final_api_key:
-        raise HTTPException(status_code=400, detail="Missing Gemini API key. Set X-Gemini-Key or GEMINI_API_KEY.")
 
-    new_social = _generate_rewritten_social_copy(
-        current_social=current_social,
-        current_title=current_title,
-        transcript_excerpt=transcript_excerpt,
-        score_reason=score_reason,
-        topic_tags=tags,
-        api_key=final_api_key
+    variants, active_index, _ = _ensure_clip_social_variant_pool(
+        clip_payload,
+        transcript=transcript_data,
+        api_key=final_api_key,
+        target_size=SOCIAL_VARIANTS_PER_CLIP
     )
+    if not variants:
+        variants = [current_social] if current_social else [_build_fallback_social_copy("", "", "", "", [])]
+        active_index = 0
+
+    current_fp = _social_fingerprint(current_social)
+    if current_fp:
+        current_match = next((i for i, item in enumerate(variants) if _social_fingerprint(item) == current_fp), None)
+        if current_match is not None:
+            active_index = current_match
+        else:
+            variants = _dedupe_social_candidates([current_social] + variants)
+            active_index = 0
+
+    next_index = (active_index + 1) % max(1, len(variants))
+    new_social = _sanitize_social_copy(variants[next_index] if variants else current_social, max_chars=320)
     if not new_social:
-        raise HTTPException(status_code=500, detail="Could not generate new social copy.")
+        new_social = _build_fallback_social_copy(
+            current_social=current_social,
+            current_title=clip_payload.get("video_title_for_youtube_short") or clip_payload.get("title") or "",
+            transcript_excerpt=clip_payload.get("transcript_excerpt") or "",
+            score_reason=clip_payload.get("score_reason") or "",
+            topic_tags=_normalize_topic_tags(clip_payload.get("topic_tags"))
+        )
+        next_index = 0
 
     clip_patch = {
         "video_description_for_tiktok": new_social,
-        "video_description_for_instagram": new_social
+        "video_description_for_instagram": new_social,
+        "social_variants": variants,
+        "social_variant_index": int(next_index)
     }
 
     try:
@@ -4164,6 +4670,9 @@ async def rewrite_clip_social(
         "clip_index": req.clip_index,
         "previous_social": current_social,
         "new_social": new_social,
+        "social_variants": variants,
+        "social_variant_index": int(next_index),
+        "social_variant_total": len(variants),
         "clip_patch": clip_patch
     }
 
@@ -4238,21 +4747,77 @@ async def recut_clip(req: RecutRequest):
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     os.makedirs(output_dir, exist_ok=True)
 
-    # Cut from original source
+    # Try to find the uncut version of the clip first
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+    source_to_cut = input_path
+    if json_files:
+        base_name = os.path.basename(json_files[0]).replace("_metadata.json", "")
+        uncut_name = f"{base_name}_clip_{req.clip_index + 1}_uncut.mp4"
+        uncut_path = os.path.join(output_dir, uncut_name)
+        if os.path.exists(uncut_path):
+            source_to_cut = uncut_path
+            # Since uncut is already cut to the correct segment, we just use it directly
+            # Or we can cut from it again just to be safe if start/end tweaked
+            print(f"Recutting from uncut variant: {uncut_path}")
+
+    # Cut from source
     temp_cut = os.path.join(output_dir, f"temp_recut_{req.clip_index}_{int(time.time())}.mp4")
     out_name = f"reclip_{req.clip_index+1}_{int(time.time())}.mp4"
     out_path = os.path.join(output_dir, out_name)
 
-    cut_cmd = [
-        'ffmpeg', '-y',
-        '-ss', str(req.start),
-        '-to', str(req.end),
-        '-i', input_path,
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'fast',
-        '-c:a', 'aac',
-        '-movflags', '+faststart',
-        temp_cut
-    ]
+    # Note: If source_to_cut is the uncut clip, it's already bounded to the clip's original start.
+    # However, 'req.start' is absolute relative to the *full* video.
+    # We must adjust the cut command depending on what source we use.
+    if source_to_cut == uncut_path:
+        # The uncut clip starts at the clip's original start time.
+        # We need to find what that original start time was.
+        try:
+            with open(json_files[0], 'r') as f:
+                data = json.load(f)
+            clips = data.get('shorts', [])
+            original_start = 0.0
+            if req.clip_index < len(clips):
+                original_start = clips[req.clip_index].get('start', 0.0)
+            
+            # The requested start might be slightly tweaked by the user
+            relative_start = max(0.0, req.start - original_start)
+            duration = max(0.6, req.end - req.start)
+            
+            cut_cmd = [
+                'ffmpeg', '-y',
+                '-ss', str(relative_start),
+                '-t', str(duration),
+                '-i', source_to_cut,
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'fast',
+                '-c:a', 'aac',
+                '-movflags', '+faststart',
+                temp_cut
+            ]
+        except Exception as e:
+            print(f"Failed to use uncut clip: {e}, falling back to full input")
+            source_to_cut = input_path
+            cut_cmd = [
+                'ffmpeg', '-y',
+                '-ss', str(req.start),
+                '-to', str(req.end),
+                '-i', input_path,
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'fast',
+                '-c:a', 'aac',
+                '-movflags', '+faststart',
+                temp_cut
+            ]
+    else:
+        cut_cmd = [
+            'ffmpeg', '-y',
+            '-ss', str(req.start),
+            '-to', str(req.end),
+            '-i', input_path,
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'fast',
+            '-c:a', 'aac',
+            '-movflags', '+faststart',
+            temp_cut
+        ]
+
     res = subprocess.run(cut_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if res.returncode != 0:
         raise HTTPException(status_code=500, detail=res.stderr.decode())
@@ -4317,7 +4882,9 @@ async def recut_clip(req: RecutRequest):
                 recut_cmd = [
                     "ffmpeg", "-y",
                     "-i", temp_cut,
-                    "-vf", vf_filter,
+                    "-filter_complex", vf_filter,
+                    "-map", "[out_v]",
+                    "-map", "0:a?",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
                     "-c:a", "aac",
                     "-movflags", "+faststart",

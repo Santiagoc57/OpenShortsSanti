@@ -834,19 +834,6 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                     </div>
                     {activeTextTab === 'virality' ? (
                         <div className="space-y-3">
-                            <div className="flex items-center justify-between gap-3">
-                                <div className="text-xs text-zinc-400">Puntaje de viralidad</div>
-                                <div className="text-sm font-semibold text-white">{clipScore}/100</div>
-                            </div>
-                            <div className="h-2 w-full rounded-full bg-white/10 overflow-hidden">
-                                <div
-                                    className="h-full bg-gradient-to-r from-emerald-500 via-amber-400 to-rose-500"
-                                    style={{ width: `${clipScore}%` }}
-                                />
-                            </div>
-                            <div className="text-[11px] text-zinc-400">
-                                Confianza del modelo: <span className="text-zinc-200 font-semibold">{Math.round(clipConfidence * 100)}%</span>
-                            </div>
                             <p className="text-sm text-zinc-300 leading-relaxed break-words">{viralityText}</p>
                         </div>
                     ) : activeTextTab === 'hashtags' ? (

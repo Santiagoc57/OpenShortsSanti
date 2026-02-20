@@ -423,17 +423,19 @@ const extractFilename = (urlOrPath) => {
     const last = clean.split('/').pop() || '';
     try {
       return decodeURIComponent(last);
-    } catch (__){
+    } catch (__) {
       return last;
     }
   }
 };
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-const getMinZoomForFitMode = (fitMode) => (
-  String(fitMode || 'cover').toLowerCase() === 'contain' ? 0.5 : 1.0
-);
-const LAYOUT_OFFSET_FACTOR = 0.35;
+const getMinZoomForFitMode = (fitMode) => {
+  const mode = String(fitMode || 'cover').toLowerCase();
+  return mode === 'contain' || mode === 'blur' ? 0.3 : 1.0;
+};
+const LAYOUT_OFFSET_FACTOR = 1.0;
+const LAYOUT_PAN_MIN_ZOOM = 1.06;
 const LAYOUT_PAN_SENSITIVITY = 120;
 const CAPTION_OFFSET_FACTOR = 0.35;
 const TIMELINE_ZOOM_MIN = 0.55;
@@ -554,6 +556,45 @@ export default function ClipStudioModal({
   const effectiveCaptionOffsetX = Number(captionOffsetX || 0) * CAPTION_OFFSET_FACTOR;
   const effectiveCaptionOffsetY = Number(captionOffsetY || 0) * CAPTION_OFFSET_FACTOR;
 
+  const handleLayoutAspectChange = useCallback((nextAspectRaw) => {
+    const nextAspect = nextAspectRaw === '16:9' ? '16:9' : '9:16';
+    if (nextAspect === layoutAspect) return false;
+    setLayoutAspect(nextAspect);
+    setSavedPulse(false);
+
+    // Avoid carrying stale pan/zoom values between radically different canvases.
+    if (layoutMode === 'single') {
+      if (!layoutAutoSmart) {
+        const nextFitMode = (nextAspect === '16:9' && layoutFitMode === 'cover')
+          ? 'contain'
+          : layoutFitMode;
+        if (nextFitMode !== layoutFitMode) {
+          setLayoutFitMode(nextFitMode);
+        }
+        const minZoom = getMinZoomForFitMode(nextFitMode);
+        setLayoutZoom(clamp(1, minZoom, 2.5));
+      }
+      setLayoutOffsetX(0);
+      setLayoutOffsetY(0);
+      return true;
+    }
+
+    setLayoutSplitZoomA(1);
+    setLayoutSplitZoomB(1);
+    setLayoutSplitOffsetAX(0);
+    setLayoutSplitOffsetAY(0);
+    setLayoutSplitOffsetBX(0);
+    setLayoutSplitOffsetBY(0);
+    return true;
+  }, [
+    layoutAspect,
+    layoutMode,
+    layoutAutoSmart,
+    layoutFitMode
+  ]);
+
+  // No automatic zoom effects on pan.
+
   useEffect(() => {
     const minZoom = getMinZoomForFitMode(layoutFitMode);
     setLayoutZoom((prev) => clamp(Number(prev || 1), minZoom, 2.5));
@@ -573,7 +614,14 @@ export default function ClipStudioModal({
   const [timelineZoom, setTimelineZoom] = useState(TIMELINE_ZOOM_DEFAULT);
   const [timelineMode, setTimelineMode] = useState(TIMELINE_MODE_MINI);
   const [snapEnabled, setSnapEnabled] = useState(true);
-  const [previewVideoUrl, setPreviewVideoUrl] = useState(String(currentVideoUrl || ''));
+  const [previewVideoUrl, setPreviewVideoUrl] = useState('');
+  const [uncutFailed, setUncutFailed] = useState(false);
+
+  // If the user uses manual framing (Auto smart reframe OFF), prefer _uncut.mp4 to show the whole video
+  const uncutVideoUrl = currentVideoUrl ? currentVideoUrl.replace('.mp4', '_uncut.mp4') : '';
+  const isManualLayout = !layoutAutoSmart;
+  const activeSourceUrl = (isManualLayout && !uncutFailed) ? uncutVideoUrl : currentVideoUrl;
+
   const [videoLoadError, setVideoLoadError] = useState('');
   const previewVideoRef = useRef(null);
   const previewSplitVideoRef = useRef(null);
@@ -1150,12 +1198,12 @@ export default function ClipStudioModal({
     };
 
     const sourceUrl = String(currentVideoUrl || '').trim();
-    if (!isOpen) return () => {};
+    if (!isOpen) return () => { };
     if (!sourceUrl) {
       cleanupBlobUrl();
       setPreviewVideoUrl('');
       setVideoLoadError('');
-      return () => {};
+      return () => { };
     }
 
     const isHttp = /^https?:\/\//i.test(sourceUrl);
@@ -1164,7 +1212,7 @@ export default function ClipStudioModal({
       cleanupBlobUrl();
       setPreviewVideoUrl(sourceUrl);
       setVideoLoadError('');
-      return () => {};
+      return () => { };
     }
 
     const isNgrokSource = /ngrok/i.test(sourceUrl);
@@ -1172,7 +1220,7 @@ export default function ClipStudioModal({
       cleanupBlobUrl();
       setPreviewVideoUrl(sourceUrl);
       setVideoLoadError('');
-      return () => {};
+      return () => { };
     }
 
     let cancelled = false;
@@ -1243,7 +1291,7 @@ export default function ClipStudioModal({
     }
     const playPromise = secondary.play();
     if (playPromise && typeof playPromise.catch === 'function') {
-      playPromise.catch(() => {});
+      playPromise.catch(() => { });
     }
   }, [isSplitLayout, previewCurrentTime, previewPlaying, previewVideoUrl, isOpen]);
 
@@ -1318,6 +1366,7 @@ export default function ClipStudioModal({
     let appliedCaptionBoxColor = boxColor;
     let appliedCaptionBoxOpacity = Number(boxOpacity);
     let appliedCaptionKaraokeMode = Boolean(karaokeMode);
+    let subtitleSrtPayload = srtContent || null;
 
     try {
       const clipStart = Number(clip?.start || 0);
@@ -1406,6 +1455,34 @@ export default function ClipStudioModal({
         }
       }
 
+      const clipRangeChangedByRecut = (
+        Math.abs(Number(appliedClipStart || 0) - Number(clipStart || 0)) > 0.01
+        || Math.abs(Number(appliedClipEnd || 0) - Number(clipEnd || 0)) > 0.01
+      );
+      if (captionsOn && clipRangeChangedByRecut) {
+        try {
+          const refreshedSrtRes = await apiFetch('/api/subtitle/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ job_id: jobId, clip_index: clipIndex })
+          });
+          if (refreshedSrtRes.ok) {
+            const refreshedSrtData = await refreshedSrtRes.json();
+            const refreshedEntries = parseSrt(refreshedSrtData?.srt || '');
+            if (Array.isArray(refreshedEntries) && refreshedEntries.length > 0) {
+              setSubtitleEntries(refreshedEntries);
+              subtitleSrtPayload = buildSrt(refreshedEntries, { punctuationOn, emojiOn }) || null;
+            } else {
+              subtitleSrtPayload = null;
+            }
+          } else {
+            subtitleSrtPayload = null;
+          }
+        } catch (_) {
+          subtitleSrtPayload = null;
+        }
+      }
+
       if (captionsOn) {
         const subtitleRes = await apiFetch('/api/subtitle', {
           method: 'POST',
@@ -1425,7 +1502,7 @@ export default function ClipStudioModal({
             karaoke_mode: appliedCaptionKaraokeMode,
             caption_offset_x: appliedCaptionOffsetX,
             caption_offset_y: appliedCaptionOffsetY,
-            srt_content: srtContent || null,
+            srt_content: subtitleSrtPayload,
             input_filename: workingFile || undefined
           })
         });
@@ -1529,7 +1606,7 @@ export default function ClipStudioModal({
     }
   };
 
-  const handleFastPreview = async () => {
+  const handleFastPreview = async (targetAspect = layoutAspect) => {
     if (!jobId) return;
     setIsRenderingFastPreview(true);
     setError('');
@@ -1559,7 +1636,7 @@ export default function ClipStudioModal({
       }
       const playPromise = primary.play();
       if (playPromise && typeof playPromise.catch === 'function') {
-        await playPromise.catch(() => {});
+        await playPromise.catch(() => { });
       }
       setVideoLoadError('');
       setPreviewCurrentTime(relativeStart);
@@ -1579,15 +1656,18 @@ export default function ClipStudioModal({
     };
 
     try {
-      const sourceName = extractFilename(currentVideoUrl);
       const startCandidate = Number.isFinite(Number(layoutStart)) ? Number(layoutStart) : Number(clip?.start || 0);
       const payload = {
         job_id: jobId,
         clip_index: clipIndex,
-        input_filename: sourceName || null,
+        input_filename: null,
         start: Math.max(0, Number(startCandidate || 0)),
         duration: 3.2,
-        aspect_ratio: layoutAspect
+        aspect_ratio: targetAspect === '16:9' ? '16:9' : '9:16',
+        fit_mode: layoutFitMode,
+        zoom: Number(layoutZoom),
+        offset_x: Number(layoutOffsetX),
+        offset_y: Number(layoutOffsetY)
       };
       const res = await apiFetch('/api/clip/fast-preview', {
         method: 'POST',
@@ -1635,7 +1715,7 @@ export default function ClipStudioModal({
     const video = previewVideoRef.current;
     if (!video) return;
     if (video.paused) {
-      video.play().catch(() => {});
+      video.play().catch(() => { });
     } else {
       video.pause();
     }
@@ -1945,7 +2025,7 @@ export default function ClipStudioModal({
                   className={`w-full rounded-xl py-3 px-1 text-center border transition-colors ${active
                     ? 'bg-primary/10 border-primary/40 text-primary'
                     : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700'
-                  }`}
+                    }`}
                 >
                   <Icon size={15} className="mx-auto mb-1" />
                   <div className="text-[11px] leading-tight font-medium">{item.label}</div>
@@ -1993,11 +2073,10 @@ export default function ClipStudioModal({
                           onClick={() => {
                             seekTo(clipRelativeStart);
                           }}
-                          className={`rounded-lg border p-2.5 cursor-pointer transition-colors ${
-                            isActive
-                              ? 'border-violet-400 bg-violet-50 dark:bg-violet-900/25 ring-1 ring-violet-300/70 dark:ring-violet-500/40'
-                              : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700/70'
-                          }`}
+                          className={`rounded-lg border p-2.5 cursor-pointer transition-colors ${isActive
+                            ? 'border-violet-400 bg-violet-50 dark:bg-violet-900/25 ring-1 ring-violet-300/70 dark:ring-violet-500/40'
+                            : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700/70'
+                            }`}
                         >
                           <div className="flex items-center justify-between gap-2 mb-1">
                             <div className={`text-[11px] ${isActive ? 'text-violet-700 dark:text-violet-300 font-semibold' : 'text-slate-500'}`}>
@@ -2043,11 +2122,10 @@ export default function ClipStudioModal({
                       <button
                         type="button"
                         onClick={() => setShowCaptionSettings((v) => !v)}
-                        className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
-                          showCaptionSettings
-                            ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/25 text-violet-700 dark:text-violet-300'
-                            : 'border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
-                        }`}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${showCaptionSettings
+                          ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/25 text-violet-700 dark:text-violet-300'
+                          : 'border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
+                          }`}
                         title={showCaptionSettings ? 'Ocultar opciones de subtítulos' : 'Mostrar opciones de subtítulos'}
                       >
                         <Menu size={14} />
@@ -2110,7 +2188,7 @@ export default function ClipStudioModal({
                             className={`rounded-xl border p-2 text-left transition-colors ${selectedPreset === preset.id
                               ? 'border-violet-400 bg-violet-50 dark:bg-violet-500/10 shadow-[0_0_0_1px_rgba(139,92,246,0.2)]'
                               : 'border-black/10 dark:border-white/10 bg-white/70 dark:bg-white/5 hover:bg-white dark:hover:bg-white/10'
-                            }`}
+                              }`}
                             title={`Aplicar preset ${preset.name}`}
                           >
                             <div
@@ -2175,7 +2253,7 @@ export default function ClipStudioModal({
                           className={`rounded-lg px-2 py-2 text-xs border capitalize ${position === opt
                             ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300'
                             : 'border-black/10 dark:border-white/10 text-zinc-600 dark:text-zinc-300'
-                          }`}
+                            }`}
                         >
                           {opt === 'top' ? 'Arriba' : opt === 'middle' ? 'Centro' : 'Abajo'}
                         </button>
@@ -2200,6 +2278,7 @@ export default function ClipStudioModal({
                             value={captionOffsetX}
                             onChange={(e) => {
                               setCaptionOffsetX(clamp(Number(e.target.value || 0), -100, 100));
+                              setPreviewVideoUrl('');
                               setSavedPulse(false);
                             }}
                             className="w-full mt-2"
@@ -2215,6 +2294,7 @@ export default function ClipStudioModal({
                             value={captionOffsetY}
                             onChange={(e) => {
                               setCaptionOffsetY(clamp(Number(e.target.value || 0), -100, 100));
+                              setPreviewVideoUrl('');
                               setSavedPulse(false);
                             }}
                             className="w-full mt-2"
@@ -2319,113 +2399,112 @@ export default function ClipStudioModal({
                           const entryStart = Number(entry?.start || 0);
                           seekTo(entryStart);
                         }}
-                        className={`rounded-lg border p-2.5 transition-colors cursor-pointer ${
-                          activeSubtitleEntry?.id === entry.id
-                            ? 'border-violet-400 bg-violet-50 dark:bg-violet-900/25 ring-1 ring-violet-300/70 dark:ring-violet-500/40'
-                            : 'border-black/10 dark:border-white/10 bg-white/70 dark:bg-black/20'
-                        }`}
+                        className={`rounded-lg border p-2.5 transition-colors cursor-pointer ${activeSubtitleEntry?.id === entry.id
+                          ? 'border-violet-400 bg-violet-50 dark:bg-violet-900/25 ring-1 ring-violet-300/70 dark:ring-violet-500/40'
+                          : 'border-black/10 dark:border-white/10 bg-white/70 dark:bg-black/20'
+                          }`}
                       >
                         {(() => {
                           const suggestedEmoji = suggestEmojiForText(entry.text);
                           return (
                             <>
-                        <div className="flex items-center justify-between gap-2 mb-1">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span className={`text-[11px] ${activeSubtitleEntry?.id === entry.id ? 'text-violet-700 dark:text-violet-300 font-semibold' : 'text-zinc-500'}`}>
-                              {`${formatSrtTime(entry.start)} - ${formatSrtTime(entry.end)}`}
-                            </span>
-                            {activeSubtitleEntry?.id === entry.id && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-violet-300 bg-violet-100 dark:border-violet-600 dark:bg-violet-900/35 text-violet-700 dark:text-violet-300">
-                                Reproduciendo
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setEmojiPickerForId((prev) => (prev === entry.id ? '' : entry.id));
-                              }}
-                              className={`text-[11px] px-2 py-1 rounded-md border ${emojiPickerForId === entry.id
-                                ? 'border-violet-400 bg-violet-100 dark:bg-violet-500/15 text-violet-700 dark:text-violet-300'
-                                : 'border-black/10 dark:border-white/10 text-zinc-600 dark:text-zinc-300'
-                              }`}
-                              title="Añadir emoji"
-                            >
-                              {entry.emoji ? `Emoji ${entry.emoji}` : 'Emoji'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onSubtitleToggleEmphasis(entry.id);
-                              }}
-                              className={`text-[11px] px-2 py-1 rounded-md border ${entry.emphasize
-                                ? 'border-amber-400 bg-amber-100 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300'
-                                : 'border-black/10 dark:border-white/10 text-zinc-600 dark:text-zinc-300'
-                              }`}
-                            >
-                              Énfasis
-                            </button>
-                            {suggestedEmoji && (!entry.emoji || entry.emoji !== suggestedEmoji) && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onSubtitleEntryEmojiChange(entry.id, suggestedEmoji);
-                                }}
-                                className="text-[11px] px-2 py-1 rounded-md border border-emerald-300 bg-emerald-100/70 dark:border-emerald-700 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300"
-                                title="Sugerencia local por contenido"
-                              >
-                                Sugerir {suggestedEmoji}
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                        {emojiPickerForId === entry.id && (
-                          <div className="mb-2 rounded-md border border-violet-200 bg-violet-50/80 dark:border-violet-800 dark:bg-violet-900/10 p-2">
-                            <div className="flex flex-wrap gap-1.5">
-                              <button
-                                type="button"
-                                onMouseDown={(e) => e.stopPropagation()}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onSubtitleEntryEmojiChange(entry.id, '');
-                                  setEmojiPickerForId('');
-                                }}
-                                className="text-[11px] px-2 py-1 rounded-md border border-black/10 dark:border-white/10 bg-white/70 dark:bg-black/20 text-zinc-600 dark:text-zinc-300"
-                              >
-                                Sin emoji
-                              </button>
-                              {SUBTITLE_EMOJIS.map((emoji) => (
-                                <button
-                                  key={`${entry.id}-${emoji}`}
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onSubtitleEntryEmojiChange(entry.id, emoji);
-                                    setEmojiPickerForId('');
-                                  }}
-                                  onMouseDown={(e) => e.stopPropagation()}
-                                  className={`w-8 h-8 rounded-md border text-base ${entry.emoji === emoji
-                                    ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20'
-                                    : 'border-black/10 dark:border-white/10 bg-white/70 dark:bg-black/20'
-                                  }`}
-                                >
-                                  {emoji}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        <textarea
-                          value={entry.text}
-                          onChange={(e) => onSubtitleEntryChange(entry.id, e.target.value)}
-                          onClick={(e) => e.stopPropagation()}
-                          rows={2}
-                          className="w-full rounded-md border border-black/10 dark:border-white/10 bg-white dark:bg-black/20 p-2 text-sm text-zinc-700 dark:text-zinc-200"
-                        />
+                              <div className="flex items-center justify-between gap-2 mb-1">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className={`text-[11px] ${activeSubtitleEntry?.id === entry.id ? 'text-violet-700 dark:text-violet-300 font-semibold' : 'text-zinc-500'}`}>
+                                    {`${formatSrtTime(entry.start)} - ${formatSrtTime(entry.end)}`}
+                                  </span>
+                                  {activeSubtitleEntry?.id === entry.id && (
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-violet-300 bg-violet-100 dark:border-violet-600 dark:bg-violet-900/35 text-violet-700 dark:text-violet-300">
+                                      Reproduciendo
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setEmojiPickerForId((prev) => (prev === entry.id ? '' : entry.id));
+                                    }}
+                                    className={`text-[11px] px-2 py-1 rounded-md border ${emojiPickerForId === entry.id
+                                      ? 'border-violet-400 bg-violet-100 dark:bg-violet-500/15 text-violet-700 dark:text-violet-300'
+                                      : 'border-black/10 dark:border-white/10 text-zinc-600 dark:text-zinc-300'
+                                      }`}
+                                    title="Añadir emoji"
+                                  >
+                                    {entry.emoji ? `Emoji ${entry.emoji}` : 'Emoji'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onSubtitleToggleEmphasis(entry.id);
+                                    }}
+                                    className={`text-[11px] px-2 py-1 rounded-md border ${entry.emphasize
+                                      ? 'border-amber-400 bg-amber-100 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                                      : 'border-black/10 dark:border-white/10 text-zinc-600 dark:text-zinc-300'
+                                      }`}
+                                  >
+                                    Énfasis
+                                  </button>
+                                  {suggestedEmoji && (!entry.emoji || entry.emoji !== suggestedEmoji) && (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onSubtitleEntryEmojiChange(entry.id, suggestedEmoji);
+                                      }}
+                                      className="text-[11px] px-2 py-1 rounded-md border border-emerald-300 bg-emerald-100/70 dark:border-emerald-700 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300"
+                                      title="Sugerencia local por contenido"
+                                    >
+                                      Sugerir {suggestedEmoji}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                              {emojiPickerForId === entry.id && (
+                                <div className="mb-2 rounded-md border border-violet-200 bg-violet-50/80 dark:border-violet-800 dark:bg-violet-900/10 p-2">
+                                  <div className="flex flex-wrap gap-1.5">
+                                    <button
+                                      type="button"
+                                      onMouseDown={(e) => e.stopPropagation()}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onSubtitleEntryEmojiChange(entry.id, '');
+                                        setEmojiPickerForId('');
+                                      }}
+                                      className="text-[11px] px-2 py-1 rounded-md border border-black/10 dark:border-white/10 bg-white/70 dark:bg-black/20 text-zinc-600 dark:text-zinc-300"
+                                    >
+                                      Sin emoji
+                                    </button>
+                                    {SUBTITLE_EMOJIS.map((emoji) => (
+                                      <button
+                                        key={`${entry.id}-${emoji}`}
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          onSubtitleEntryEmojiChange(entry.id, emoji);
+                                          setEmojiPickerForId('');
+                                        }}
+                                        onMouseDown={(e) => e.stopPropagation()}
+                                        className={`w-8 h-8 rounded-md border text-base ${entry.emoji === emoji
+                                          ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20'
+                                          : 'border-black/10 dark:border-white/10 bg-white/70 dark:bg-black/20'
+                                          }`}
+                                      >
+                                        {emoji}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              <textarea
+                                value={entry.text}
+                                onChange={(e) => onSubtitleEntryChange(entry.id, e.target.value)}
+                                onClick={(e) => e.stopPropagation()}
+                                rows={2}
+                                className="w-full rounded-md border border-black/10 dark:border-white/10 bg-white dark:bg-black/20 p-2 text-sm text-zinc-700 dark:text-zinc-200"
+                              />
                             </>
                           );
                         })()}
@@ -2455,7 +2534,7 @@ export default function ClipStudioModal({
                         className={`rounded-lg px-3 py-2 text-sm border ${layoutMode === 'single'
                           ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300'
                           : 'border-black/10 dark:border-white/10 text-zinc-700 dark:text-zinc-200'
-                        }`}
+                          }`}
                       >
                         Single
                       </button>
@@ -2470,7 +2549,7 @@ export default function ClipStudioModal({
                         className={`rounded-lg px-3 py-2 text-sm border ${layoutMode === 'split'
                           ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300'
                           : 'border-black/10 dark:border-white/10 text-zinc-700 dark:text-zinc-200'
-                        }`}
+                          }`}
                       >
                         Split (2 personas)
                       </button>
@@ -2500,11 +2579,14 @@ export default function ClipStudioModal({
                         <button
                           key={ratio}
                           type="button"
-                          onClick={() => setLayoutAspect(ratio)}
+                          onClick={() => {
+                            const changed = handleLayoutAspectChange(ratio);
+                            if (changed) void handleFastPreview(ratio);
+                          }}
                           className={`rounded-lg px-3 py-2 text-sm border ${layoutAspect === ratio
                             ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300'
                             : 'border-black/10 dark:border-white/10 text-zinc-700 dark:text-zinc-200'
-                          }`}
+                            }`}
                         >
                           {ratio}
                         </button>
@@ -2517,20 +2599,31 @@ export default function ClipStudioModal({
                       <div>
                         <p className="text-xs font-semibold text-zinc-500 mb-2">Ajuste de video</p>
                         <div className="grid grid-cols-2 gap-2">
-                          {['cover', 'contain'].map((mode) => (
+                          {['cover', 'contain', 'blur'].map((mode) => (
                             <button
                               key={mode}
                               type="button"
-                              onClick={() => setLayoutFitMode(mode)}
+                              onClick={() => {
+                                setLayoutFitMode(mode);
+                                setPreviewVideoUrl('');
+                                setSavedPulse(false);
+                              }}
                               className={`rounded-lg px-3 py-2 text-sm border capitalize ${layoutFitMode === mode
                                 ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300'
                                 : 'border-black/10 dark:border-white/10 text-zinc-700 dark:text-zinc-200'
-                              }`}
+                                }`}
                             >
-                              {mode === 'cover' ? 'Cover' : 'Contain'}
+                              {mode === 'cover' ? 'Cover' : mode === 'contain' ? 'Contain' : 'Blur'}
                             </button>
                           ))}
                         </div>
+                        <p className="mt-1 text-[11px] text-zinc-500">
+                          {layoutFitMode === 'contain'
+                            ? 'Contain conserva todo el video y deja barras negras. Usa Cover para llenar todo el ancho/alto.'
+                            : layoutFitMode === 'blur'
+                              ? 'Blur conserva todo el video y rellena los lados con un fondo difuminado.'
+                              : 'Cover rellena todo el cuadro y recorta excedentes para evitar barras.'}
+                        </p>
                       </div>
 
                       <label className="text-xs text-zinc-600 dark:text-zinc-300 block">
@@ -2541,7 +2634,12 @@ export default function ClipStudioModal({
                           max="2.5"
                           step="0.01"
                           value={layoutZoom}
-                          onChange={(e) => setLayoutZoom(clamp(Number(e.target.value || 1), layoutZoomMin, 2.5))}
+                          onChange={(e) => {
+                            const val = clamp(Number(e.target.value || 1), layoutZoomMin, 2.5);
+                            setLayoutZoom(val);
+                            setPreviewVideoUrl('');
+                            setSavedPulse(false);
+                          }}
                           className="w-full mt-2"
                         />
                       </label>
@@ -2554,7 +2652,12 @@ export default function ClipStudioModal({
                           max="100"
                           step="1"
                           value={layoutOffsetX}
-                          onChange={(e) => setLayoutOffsetX(clamp(Number(e.target.value || 0), -100, 100))}
+                          onChange={(e) => {
+                            const next = clamp(Number(e.target.value || 0), -100, 100);
+                            setLayoutOffsetX(next);
+                            setPreviewVideoUrl('');
+                            setSavedPulse(false);
+                          }}
                           className="w-full mt-2"
                         />
                       </label>
@@ -2567,7 +2670,12 @@ export default function ClipStudioModal({
                           max="100"
                           step="1"
                           value={layoutOffsetY}
-                          onChange={(e) => setLayoutOffsetY(clamp(Number(e.target.value || 0), -100, 100))}
+                          onChange={(e) => {
+                            const next = clamp(Number(e.target.value || 0), -100, 100);
+                            setLayoutOffsetY(next);
+                            setPreviewVideoUrl('');
+                            setSavedPulse(false);
+                          }}
                           className="w-full mt-2"
                         />
                       </label>
@@ -2837,13 +2945,27 @@ export default function ClipStudioModal({
                       <div className={`${layoutAspect === '16:9' ? 'w-1/2 h-full' : 'w-full h-1/2'} overflow-hidden relative`}>
                         <video
                           ref={previewVideoRef}
-                          src={previewVideoUrl || currentVideoUrl}
+                          src={previewVideoUrl || activeSourceUrl}
                           className="w-full h-full"
                           style={{
-                            objectFit: layoutFitMode === 'contain' ? 'contain' : 'cover',
-                            objectPosition: splitObjectPositionA,
-                            transform: `scale(${Number(layoutSplitZoomA || 1)})`,
-                            transformOrigin: 'center center'
+                            ...(() => {
+                              const zNum = Number(layoutSplitZoomA || 1);
+                              const effectX = clamp(Number(layoutSplitOffsetAX || 0), -100, 100);
+                              const effectY = clamp(Number(layoutSplitOffsetAY || 0), -100, 100);
+                              const isFastPreview = Boolean(previewVideoUrl);
+
+                              const transX = -(effectX / 100) * ((zNum - 1) / 2) * 100;
+                              const transY = -(effectY / 100) * ((zNum - 1) / 2) * 100;
+
+                              return {
+                                objectFit: isFastPreview ? 'contain' : 'cover',
+                                objectPosition: isFastPreview ? '50% 50%' : splitObjectPositionA,
+                                transform: isFastPreview
+                                  ? 'scale(1)'
+                                  : `scale(${zNum}) translate(${transX}%, ${transY}%)`,
+                                transformOrigin: 'center center'
+                              };
+                            })()
                           }}
                           controls={section !== 'layout' && !isSplitLayout}
                           playsInline
@@ -2884,13 +3006,27 @@ export default function ClipStudioModal({
                       <div className={`${layoutAspect === '16:9' ? 'w-1/2 h-full' : 'w-full h-1/2'} overflow-hidden relative`}>
                         <video
                           ref={previewSplitVideoRef}
-                          src={previewVideoUrl || currentVideoUrl}
+                          src={previewVideoUrl || activeSourceUrl}
                           className="w-full h-full pointer-events-none"
                           style={{
-                            objectFit: layoutFitMode === 'contain' ? 'contain' : 'cover',
-                            objectPosition: splitObjectPositionB,
-                            transform: `scale(${Number(layoutSplitZoomB || 1)})`,
-                            transformOrigin: 'center center'
+                            ...(() => {
+                              const zNum = Number(layoutSplitZoomB || 1);
+                              const effectX = clamp(Number(layoutSplitOffsetBX || 0), -100, 100);
+                              const effectY = clamp(Number(layoutSplitOffsetBY || 0), -100, 100);
+                              const isFastPreview = Boolean(previewVideoUrl);
+
+                              const transX = -(effectX / 100) * ((zNum - 1) / 2) * 100;
+                              const transY = -(effectY / 100) * ((zNum - 1) / 2) * 100;
+
+                              return {
+                                objectFit: isFastPreview ? 'contain' : 'cover',
+                                objectPosition: isFastPreview ? '50% 50%' : splitObjectPositionB,
+                                transform: isFastPreview
+                                  ? 'scale(1)'
+                                  : `scale(${zNum}) translate(${transX}%, ${transY}%)`,
+                                transformOrigin: 'center center'
+                              };
+                            })()
                           }}
                           muted
                           playsInline
@@ -2908,15 +3044,30 @@ export default function ClipStudioModal({
                   ) : (
                     <video
                       ref={previewVideoRef}
-                      src={previewVideoUrl || currentVideoUrl}
+                      src={previewVideoUrl || activeSourceUrl}
                       className="w-full h-full"
                       style={{
-                        objectFit: layoutFitMode === 'contain' ? 'contain' : 'cover',
-                        objectPosition: layoutAutoSmart ? '50% 50%' : manualLayoutObjectPosition,
-                        transform: layoutAutoSmart
-                          ? 'scale(1)'
-                          : `scale(${Number(layoutZoom || 1)})`,
-                        transformOrigin: 'center center'
+                        ...(() => {
+                          const zNum = Number(layoutZoom || 1);
+                          const effectX = clamp(Number(layoutOffsetX || 0), -100, 100);
+                          const effectY = clamp(Number(layoutOffsetY || 0), -100, 100);
+                          const isFastPreview = Boolean(previewVideoUrl);
+
+                          // transX/Y enables panning through the extra overhang created by zNum > 1
+                          // A scale of 1.5 creates a 25% overhang on each edge ((1.5-1)/2).
+                          // We map effect from -100 to 100 to move from +overhang to -overhang.
+                          const transX = -(effectX / 100) * ((zNum - 1) / 2) * 100;
+                          const transY = -(effectY / 100) * ((zNum - 1) / 2) * 100;
+
+                          return {
+                            objectFit: isFastPreview ? 'contain' : 'cover',
+                            objectPosition: (layoutAutoSmart || isFastPreview) ? '50% 50%' : manualLayoutObjectPosition,
+                            transform: (layoutAutoSmart || isFastPreview)
+                              ? 'scale(1)'
+                              : `scale(${zNum}) translate(${transX}%, ${transY}%)`,
+                            transformOrigin: 'center center'
+                          };
+                        })()
                       }}
                       controls={section !== 'layout' && !isSplitLayout}
                       playsInline
@@ -2950,6 +3101,13 @@ export default function ClipStudioModal({
                         const videoEl = e?.currentTarget;
                         const hasFrame = Number(videoEl?.readyState || 0) >= 2 && Number(videoEl?.videoWidth || 0) > 0;
                         if (hasFrame) return;
+
+                        // If we tried to load uncut and it failed (e.g. old clip without uncut), fallback
+                        if (activeSourceUrl === uncutVideoUrl && !uncutFailed) {
+                          setUncutFailed(true);
+                          return;
+                        }
+
                         setVideoLoadError('El navegador no pudo reproducir este archivo en la vista previa.');
                       }}
                     />
@@ -3006,21 +3164,21 @@ export default function ClipStudioModal({
                                 className={idx === karaokePreview.activeIndex ? 'rounded px-1' : ''}
                                 style={idx === karaokePreview.activeIndex
                                   ? {
-                                      color: karaokePreview.activeColor,
-                                      display: 'inline-block',
-                                      marginRight: idx < karaokePreview.words.length - 1 ? '0.42em' : 0,
-                                      transform: 'scale(1.16)',
-                                      fontWeight: 800,
-                                      textShadow: `0 0 ${Math.max(2, Number(strokeWidth || 0) + 1)}px ${strokeColor}`,
-                                      animation: 'subtitleWordIn 180ms cubic-bezier(0.2, 0.7, 0.2, 1) both'
-                                    }
+                                    color: karaokePreview.activeColor,
+                                    display: 'inline-block',
+                                    marginRight: idx < karaokePreview.words.length - 1 ? '0.42em' : 0,
+                                    transform: 'scale(1.16)',
+                                    fontWeight: 800,
+                                    textShadow: `0 0 ${Math.max(2, Number(strokeWidth || 0) + 1)}px ${strokeColor}`,
+                                    animation: 'subtitleWordIn 180ms cubic-bezier(0.2, 0.7, 0.2, 1) both'
+                                  }
                                   : {
-                                      opacity: 0.92,
-                                      display: 'inline-block',
-                                      marginRight: idx < karaokePreview.words.length - 1 ? '0.42em' : 0,
-                                      transform: 'translateY(0px) scale(1)',
-                                      transition: 'opacity 120ms ease'
-                                    }}
+                                    opacity: 0.92,
+                                    display: 'inline-block',
+                                    marginRight: idx < karaokePreview.words.length - 1 ? '0.42em' : 0,
+                                    transform: 'translateY(0px) scale(1)',
+                                    transition: 'opacity 120ms ease'
+                                  }}
                               >
                                 {word}
                               </span>
@@ -3091,11 +3249,10 @@ export default function ClipStudioModal({
                       <button
                         type="button"
                         onClick={() => setTimelineMode(TIMELINE_MODE_MINI)}
-                        className={`h-8 px-2.5 text-xs font-semibold transition-colors ${
-                          timelineMode === TIMELINE_MODE_MINI
-                            ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300'
-                            : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                        }`}
+                        className={`h-8 px-2.5 text-xs font-semibold transition-colors ${timelineMode === TIMELINE_MODE_MINI
+                          ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                          }`}
                         title="Vista mini"
                       >
                         Mini
@@ -3103,11 +3260,10 @@ export default function ClipStudioModal({
                       <button
                         type="button"
                         onClick={() => setTimelineMode(TIMELINE_MODE_ADVANCED)}
-                        className={`h-8 px-2.5 text-xs font-semibold transition-colors ${
-                          timelineMode === TIMELINE_MODE_ADVANCED
-                            ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300'
-                            : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                        }`}
+                        className={`h-8 px-2.5 text-xs font-semibold transition-colors ${timelineMode === TIMELINE_MODE_ADVANCED
+                          ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                          }`}
                         title="Vista avanzada"
                       >
                         Avanzado
@@ -3134,11 +3290,10 @@ export default function ClipStudioModal({
                     <button
                       type="button"
                       onClick={() => setSnapEnabled((v) => !v)}
-                      className={`h-8 px-2.5 rounded-md border text-xs font-semibold inline-flex items-center gap-1.5 ${
-                        snapEnabled
-                          ? 'border-emerald-300 bg-emerald-100 text-emerald-700 dark:border-emerald-700/60 dark:bg-emerald-900/30 dark:text-emerald-300'
-                          : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
-                      }`}
+                      className={`h-8 px-2.5 rounded-md border text-xs font-semibold inline-flex items-center gap-1.5 ${snapEnabled
+                        ? 'border-emerald-300 bg-emerald-100 text-emerald-700 dark:border-emerald-700/60 dark:bg-emerald-900/30 dark:text-emerald-300'
+                        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
+                        }`}
                       title="Snap magnético a transcript"
                     >
                       <Crosshair size={13} />

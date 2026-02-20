@@ -2,18 +2,28 @@ import os
 import re
 import subprocess
 import unicodedata
+import shutil
 from functools import lru_cache
 
 _FONT_ALIAS_MAP = {
-    "montserrat": "Montserrat Bold",
-    "montserrat bold": "Montserrat Bold",
-    "anton": "Anton",
-    "archivo black": "Archivo Black",
-    "bebas neue": "Bebas Neue",
-    "bebas": "Bebas Neue",
-    "oswald": "Oswald Bold",
-    "teko": "Teko Bold",
-    "teko light": "Teko Bold",
+    # Keep canonical family names to avoid libass fallback on style/fullname mismatches.
+    # Prefer styled fullnames first (when available), then family fallback.
+    "montserrat": ("Montserrat Bold", "Montserrat SemiBold", "Montserrat"),
+    "montserrat bold": ("Montserrat Bold", "Montserrat"),
+    "montserrat semibold": ("Montserrat SemiBold", "Montserrat"),
+    "montserrat extrabold": ("Montserrat ExtraBold", "Montserrat Black", "Montserrat"),
+    "montserrat black": ("Montserrat Black", "Montserrat ExtraBold", "Montserrat"),
+    "anton": ("Anton",),
+    "archivo black": ("Archivo Black",),
+    "bebas neue": ("Bebas Neue",),
+    "bebas": ("Bebas Neue",),
+    "oswald": ("Oswald Bold", "Oswald SemiBold", "Oswald"),
+    "oswald bold": ("Oswald Bold", "Oswald"),
+    "oswald semibold": ("Oswald SemiBold", "Oswald"),
+    "teko": ("Teko Bold", "Teko SemiBold", "Teko"),
+    "teko light": ("Teko", "Teko Regular"),
+    "teko bold": ("Teko Bold", "Teko"),
+    "teko semibold": ("Teko SemiBold", "Teko"),
     "arial": "Arial",
     "arial black": "Anton",
     "verdana": "Verdana",
@@ -28,8 +38,50 @@ def _normalize_font_key(value: str) -> str:
     text = re.sub(r"\s+", " ", text)
     return text
 
+def _bundled_fonts_dir() -> str:
+    return os.path.join(os.path.dirname(__file__), "dashboard", "public", "fonts")
+
+def _register_bundled_fonts_for_fontconfig() -> None:
+    """
+    Make bundled fonts discoverable in headless environments (e.g. Colab).
+    Copying to user font dir avoids relying only on subtitles/ass fontsdir behavior.
+    """
+    src_dir = _bundled_fonts_dir()
+    if not os.path.isdir(src_dir):
+        return
+    dst_dir = os.path.expanduser("~/.local/share/fonts/openshorts")
+    try:
+        os.makedirs(dst_dir, exist_ok=True)
+    except Exception:
+        return
+
+    copied_any = False
+    for name in os.listdir(src_dir):
+        if not name.lower().endswith((".ttf", ".otf")):
+            continue
+        src = os.path.join(src_dir, name)
+        if not os.path.isfile(src):
+            continue
+        dst = os.path.join(dst_dir, name)
+        try:
+            src_size = os.path.getsize(src)
+            dst_size = os.path.getsize(dst) if os.path.isfile(dst) else -1
+            if src_size != dst_size:
+                shutil.copy2(src, dst)
+                copied_any = True
+        except Exception:
+            continue
+
+    try:
+        # Run quietly; if unavailable, caller still has fontsdir fallback in ffmpeg filter.
+        if copied_any:
+            subprocess.run(["fc-cache", "-f", dst_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except Exception:
+        pass
+
 @lru_cache(maxsize=1)
 def _load_available_font_families():
+    _register_bundled_fonts_for_fontconfig()
     families = set()
     try:
         proc = subprocess.run(
@@ -47,7 +99,7 @@ def _load_available_font_families():
     except Exception:
         pass
     # Include bundled families shipped with the project for deterministic exports.
-    fonts_dir = os.path.join(os.path.dirname(__file__), "dashboard", "public", "fonts")
+    fonts_dir = _bundled_fonts_dir()
     bundled = {
         "Montserrat-Bold.ttf": ["montserrat", "montserrat regular", "montserrat semibold", "montserrat bold", "montserrat extrabold", "montserrat black"],
         "Anton-Regular.ttf": ["anton", "anton regular"],
@@ -72,9 +124,11 @@ def _sanitize_font_name(font_name: str, fallback: str = "Anton") -> str:
             return ""
         key = _normalize_font_key(candidate_name)
         mapped = _FONT_ALIAS_MAP.get(key, candidate_name)
-        mapped_key = _normalize_font_key(mapped)
-        if mapped_key in available:
-            return mapped
+        mapped_candidates = mapped if isinstance(mapped, (tuple, list)) else (mapped,)
+        for mapped_name in mapped_candidates:
+            mapped_key = _normalize_font_key(mapped_name)
+            if mapped_key in available:
+                return str(mapped_name)
         return ""
 
     if not requested:
@@ -85,11 +139,10 @@ def _sanitize_font_name(font_name: str, fallback: str = "Anton") -> str:
                 return chosen
         return "Arial"
 
-    key = _normalize_font_key(requested)
-    candidate = _FONT_ALIAS_MAP.get(key, requested)
-    candidate_key = _normalize_font_key(candidate)
-    if candidate_key in available:
-        return candidate
+    chosen_requested = pick_available(requested)
+    if chosen_requested:
+        return chosen_requested
+
     # Stable fallback chain to avoid random decorative system fonts in headless envs.
     for pref in [fallback, "Anton", "Archivo Black", "Bebas Neue", "Oswald", "Teko", "Montserrat", "Arial", "Verdana", "DejaVu Sans", "Noto Sans"]:
         chosen = pick_available(pref)
@@ -230,15 +283,10 @@ def _parse_srt_entries(srt_text: str):
     return entries
 
 def _ass_alignment_from_position(alignment) -> int:
-    ass_alignment = 2
-    align_lower = str(alignment).lower()
-    if align_lower == "top":
-        ass_alignment = 6
-    elif align_lower == "middle":
-        ass_alignment = 10
-    elif align_lower == "bottom":
-        ass_alignment = 2
-    return ass_alignment
+    # We now strictly use ASS alignment 5 (middle-center) for all positions,
+    # and achieve vertical placement matching the CSS by overriding the Y coordinate.
+    # This exactly mimics `transform: translate(-50%, -50%)` in the UI.
+    return 5
 
 def _normalize_text(value: str) -> str:
     text = str(value or "").lower()
@@ -265,11 +313,8 @@ def _pick_emotion_color(text: str, fallback: str = "#39FF14") -> str:
     return fallback
 
 def _entry_anchor_for_alignment(ass_alignment: int):
-    if ass_alignment == 6:
-        return 540, 230, 205
-    if ass_alignment == 10:
-        return 540, 1000, 972
-    return 540, 1675, 1648
+    # Deprecated/unused mostly, but preserved for signature
+    return 540, 1000, 972
 
 def _clamp_percent(value: float) -> float:
     try:
@@ -278,25 +323,34 @@ def _clamp_percent(value: float) -> float:
         raw = 0.0
     return max(-100.0, min(100.0, raw))
 
-def _caption_anchor_point(ass_alignment: int, offset_x: float = 0.0, offset_y: float = 0.0):
-    base_x = 540
-    if ass_alignment == 6:
-        base_y = 220
-    elif ass_alignment == 10:
-        base_y = 960
+def _caption_anchor_point(alignment_str: str, offset_x: float = 0.0, offset_y: float = 0.0):
+    # Match the CSS percentages exactly:
+    # top: 20%, middle: 50%, bottom: 80%
+    align_lower = str(alignment_str).lower()
+    if align_lower == "top":
+        base_y_percent = 20.0
+    elif align_lower == "middle":
+        base_y_percent = 50.0
     else:
-        base_y = 1680
+        base_y_percent = 80.0
 
-    # Same perceptual scale used in editor preview for manual offset.
-    shift_x = int(round((_clamp_percent(offset_x) / 100.0) * 378.0))
-    shift_y = int(round((_clamp_percent(offset_y) / 100.0) * 672.0))
+    # UI offsets are percentages of the container. 
+    # CSS: left: calc(50% + {offset_x}%)
+    #      top: calc({base_y}% + {offset_y}%)
+    final_x_percent = 50.0 + _clamp_percent(offset_x)
+    final_y_percent = base_y_percent + _clamp_percent(offset_y)
 
-    x = max(80, min(1000, base_x + shift_x))
-    y = max(120, min(1820, base_y + shift_y))
+    # Convert to 1080x1920 canvas
+    x = int(round((final_x_percent / 100.0) * 1080.0))
+    y = int(round((final_y_percent / 100.0) * 1920.0))
+    
+    # Clamp to reasonable bounds so it doesn't disappear completely off-screen
+    x = max(80, min(1000, x))
+    y = max(80, min(1840, y))
     return x, y
 
-def _entry_anchor_for_alignment_with_offset(ass_alignment: int, offset_x: float = 0.0, offset_y: float = 0.0):
-    x, y = _caption_anchor_point(ass_alignment, offset_x=offset_x, offset_y=offset_y)
+def _entry_anchor_for_alignment_with_offset(alignment_str: str, offset_x: float = 0.0, offset_y: float = 0.0):
+    x, y = _caption_anchor_point(alignment_str, offset_x=offset_x, offset_y=offset_y)
     return x, y + 24, y
 
 def generate_styled_ass_from_srt(
@@ -319,7 +373,9 @@ def generate_styled_ass_from_srt(
         return False
 
     ass_alignment = _ass_alignment_from_position(alignment)
-    final_fontsize = max(10, int(font_size))
+    # The frontend uses a narrow container (~420px) but the backend renders at 1080px.
+    # To match the relative visual size in the React UI where font looks larger, we scale by 1.5.
+    final_fontsize = max(10, int(float(font_size) * 1.5))
     safe_font_name = _sanitize_font_name(font_name)
     box_alpha = int(255 * (1 - max(0, min(100, int(box_opacity))) / 100))
     primary = _hex_to_ass_color(font_color, alpha=0)
@@ -352,7 +408,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         alignment=ass_alignment
     )
 
-    anchor_x, anchor_y = _caption_anchor_point(ass_alignment, offset_x=offset_x, offset_y=offset_y)
+    anchor_x, anchor_y = _caption_anchor_point(alignment, offset_x=offset_x, offset_y=offset_y)
     dialogue_lines = []
     for entry in entries:
         line_text = _escape_ass_text(str(entry.get("text", "")).strip()).replace("\n", r"\N")
@@ -393,7 +449,8 @@ def generate_karaoke_ass_from_srt(
         return False
 
     ass_alignment = _ass_alignment_from_position(alignment)
-    final_fontsize = max(12, int(font_size))
+    # Equivalent 1.5x scaling for karaoke to match React UI.
+    final_fontsize = max(12, int(float(font_size) * 1.5))
     safe_font_name = _sanitize_font_name(font_name)
     box_alpha = int(255 * (1 - max(0, min(100, int(box_opacity))) / 100))
     primary = _hex_to_ass_color(font_color, alpha=0)
@@ -438,7 +495,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     dialogue_lines = []
     anchor_x, anchor_from_y, anchor_to_y = _entry_anchor_for_alignment_with_offset(
-        ass_alignment,
+        alignment,
         offset_x=offset_x,
         offset_y=offset_y
     )
@@ -573,29 +630,49 @@ def burn_subtitles(
     if os.path.isdir(fonts_dir):
         safe_fonts_dir = fonts_dir.replace('\\', '/').replace(':', '\\:')
 
+    filter_candidates = []
     is_ass_input = str(srt_path or "").lower().endswith(".ass")
     if is_ass_input:
-        vf_subtitles = f"subtitles='{safe_srt_path}'"
+        # Prefer ASS-native filter for better style fidelity (font family, box, karaoke tags, spacing).
+        vf_ass = f"ass='{safe_srt_path}'"
+        if safe_fonts_dir:
+            vf_ass = f"{vf_ass}:fontsdir='{safe_fonts_dir}'"
+        filter_candidates.append(("ass", vf_ass))
+
+        # Fallback for environments where ffmpeg was built without `ass` filter.
+        vf_sub_fallback = f"subtitles='{safe_srt_path}'"
+        if safe_fonts_dir:
+            vf_sub_fallback = f"{vf_sub_fallback}:fontsdir='{safe_fonts_dir}'"
+        filter_candidates.append(("subtitles-fallback", vf_sub_fallback))
     else:
         vf_subtitles = f"subtitles='{safe_srt_path}':force_style='{style_string}'"
-    if safe_fonts_dir:
-        vf_subtitles = f"{vf_subtitles}:fontsdir='{safe_fonts_dir}'"
+        if safe_fonts_dir:
+            vf_subtitles = f"{vf_subtitles}:fontsdir='{safe_fonts_dir}'"
+        filter_candidates.append(("subtitles", vf_subtitles))
 
-    cmd = [
-        'ffmpeg', '-y',
-        '-i', video_path,
-        '-vf', vf_subtitles,
-        '-c:a', 'copy',
-        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23',
-        '-movflags', '+faststart',
-        output_path
-    ]
-    
-    print(f"🎬 Burning subtitles: {' '.join(cmd)}")
-    result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    
-    if result.returncode != 0:
-        print(f"❌ FFmpeg Subtitle Error: {result.stderr.decode()}")
-        raise Exception(f"FFmpeg failed: {result.stderr.decode()}")
+    last_err = ""
+    for idx, (filter_name, vf_subtitles) in enumerate(filter_candidates):
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', video_path,
+            '-vf', vf_subtitles,
+            '-c:a', 'copy',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23',
+            '-movflags', '+faststart',
+            output_path
+        ]
+
+        print(f"🎬 Burning subtitles ({filter_name}): {' '.join(cmd)}")
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if result.returncode == 0:
+            return True
+
+        last_err = result.stderr.decode(errors="ignore")
+        print(f"⚠️ FFmpeg subtitle render failed with {filter_name}: {last_err}")
+        if idx < len(filter_candidates) - 1:
+            print("↪️ Trying subtitle render fallback...")
+            continue
+
+    raise Exception(f"FFmpeg failed: {last_err}")
 
     return True
