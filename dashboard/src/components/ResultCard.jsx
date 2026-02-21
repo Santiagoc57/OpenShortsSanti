@@ -26,7 +26,7 @@ const buildTranscriptExcerpt = (segments, clipStart, clipEnd, maxChars = 420) =>
     return excerpt;
 };
 
-export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobId, uploadPostKey, uploadUserId, geminiApiKey, onPlay, onPause, onOpenStudio, onSocialPosted }) {
+export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobId, uploadPostKey, uploadUserId, geminiApiKey, onPlay, onPause, onOpenStudio, onSocialPosted, onClipPatched }) {
     const [showModal, setShowModal] = useState(false);
     const [showStudioModal, setShowStudioModal] = useState(false);
     const [showRecutModal, setShowRecutModal] = useState(false);
@@ -315,6 +315,13 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
             });
             setTitleOverride(nextTitle);
             setPostTitle(nextTitle);
+            onClipPatched && onClipPatched({
+                clipIndex: Number(clipIndex),
+                clipPatch: {
+                    video_title_for_youtube_short: nextTitle,
+                    title: nextTitle
+                }
+            });
             if (notice) {
                 setEditError(notice);
                 setTimeout(() => setEditError(null), 3500);
@@ -332,6 +339,13 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
             });
             setTitleOverride(nextTitle);
             setPostTitle(nextTitle);
+            onClipPatched && onClipPatched({
+                clipIndex: Number(clipIndex),
+                clipPatch: {
+                    video_title_for_youtube_short: nextTitle,
+                    title: nextTitle
+                }
+            });
             setEditError(null);
         };
         try {
@@ -353,6 +367,17 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
             if (!nextTitle) throw new Error('No se recibió un título nuevo.');
             setTitleOverride(nextTitle);
             setPostTitle(nextTitle);
+            onClipPatched && onClipPatched({
+                clipIndex: Number(clipIndex),
+                clipPatch: data?.clip_patch || {
+                    video_title_for_youtube_short: nextTitle,
+                    title: nextTitle,
+                    ...(Array.isArray(data?.title_variants) ? { title_variants: data.title_variants } : {}),
+                    ...(Number.isFinite(Number(data?.title_variant_index))
+                        ? { title_variant_index: Number(data.title_variant_index) }
+                        : {})
+                }
+            });
         } catch (e) {
             const msg = String(e?.message || '');
             const lower = msg.toLowerCase();
@@ -442,6 +467,17 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
             setSocialOverride(nextSocial);
             setPostDescription(nextSocial);
             setActiveTextTab('social');
+            onClipPatched && onClipPatched({
+                clipIndex: Number(clipIndex),
+                clipPatch: data?.clip_patch || {
+                    video_description_for_tiktok: nextSocial,
+                    video_description_for_instagram: nextSocial,
+                    ...(Array.isArray(data?.social_variants) ? { social_variants: data.social_variants } : {}),
+                    ...(Number.isFinite(Number(data?.social_variant_index))
+                        ? { social_variant_index: Number(data.social_variant_index) }
+                        : {})
+                }
+            });
         } catch (e) {
             const msg = String(e?.message || '');
             const lower = msg.toLowerCase();

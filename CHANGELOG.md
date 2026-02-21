@@ -1,5 +1,202 @@
 # Registro de Cambios
 
+## 2026-02-21
+
+### Corregido: “Regenerar” ahora rota variantes pre-generadas (sin depender siempre de Gemini en vivo)
+- Qué cambiamos:
+  - En `app.py` (`/api/clip/retitle` y `/api/clip/resocial`) se eliminó la dependencia rígida de `X-Gemini-Key` para poder rotar variantes ya existentes.
+  - Ambos endpoints ahora intentan API key en este orden:
+    - header `X-Gemini-Key`
+    - key guardada en `job.env.GEMINI_API_KEY`
+    - `GEMINI_API_KEY` del entorno del backend
+  - Si no hay key, igual rotan el pool pre-calculado y/o completan con fallback local del backend.
+- Para qué sirve:
+  - `Regenerar` responde rápido y estable aun cuando no haya cuota/API key disponible en ese momento.
+  - Se mantiene el flujo “5 variantes título + 5 variantes social” sin bloquearse por red/cuota.
+
+### Corregido: sincronización de estado de variantes en UI (evita que se “pierdan” al refrescar/re-render)
+- Qué cambiamos:
+  - En `dashboard/src/components/ResultCard.jsx`, al regenerar título/social se envía `clip_patch` al estado global.
+  - En `dashboard/src/App.jsx` se conecta `ResultCard` con `onClipPatched={handleStudioClipPatched}`.
+- Para qué sirve:
+  - Los cambios de título/social quedan reflejados en la lista principal, no solo en estado local del card.
+  - Evita inconsistencias cuando entra polling o se vuelve a pintar la vista.
+
+### Corregido: preview rápido de subtítulos usa el mismo motor de render del export
+- Qué cambiamos:
+  - En `app.py` (`/api/clip/fast-preview`) se añadieron parámetros de estilo de subtítulo (`font`, `stroke`, `box`, `karaoke`, offsets, `srt_content`, etc.).
+  - El endpoint ahora puede generar ASS + quemar subtítulos en el preview con `generate_styled_ass_from_srt` / `generate_karaoke_ass_from_srt` + `burn_subtitles` (mismo pipeline del export final).
+  - Se agregó ajuste de SRT al rango temporal del preview para que el texto corresponda al recorte mostrado.
+  - En `dashboard/src/components/ClipStudioModal.jsx` el request de `Preview rápido` ahora envía toda la configuración de subtítulos + SRT editado.
+  - Cuando el preview llega con subtítulos ya quemados, la UI oculta la superposición React para evitar doble render.
+- Para qué sirve:
+  - Reduce la desalineación entre lo que ves en preview y lo que sale en “Aplicar / Exportar”.
+  - Evita casos de subtítulos distintos en UI vs video final.
+
+## 2026-02-20
+
+### Ajustado: vista dedicada de Super Trailer (foco + transcript a la derecha)
+- Qué cambiamos:
+  - En `dashboard/src/App.jsx` se agregó un layout exclusivo para proyectos en modo `Super Trailer`:
+    - columna izquierda con foco en el reproductor del trailer y pestañas `Transcript / Social / Ajustes`,
+    - columna derecha con `Sincronía de transcript` fija (filtro + salto por segmento).
+  - En ese modo se ocultan los bloques de lista/búsqueda de “otros clips” para no mezclar flujos.
+  - El botón de cada segmento del transcript ahora busca y reproduce directamente en el reproductor del trailer.
+- Para qué sirve:
+  - Hace que el modo Super Trailer tenga una experiencia más clara y cercana al diseño que pediste.
+  - Prioriza revisión rápida del trailer + navegación por transcript en el panel derecho.
+
+### Nuevo: control de cantidad de segmentos en Super Trailer
+- Qué cambiamos:
+  - En `dashboard/src/components/MediaInput.jsx` se agregó el campo `Segmentos destacados (Super Trailer)` (rango 2-12, default 6).
+  - En `dashboard/src/App.jsx` ahora se envía `trailer_fragments_target` al backend en JSON y `FormData`.
+  - En `app.py` (`POST /api/process`) se recibe/valida `trailer_fragments_target` y se pasa a `main.py` con `--trailer-fragments-target`.
+  - En `main.py`:
+    - se añadió el flag `--trailer-fragments-target`,
+    - el prompt del LLM ahora sugiere explícitamente el objetivo de fragmentos,
+    - el pipeline normaliza, completa con fallback y limita los `trailer_fragments` al objetivo configurado.
+- Para qué sirve:
+  - Te permite decidir cuántos momentos destacados debe tener cada Super Trailer desde la UI.
+  - Reduce variaciones aleatorias en el número de fragmentos cuando el LLM responde con más o menos momentos de los esperados.
+
+### Corregido: Super Trailer en editor mostraba timeline/subtítulos vacíos o desfasados
+- Qué cambiamos:
+  - En `main.py` se corrigió `_probe_media_duration_seconds` con fallback a `ffmpeg -i` cuando no existe `ffprobe` (caso común en local/macOS).
+  - En `main.py` (modo `--trailer-only`) ahora se construye un transcript sintético del trailer (`transcript_segments`) alineado al montaje de fragmentos y se marca `transcript_timebase: clip`.
+  - En `app.py` se añadió reparación automática de trailers persistidos con rango incorrecto (`end=3.0`) para recalcular duración real desde el archivo.
+  - En `app.py` (`/api/subtitle` y `/api/subtitle/preview`) ahora se usa transcript por-clip cuando existe (`transcript_segments`) antes de caer al transcript global.
+  - En `dashboard/src/components/ClipStudioModal.jsx` el editor prioriza `clip.transcript_segments` para poblar transcripción en la línea de tiempo.
+  - En `main.py` y `app.py` se agregaron marcadores de transición para trailer (`transition_points`/`fragment_ranges`) y en `ClipStudioModal` ahora se dibujan en la línea de tiempo.
+- Para qué sirve:
+  - Evita que el Super Trailer se vea bien pero quede sin escenas/subtítulos útiles en el editor.
+  - Alinea mejor subtítulos/timeline con el contenido real del trailer.
+  - Hace visible dónde ocurren los crossfades del trailer dentro del timeline.
+
+### Nuevo: selector mosaico de modo de generación (Clips virales vs Super Trailer)
+- Que cambiamos:
+  - En `dashboard/src/components/MediaInput.jsx` se agregó selector tipo mosaico para elegir entre:
+    - `Clips virales`
+    - `Super Trailer`
+  - El botón final del modal ahora adapta su texto según el modo elegido.
+  - En modo `Super Trailer`, el campo de número de clips queda deshabilitado con aviso.
+  - En `dashboard/src/App.jsx` se envían `generation_mode` y `build_trailer` al backend.
+  - En `app.py` (`/api/process`) se añadieron los parámetros `generation_mode` y `build_trailer`, mapeados a flags de `main.py`.
+  - En `main.py` se agregaron:
+    - `--trailer-only` para omitir render de clips y generar solo trailer.
+    - fallback de `trailer_fragments` cuando el LLM no entrega suficientes fragmentos.
+- Para que sirve:
+  - Permite un flujo separado y claro para generar solo Super Trailer desde el inicio.
+  - Deja la base preparada para añadir más “habilidades” en el mosaico.
+
+### Corregido: en modo Super Trailer ahora aparece video y edición como en clips
+- Que cambiamos:
+  - En `main.py`, cuando se usa `--trailer-only`, se guarda un clip sintético en `shorts` apuntando al trailer generado.
+  - En `app.py` (`run_job`) se dejó de sobreescribir ciegamente `video_url`; ahora respeta la URL real del clip/trailer si existe en disco.
+  - En `app.py` (`_materialize_result_from_metadata`) se propaga `latest_trailer_url` al resultado y se crea clip sintético al recuperar jobs si no hay clips.
+- Para que sirve:
+  - Evita que el proyecto quede “completado” sin video visible.
+  - Habilita el mismo flujo de edición/subtítulos/transcripción sobre el Super Trailer.
+
+### Corregido: estabilidad de render en Super Trailer (freeze visual/audio desfasado)
+- Que cambiamos:
+  - En `main.py` (`build_super_trailer`) se hizo robusto el pipeline:
+    - limpia archivos temporales/salida previa antes de generar,
+    - valida retorno y tamaño real de cada fragmento extraído,
+    - corrige duración fallback cuando `ffprobe` no devuelve duración válida,
+    - evita considerar éxito solo por “archivo existe”.
+  - Se reemplazó el comando shell por llamada estructurada a `ffmpeg` y se forzó salida CFR (`-r 30 -vsync cfr -shortest`) para mayor compatibilidad de reproducción.
+  - Si el montaje con `xfade` falla, ahora aplica fallback automático a concatenación simple (hard-cut), para no romper el trailer.
+- Para que sirve:
+  - Reduce casos donde el video se queda congelado mientras el audio continúa.
+  - Evita reutilizar archivos corruptos de intentos anteriores.
+
+### Corregido: Super Trailer fallaba por import legacy de PySceneDetect en autocrop
+- Que cambiamos:
+  - En `autocrop.py` se actualizó `detect_scenes` para soportar ambas APIs:
+    - `scenedetect.detect_scenes` (si existe)
+    - `scenedetect.detect` (fallback)
+  - También se agregó fallback de `ContentDetector` desde `scenedetect.detectors`.
+  - En `main.py`, cuando falla el análisis de escenas en `process_video_to_vertical`, ahora intenta copiar el video de entrada al output y retornar éxito si el archivo quedó generado.
+- Para que sirve:
+  - Evita que `Super Trailer` termine en `500` por incompatibilidad de versión de `scenedetect`.
+  - Permite que el trailer salga aunque el autoanálisis de escenas falle.
+
+### Corregido: compatibilidad de import con PySceneDetect
+- Que cambiamos:
+  - En `main.py` se agregó fallback de import para usar `detect_scenes` o `detect` según la versión instalada de `scenedetect`.
+  - También se añadió fallback para `ContentDetector` desde `scenedetect.detectors` cuando no está exportado en el módulo raíz.
+  - En `app.py` (smart reframe) se aplicó el mismo patrón de compatibilidad.
+- Para que sirve:
+  - Evita el error `ImportError: cannot import name 'detect_scenes' from 'scenedetect'`.
+  - Permite procesar clips aunque cambie la API entre versiones de PySceneDetect.
+
+### Ajustado: “Eliminar todos” ahora borra también en backend (definitivo)
+- Que cambiamos:
+  - En `app.py` se agregó endpoint `DELETE /api/jobs/all` para limpiar jobs no activos en memoria, SQLite y artefactos en `output/` y `uploads/`.
+  - En `dashboard/src/App.jsx`, el botón `Eliminar todos` ahora llama ese endpoint antes de limpiar estado local.
+  - También limpia `openshortsProjectsV1` de `localStorage` para evitar repoblado local.
+- Para que sirve:
+  - Evita que reaparezcan “proyectos recuperados” después de recargar.
+  - Hace el borrado realmente persistente para proyectos no activos.
+
+### Ajustado: se removió la funcionalidad de “Highlight reel” en la UI
+- Que cambiamos:
+  - En `dashboard/src/App.jsx` se eliminó:
+    - botón `Generar highlight reel`,
+    - selector `Reel ratio`,
+    - bloque visual de resultado `Highlight reel`.
+  - También se removieron handlers/estados de highlight reel y el auto-disparo al completar procesamiento.
+  - En `dashboard/src/components/MediaInput.jsx` se quitó la opción de formato `Highlight reel` del modal de configuración.
+- Para que sirve:
+  - Simplifica el flujo de generación dejando solo clips y trailer.
+  - Evita que aparezca una función que ya no necesitas.
+
+### Ajustado: filtros de proyectos más claros + botón “Eliminar todos”
+- Que cambiamos:
+  - En `dashboard/src/App.jsx` se mejoró el contraste/legibilidad de los botones de filtro `Todos` y `Favoritos`, con etiqueta + contador separado.
+  - Se reforzó el estado activo de esos filtros con color primario + texto blanco y ancho mínimo para que la etiqueta no se pierda visualmente.
+  - Se agregó botón `Eliminar todos` en la cabecera de `Mis proyectos`, con confirmación de seguridad.
+- Para que sirve:
+  - Evita confusión cuando el botón activo no se alcanza a leer.
+  - Permite limpiar toda la lista de proyectos en un solo paso.
+
+### Ajustado: Groq removido del frontend (flujo simplificado a Gemini)
+- Que cambiamos:
+  - En `dashboard/src/components/MediaInput.jsx` se eliminó el selector de proveedor/modelos Groq y la generación ahora envía `llm_provider: gemini` de forma fija.
+  - En `dashboard/src/components/KeyInput.jsx` se eliminó la sección de API Key de Groq.
+  - En `dashboard/src/App.jsx` se removieron estados/props de Groq y se limpia `groq_key_v1` del `localStorage`.
+- Para que sirve:
+  - Evita bloqueos por límites de Groq y reduce complejidad operativa.
+  - Mantiene una sola ruta estable de generación con Gemini.
+
+### Corregido: reintento automatico en Groq cuando hay rate limit (429) + fallback a Gemini
+- Que cambiamos:
+  - En `main.py` (`get_viral_clips`) se agrego deteccion de errores `rate_limit_exceeded` de Groq.
+  - Si Groq responde `429`, ahora el proceso:
+    - extrae el `try again in Xs` del mensaje,
+    - espera ese tiempo (+margen),
+    - reintenta una vez automaticamente.
+  - Si Groq sigue fallando y existe `GEMINI_API_KEY`, hace fallback automatico a Gemini (`gemini-2.5-flash-lite` por defecto, configurable con `GROQ_FALLBACK_GEMINI_MODEL`).
+  - En `app.py` (`/api/process`), cuando `llm_provider=groq`, ahora tambien se propaga `X-Gemini-Key` al entorno del proceso para habilitar ese fallback.
+- Para que sirve:
+  - Evita que el job caiga inmediatamente por picos temporales de TPM en Groq.
+  - Mantiene la generacion de clips incluso si Groq esta limitado en ese momento.
+
+### Ajustado: selector Groq solo muestra modelos con límite >=70K TPM
+- Que cambiamos:
+  - En `dashboard/src/components/MediaInput.jsx` se retiraron del selector Groq los modelos:
+    - `llama-3.3-70b-versatile`
+    - `llama-3.1-70b-versatile`
+    - `llama-3.1-8b-instant`
+    - `mixtral-8x7b-32768`
+  - Se agregaron:
+    - `groq/compound (70K TPM)`
+    - `groq/compound-mini (70K TPM)`
+  - Se añadió normalización para que, si había un modelo viejo guardado en `localStorage`, se migre automáticamente a uno válido del proveedor actual.
+- Para que sirve:
+  - Evita errores frecuentes de límite de tokens en Groq al procesar transcripciones largas.
+  - Mantiene el selector alineado con tu requisito de mínimo `70K TPM`.
+
 ## 2026-02-19
 
 ### Corregido: resolución de tipografías más robusta en entornos Colab/headless

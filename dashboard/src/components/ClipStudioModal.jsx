@@ -615,6 +615,7 @@ export default function ClipStudioModal({
   const [timelineMode, setTimelineMode] = useState(TIMELINE_MODE_MINI);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [previewVideoUrl, setPreviewVideoUrl] = useState('');
+  const [fastPreviewCaptionsBurned, setFastPreviewCaptionsBurned] = useState(false);
   const [uncutFailed, setUncutFailed] = useState(false);
 
   // If the user uses manual framing (Auto smart reframe OFF), prefer _uncut.mp4 to show the whole video
@@ -840,6 +841,22 @@ export default function ClipStudioModal({
     return clamp(raw, selectionStartRel + 0.08, timelineDuration);
   }, [layoutEnd, baseClipEnd, baseClipStart, selectionStartRel, timelineDuration]);
 
+  const transitionPoints = useMemo(() => {
+    const points = Array.isArray(clip?.transition_points) ? clip.transition_points : [];
+    const normalized = points
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value))
+      .map((value) => clamp(value, 0, timelineDuration))
+      .sort((a, b) => a - b);
+    const deduped = [];
+    normalized.forEach((value) => {
+      if (deduped.length === 0 || Math.abs(deduped[deduped.length - 1] - value) > 0.03) {
+        deduped.push(value);
+      }
+    });
+    return deduped;
+  }, [clip?.transition_points, timelineDuration]);
+
   const timelineTicks = useMemo(() => {
     const duration = Math.max(1, Number(timelineDuration || 0));
     const targetTicks = 5;
@@ -939,8 +956,58 @@ export default function ClipStudioModal({
   };
 
   const loadTranscript = async () => {
-    if (!jobId) return;
+    const clipTranscriptSegments = Array.isArray(clip?.transcript_segments) ? clip.transcript_segments : [];
     setIsLoadingTranscript(true);
+    if (clipTranscriptSegments.length > 0) {
+      const clipTimebase = String(clip?.transcript_timebase || '').trim().toLowerCase();
+      const baseOffset = clipTimebase === 'clip' ? Number(clip?.start || 0) : 0;
+      const normalized = clipTranscriptSegments
+        .map((seg, idx) => {
+          if (!seg || typeof seg !== 'object') return null;
+          const rawStart = Number(seg.start ?? 0);
+          const rawEnd = Number(seg.end ?? rawStart);
+          const segStart = Number.isFinite(rawStart) ? Math.max(0, rawStart + baseOffset) : 0;
+          const segEnd = Number.isFinite(rawEnd) ? Math.max(segStart, rawEnd + baseOffset) : segStart;
+          const words = Array.isArray(seg.words)
+            ? seg.words
+              .map((wordItem) => {
+                if (!wordItem || typeof wordItem !== 'object') return null;
+                const wsRaw = Number(wordItem.start ?? segStart);
+                const weRaw = Number(wordItem.end ?? wsRaw);
+                const ws = Number.isFinite(wsRaw) ? Math.max(0, wsRaw + baseOffset) : segStart;
+                const we = Number.isFinite(weRaw) ? Math.max(ws, weRaw + baseOffset) : ws;
+                const token = String(wordItem.word || wordItem.text || '').trim();
+                if (!token) return null;
+                return {
+                  start: Number(ws.toFixed(3)),
+                  end: Number(we.toFixed(3)),
+                  word: token
+                };
+              })
+              .filter(Boolean)
+            : [];
+          const text = String(seg.text || '').trim() || words.map((w) => w.word).join(' ').trim();
+          if (!text) return null;
+          return {
+            segment_index: Number.isFinite(Number(seg.segment_index)) ? Number(seg.segment_index) : idx,
+            start: Number(segStart.toFixed(3)),
+            end: Number(segEnd.toFixed(3)),
+            duration: Number(Math.max(0, segEnd - segStart).toFixed(3)),
+            speaker: seg.speaker ? String(seg.speaker).trim() : null,
+            word_count: words.length,
+            text,
+            words
+          };
+        })
+        .filter(Boolean);
+      setTranscriptSegments(normalized);
+      setIsLoadingTranscript(false);
+      return;
+    }
+    if (!jobId) {
+      setIsLoadingTranscript(false);
+      return;
+    }
     try {
       const res = await apiFetch(`/api/transcript/${jobId}?limit=2000&include_words=1`);
       if (!res.ok) throw new Error(await res.text());
@@ -1185,6 +1252,8 @@ export default function ClipStudioModal({
     clip?.caption_box_color,
     clip?.caption_box_opacity,
     clip?.caption_karaoke_mode,
+    clip?.transcript_segments,
+    clip?.transcript_timebase,
     clip?.video_title_for_youtube_short,
     clip?.title
   ]);
@@ -1202,6 +1271,7 @@ export default function ClipStudioModal({
     if (!sourceUrl) {
       cleanupBlobUrl();
       setPreviewVideoUrl('');
+      setFastPreviewCaptionsBurned(false);
       setVideoLoadError('');
       return () => { };
     }
@@ -1211,6 +1281,7 @@ export default function ClipStudioModal({
     if (!isHttp || isBlobOrData) {
       cleanupBlobUrl();
       setPreviewVideoUrl(sourceUrl);
+      setFastPreviewCaptionsBurned(false);
       setVideoLoadError('');
       return () => { };
     }
@@ -1219,6 +1290,7 @@ export default function ClipStudioModal({
     if (!isNgrokSource) {
       cleanupBlobUrl();
       setPreviewVideoUrl(sourceUrl);
+      setFastPreviewCaptionsBurned(false);
       setVideoLoadError('');
       return () => { };
     }
@@ -1239,11 +1311,13 @@ export default function ClipStudioModal({
         const objectUrl = URL.createObjectURL(blob);
         previewBlobUrlRef.current = objectUrl;
         setPreviewVideoUrl(objectUrl);
+        setFastPreviewCaptionsBurned(false);
       } catch (err) {
         if (cancelled) return;
         // Fallback silencioso: aun si falla la descarga manual, el elemento <video>
         // puede cargar la URL remota directamente.
         setPreviewVideoUrl(sourceUrl);
+        setFastPreviewCaptionsBurned(false);
         setVideoLoadError('');
       }
     })();
@@ -1638,6 +1712,7 @@ export default function ClipStudioModal({
       if (playPromise && typeof playPromise.catch === 'function') {
         await playPromise.catch(() => { });
       }
+      setFastPreviewCaptionsBurned(false);
       setVideoLoadError('');
       setPreviewCurrentTime(relativeStart);
       setPreviewPlaying(true);
@@ -1667,7 +1742,21 @@ export default function ClipStudioModal({
         fit_mode: layoutFitMode,
         zoom: Number(layoutZoom),
         offset_x: Number(layoutOffsetX),
-        offset_y: Number(layoutOffsetY)
+        offset_y: Number(layoutOffsetY),
+        captions_on: Boolean(captionsOn),
+        caption_position: position,
+        caption_font_size: Number(fontSize),
+        caption_font_family: String(fontFamily || 'Montserrat'),
+        caption_font_color: String(fontColor || '#FFFFFF'),
+        caption_stroke_color: String(strokeColor || '#000000'),
+        caption_stroke_width: Number(strokeWidth),
+        caption_bold: Boolean(bold),
+        caption_box_color: String(boxColor || '#000000'),
+        caption_box_opacity: Number(boxOpacity),
+        caption_karaoke_mode: Boolean(karaokeMode),
+        caption_offset_x: Number(captionOffsetX),
+        caption_offset_y: Number(captionOffsetY),
+        srt_content: captionsOn ? (srtContent || null) : null
       };
       const res = await apiFetch('/api/clip/fast-preview', {
         method: 'POST',
@@ -1679,6 +1768,7 @@ export default function ClipStudioModal({
       const nextUrl = getApiUrl(data?.preview_video_url || '');
       if (!nextUrl) throw new Error('No se recibió URL de preview.');
       setPreviewVideoUrl(nextUrl);
+      setFastPreviewCaptionsBurned(Boolean(data?.captions_burned));
       setVideoLoadError('');
       setPreviewCurrentTime(0);
       setPreviewPlaying(false);
@@ -3124,7 +3214,7 @@ export default function ClipStudioModal({
                     </div>
                   )}
 
-                  {captionsOn && Boolean(previewText) && (
+                  {captionsOn && !fastPreviewCaptionsBurned && Boolean(previewText) && (
                     <div className="absolute inset-0 pointer-events-none">
                       <div
                         className="absolute px-6 text-center"
@@ -3433,6 +3523,26 @@ export default function ClipStudioModal({
                           })}
                       </div>
                     </div>
+
+                    {transitionPoints.length > 0 && (
+                      <div className="px-3 py-2 border-b border-slate-200 dark:border-slate-700">
+                        <div className="relative h-8 rounded-md border border-amber-200 dark:border-amber-700/60 bg-amber-50/80 dark:bg-amber-900/15 overflow-hidden">
+                          {transitionPoints.map((point, idx) => (
+                            <div
+                              key={`transition-${idx}-${point}`}
+                              className="absolute top-0 bottom-0 -translate-x-1/2 pointer-events-none"
+                              style={{ left: `${(point / Math.max(0.001, timelineDuration)) * 100}%` }}
+                            >
+                              <div className="mx-auto mt-0.5 w-2 h-2 rotate-45 bg-amber-500 border border-amber-200 dark:border-amber-800" />
+                              <div className="mx-auto mt-0.5 w-px h-[18px] bg-amber-500/85" />
+                            </div>
+                          ))}
+                          <div className="absolute left-2 top-1 text-[10px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
+                            Transiciones
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {timelineMode === TIMELINE_MODE_ADVANCED && (
                       <>

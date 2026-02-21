@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Youtube, Upload, FileVideo, X, CheckCircle2, Settings2 } from 'lucide-react';
+import { Youtube, Upload, FileVideo, X, CheckCircle2, Settings2, Clapperboard, Zap } from 'lucide-react';
 
 const MEDIA_INPUT_STORAGE_KEY = 'mediaInputPresetV2';
 
@@ -8,8 +8,21 @@ const ALLOWED_VALUES = {
     whisperBackend: ['openai', 'faster'],
     whisperModel: ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3'],
     ffmpegPreset: ['ultrafast', 'fast', 'medium'],
-    aspectRatio: ['9:16', '16:9', 'highlight'],
-    clipLengthTarget: ['short', 'balanced', 'long']
+    aspectRatio: ['9:16', '16:9'],
+    clipLengthTarget: ['short', 'balanced', 'long'],
+    generationMode: ['clips', 'trailer'],
+    llmModel: [
+        'gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'
+    ]
+};
+
+const LLM_MODEL_OPTIONS = {
+    gemini: [
+        { value: 'gemini-2.5-flash-lite', label: 'gemini-2.5-flash-lite | Gemini 2.5 Flash-Lite' },
+        { value: 'gemini-2.5-flash', label: 'gemini-2.5-flash | Gemini 2.5 Flash' },
+        { value: 'gemini-2.0-flash', label: 'gemini-2.0-flash | Gemini 2.0 Flash' },
+        { value: 'gemini-1.5-flash', label: 'gemini-1.5-flash | Gemini 1.5 Flash' }
+    ]
 };
 
 const MODEL_OPTIONS_BY_BACKEND = {
@@ -263,6 +276,7 @@ function loadStoredMediaInputConfig() {
         return {
             language: pickAllowed(parsed.language, ALLOWED_VALUES.language, 'es'),
             clipCount: clampNumber(parsed.clipCount, 6, 1, 15),
+            trailerFragmentsTarget: clampNumber(parsed.trailerFragmentsTarget, 6, 2, 12),
             whisperBackend: pickAllowed(parsed.whisperBackend, ALLOWED_VALUES.whisperBackend, 'faster'),
             whisperModel: normalizeWhisperModelForBackend(
                 pickAllowed(parsed.whisperBackend, ALLOWED_VALUES.whisperBackend, 'faster'),
@@ -277,7 +291,9 @@ function loadStoredMediaInputConfig() {
             selectedContentPreset: CONTENT_PRESETS.some((p) => p.id === parsed.selectedContentPreset) ? parsed.selectedContentPreset : 'general',
             selectedWhisperOption: (WHISPER_OPTION_PRESETS.some((p) => p.id === parsed.selectedWhisperOption) || parsed.selectedWhisperOption === 'custom')
                 ? parsed.selectedWhisperOption
-                : 'faster_balanced'
+                : 'faster_balanced',
+            generationMode: pickAllowed(parsed.generationMode, ALLOWED_VALUES.generationMode, 'clips'),
+            llmModel: pickAllowed(parsed.llmModel, ALLOWED_VALUES.llmModel, 'gemini-2.5-flash-lite')
         };
     } catch (error) {
         console.warn('Failed to load media input config:', error);
@@ -285,13 +301,18 @@ function loadStoredMediaInputConfig() {
     }
 }
 
-export default function MediaInput({ onProcess, isProcessing }) {
+export default function MediaInput({
+    onProcess,
+    isProcessing,
+    apiKey = ''
+}) {
     const [initialConfig] = useState(() => loadStoredMediaInputConfig());
     const [mode, setMode] = useState('file'); // 'url' | 'file'
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
     const [language, setLanguage] = useState(initialConfig?.language ?? 'es');
     const [clipCount, setClipCount] = useState(initialConfig?.clipCount ?? 6);
+    const [trailerFragmentsTarget, setTrailerFragmentsTarget] = useState(initialConfig?.trailerFragmentsTarget ?? 6);
     const [whisperBackend, setWhisperBackend] = useState(initialConfig?.whisperBackend ?? 'faster');
     const [whisperModel, setWhisperModel] = useState(initialConfig?.whisperModel ?? 'large-v3');
     const [wordTimestamps, setWordTimestamps] = useState(initialConfig?.wordTimestamps ?? true);
@@ -302,6 +323,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [selectedTemplate, setSelectedTemplate] = useState(initialConfig?.selectedTemplate ?? 'default');
     const [selectedContentPreset, setSelectedContentPreset] = useState(initialConfig?.selectedContentPreset ?? 'general');
     const [selectedWhisperOption, setSelectedWhisperOption] = useState(initialConfig?.selectedWhisperOption ?? 'faster_balanced');
+    const [generationMode, setGenerationMode] = useState(initialConfig?.generationMode ?? 'clips');
+    const [llmModel, setLlmModel] = useState(initialConfig?.llmModel ?? 'gemini-2.5-flash-lite');
     const [showConfigModal, setShowConfigModal] = useState(false);
     const whisperModelOptions = MODEL_OPTIONS_BY_BACKEND[whisperBackend] || MODEL_OPTIONS_BY_BACKEND.openai;
 
@@ -310,6 +333,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
         const payload = {
             language,
             clipCount,
+            trailerFragmentsTarget,
             whisperBackend,
             whisperModel,
             wordTimestamps,
@@ -319,12 +343,15 @@ export default function MediaInput({ onProcess, isProcessing }) {
             clipLengthTarget,
             selectedTemplate,
             selectedContentPreset,
-            selectedWhisperOption
+            selectedWhisperOption,
+            generationMode,
+            llmModel
         };
         window.localStorage.setItem(MEDIA_INPUT_STORAGE_KEY, JSON.stringify(payload));
     }, [
         language,
         clipCount,
+        trailerFragmentsTarget,
         whisperBackend,
         whisperModel,
         wordTimestamps,
@@ -334,7 +361,9 @@ export default function MediaInput({ onProcess, isProcessing }) {
         clipLengthTarget,
         selectedTemplate,
         selectedContentPreset,
-        selectedWhisperOption
+        selectedWhisperOption,
+        generationMode,
+        llmModel
     ]);
 
     const applySettings = (settings) => {
@@ -343,6 +372,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
         const nextModel = normalizeWhisperModelForBackend(nextBackend, settings.whisperModel || whisperModel);
         if (settings.aspectRatio) setAspectRatio(settings.aspectRatio);
         if (settings.clipLengthTarget) setClipLengthTarget(settings.clipLengthTarget);
+        if (settings.llmModel) setLlmModel(settings.llmModel);
         if (typeof settings.clipCount === 'number') setClipCount(settings.clipCount);
         setWhisperBackend(nextBackend);
         setWhisperModel(nextModel);
@@ -392,6 +422,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
         const payloadBase = {
             language,
             clipCount,
+            trailer_fragments_target: trailerFragmentsTarget,
             whisperBackend,
             whisperModel,
             wordTimestamps,
@@ -400,21 +431,28 @@ export default function MediaInput({ onProcess, isProcessing }) {
             aspectRatio,
             clipLengthTarget,
             styleTemplate: selectedTemplate,
-            contentPreset: selectedContentPreset
+            contentPreset: selectedContentPreset,
+            llm_provider: 'gemini',
+            llm_model: llmModel,
+            generation_mode: generationMode,
+            build_trailer: generationMode === 'trailer'
         };
+
+        const headers = {};
+        if (apiKey?.trim()) headers['X-Gemini-Key'] = apiKey.trim();
 
         if (mode === 'url' && url) {
             onProcess({
                 type: 'url',
                 payload: url,
                 ...payloadBase
-            });
+            }, headers);
         } else if (mode === 'file' && file) {
             onProcess({
                 type: 'file',
                 payload: file,
                 ...payloadBase
-            });
+            }, headers);
         }
 
         setShowConfigModal(false);
@@ -537,6 +575,46 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         </div>
 
                         <div className="space-y-8">
+                            <div className={modalCardClass}>
+                                <div className="flex items-center justify-between gap-2 mb-4">
+                                    <div>
+                                        <h4 className="text-base font-bold text-slate-900 dark:text-white">¿Qué quieres generar?</h4>
+                                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Selecciona el modo de generación. Después iremos sumando nuevas habilidades.</p>
+                                    </div>
+                                    <span className="px-3 py-1 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 text-[10px] font-bold tracking-wider uppercase rounded-full">Modo</span>
+                                </div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => setGenerationMode('clips')}
+                                        className={`rounded-xl border p-4 text-left transition-all ${generationMode === 'clips'
+                                            ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
+                                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700'
+                                            }`}
+                                    >
+                                        <div className="flex items-center gap-2">
+                                            <Clapperboard size={16} className={generationMode === 'clips' ? 'text-primary' : 'text-slate-500'} />
+                                            <span className={`font-semibold ${generationMode === 'clips' ? 'text-primary' : 'text-slate-800 dark:text-slate-200'}`}>Clips virales</span>
+                                        </div>
+                                        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Detecta y renderiza varios clips listos para Shorts/Reels.</p>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setGenerationMode('trailer')}
+                                        className={`rounded-xl border p-4 text-left transition-all ${generationMode === 'trailer'
+                                            ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
+                                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700'
+                                            }`}
+                                    >
+                                        <div className="flex items-center gap-2">
+                                            <Zap size={16} className={generationMode === 'trailer' ? 'text-primary' : 'text-slate-500'} />
+                                            <span className={`font-semibold ${generationMode === 'trailer' ? 'text-primary' : 'text-slate-800 dark:text-slate-200'}`}>Super Trailer</span>
+                                        </div>
+                                        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Modo dedicado para generar solo el montaje resumen rápido.</p>
+                                    </button>
+                                </div>
+                            </div>
+
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                 <div className="space-y-2">
                                     <label className={modalLabelClass}>Formato de salida</label>
@@ -547,7 +625,6 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                     >
                                         <option value="9:16">9:16 (Vertical Shorts/Reels/TikTok)</option>
                                         <option value="16:9">16:9 (Horizontal YouTube/Presentación)</option>
-                                        <option value="highlight">Highlight reel (montaje automático de mejores momentos)</option>
                                     </select>
                                 </div>
                                 <div className="space-y-2">
@@ -561,6 +638,24 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                         <option value="short">&lt;30s (hook rápido)</option>
                                         <option value="long">45-60s (contexto)</option>
                                     </select>
+                                    <p className="text-[10px] text-zinc-500 mt-1">
+                                        Duración preferida de los clips resultantes.
+                                    </p>
+                                </div>
+                                <div className="space-y-2">
+                                    <label className={modalLabelClass}>Modelo (Gemini)</label>
+                                    <select
+                                        value={llmModel}
+                                        onChange={(e) => setLlmModel(e.target.value)}
+                                        className={modalInputClass}
+                                    >
+                                        {LLM_MODEL_OPTIONS.gemini.map(opt => (
+                                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                        ))}
+                                    </select>
+                                    <p className="text-[10px] text-zinc-500 mt-1">
+                                        Recomendado: gemini-2.5-flash-lite para velocidad y precisión.
+                                    </p>
                                 </div>
                             </div>
 
@@ -580,11 +675,10 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                                 key={preset.id}
                                                 type="button"
                                                 onClick={() => applyContentPreset(preset.id)}
-                                                className={`relative rounded-xl p-3 text-left transition-all ${
-                                                    selected
-                                                        ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
-                                                        : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700 hover:shadow-md'
-                                                }`}
+                                                className={`relative rounded-xl p-3 text-left transition-all ${selected
+                                                    ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
+                                                    : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700 hover:shadow-md'
+                                                    }`}
                                             >
                                                 <h5 className={`font-bold text-sm ${selected ? 'text-primary' : 'text-slate-800 dark:text-slate-200'}`}>{preset.name}</h5>
                                                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{preset.subtitle}</p>
@@ -617,11 +711,10 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                                 onClick={() => applyTemplate(preset.id)}
                                                 className="group text-left"
                                             >
-                                                <div className={`relative aspect-[9/16] rounded-xl overflow-hidden transition-all ${
-                                                    selected
-                                                        ? 'border-[3px] border-primary shadow-lg ring-4 ring-primary/10'
-                                                        : 'border border-slate-200 dark:border-slate-700 group-hover:border-primary group-hover:shadow-lg'
-                                                }`}>
+                                                <div className={`relative aspect-[9/16] rounded-xl overflow-hidden transition-all ${selected
+                                                    ? 'border-[3px] border-primary shadow-lg ring-4 ring-primary/10'
+                                                    : 'border border-slate-200 dark:border-slate-700 group-hover:border-primary group-hover:shadow-lg'
+                                                    }`}>
                                                     <div className={`absolute inset-0 bg-gradient-to-br ${preset.gradient} opacity-90`} />
                                                     <div className="absolute top-2 left-2 bg-black/50 backdrop-blur text-white text-[10px] font-bold px-1.5 py-0.5 rounded">1.00</div>
                                                     <div className="absolute bottom-6 left-2 right-2">
@@ -668,9 +761,32 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                         max="15"
                                         value={clipCount}
                                         onChange={(e) => setClipCount(Number(e.target.value || 1))}
+                                        disabled={generationMode === 'trailer'}
                                         className={modalInputClass}
                                     />
+                                    {generationMode === 'trailer' && (
+                                        <p className="text-[10px] text-amber-600 dark:text-amber-400">En modo Super Trailer este valor no se usa.</p>
+                                    )}
                                 </div>
+                                {generationMode === 'trailer' && (
+                                    <div className="space-y-2">
+                                        <label className={modalLabelClass}>Segmentos destacados (Super Trailer)</label>
+                                        <input
+                                            type="number"
+                                            min="2"
+                                            max="12"
+                                            value={trailerFragmentsTarget}
+                                            onChange={(e) => {
+                                                const nextValue = Number(e.target.value || 6);
+                                                setTrailerFragmentsTarget(Math.max(2, Math.min(12, Math.round(nextValue))));
+                                            }}
+                                            className={modalInputClass}
+                                        />
+                                        <p className="text-[10px] text-zinc-500 mt-1">
+                                            Cantidad de momentos que quieres en el montaje del trailer.
+                                        </p>
+                                    </div>
+                                )}
                             </div>
 
                             <div className={modalCardClass}>
@@ -690,11 +806,10 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                                 key={preset.id}
                                                 type="button"
                                                 onClick={() => applyWhisperOptionPreset(preset.id)}
-                                                className={`rounded-xl p-3 text-left transition-all ${
-                                                    selected
-                                                        ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
-                                                        : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700 hover:shadow-md'
-                                                }`}
+                                                className={`rounded-xl p-3 text-left transition-all ${selected
+                                                    ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
+                                                    : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700 hover:shadow-md'
+                                                    }`}
                                             >
                                                 <p className={`text-sm font-bold ${selected ? 'text-primary' : 'text-slate-800 dark:text-slate-200'}`}>{preset.name}</p>
                                                 <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">{preset.subtitle}</p>
@@ -807,7 +922,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                             Procesando video...
                                         </>
                                     ) : (
-                                        <>Generar clips</>
+                                        <>{generationMode === 'trailer' ? 'Generar Super Trailer' : 'Generar clips virales'}</>
                                     )}
                                 </button>
                             </div>

@@ -298,8 +298,7 @@ function App() {
   const [batchScheduleReport, setBatchScheduleReport] = useState(null);
   const [isExportingPack, setIsExportingPack] = useState(false);
   const [packExportReport, setPackExportReport] = useState(null);
-  const [isGeneratingHighlightReel, setIsGeneratingHighlightReel] = useState(false);
-  const [highlightAspectRatio, setHighlightAspectRatio] = useState('9:16');
+  const [isGeneratingTrailer, setIsGeneratingTrailer] = useState(false);
   const [clipSearchQuery, setClipSearchQuery] = useState('');
   const [isSearchingClips, setIsSearchingClips] = useState(false);
   const [clipSearchResults, setClipSearchResults] = useState([]);
@@ -357,23 +356,40 @@ function App() {
   const [projectTitleEditJobId, setProjectTitleEditJobId] = useState(null);
   const [projectTitleDraft, setProjectTitleDraft] = useState('');
   const pollingPauseBeforeStudioRef = useRef(false);
-  const autoHighlightTriggeredJobRef = useRef(null);
   const clipCardRefs = useRef(new Map());
-  
+
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
   const [isSyncedPlaying, setIsSyncedPlaying] = useState(false);
   const [syncTrigger, setSyncTrigger] = useState(0);
+  const [trailerInspectorTab, setTrailerInspectorTab] = useState('transcript');
+  const trailerPreviewRef = useRef(null);
 
-  const handleClipPlay = (startTime) => {
+  const handleClipPlay = useCallback((startTime) => {
     setSyncedTime(startTime);
     setIsSyncedPlaying(true);
     setSyncTrigger(prev => prev + 1);
-  };
+  }, []);
 
-  const handleClipPause = () => {
+  const handleClipPause = useCallback(() => {
     setIsSyncedPlaying(false);
-  };
+  }, []);
+
+  const seekTrailerPreview = useCallback((startTime = 0) => {
+    const player = trailerPreviewRef.current;
+    const time = Math.max(0, Number(startTime) || 0);
+    if (!player) {
+      handleClipPlay(time);
+      return;
+    }
+    try {
+      player.currentTime = time;
+    } catch (_) { }
+    const playPromise = player.play?.();
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => { });
+    }
+  }, [handleClipPlay]);
 
   const runConnectivityCheck = useCallback(async () => {
     if (connectivityCheckInFlight.current) return;
@@ -463,6 +479,10 @@ function App() {
     // For now keeping gemini plain for compatibility unless requested.
     if (apiKey) localStorage.setItem('gemini_key', apiKey);
   }, [apiKey]);
+
+  useEffect(() => {
+    localStorage.removeItem('groq_key_v1');
+  }, []);
 
   useEffect(() => {
     if (uploadPostKey) {
@@ -606,12 +626,11 @@ function App() {
       if (project.job_id !== targetJobId) return project;
       const clips = Array.isArray(data?.result?.clips) ? data.result.clips : [];
       const firstClip = clips[0] || null;
-      const keepHighlightMode = normalizeOutputMode(project.ratio) === 'highlight';
       return {
         ...project,
         status: normalizedStatus,
         clip_count_actual: clips.length || project.clip_count_actual || null,
-        ratio: keepHighlightMode ? 'highlight' : (firstClip?.aspect_ratio || project.ratio || '9:16'),
+        ratio: firstClip?.aspect_ratio || project.ratio || '9:16',
         thumbnail_url: firstClip?.thumbnail_url || project.thumbnail_url || null,
         preview_video_url: firstClip?.video_url || project.preview_video_url || null,
         updated_at: new Date().toISOString(),
@@ -687,7 +706,7 @@ function App() {
     }
   };
 
-  const handleProcess = async (data) => {
+  const handleProcess = async (data, customHeaders = {}) => {
     const createdAt = new Date();
     const expiresAt = new Date(createdAt.getTime() + (PROJECTS_EXPIRE_DAYS * 24 * 60 * 60 * 1000));
     const isUrlSource = data?.type === 'url';
@@ -709,13 +728,13 @@ function App() {
       ? (parsedUrl?.pathname ? decodeURIComponent(parsedUrl.pathname).replaceAll('/', '').trim() || parsedUrl.hostname : String(data.payload))
       : (data?.payload?.name || 'Video local');
 
-    autoHighlightTriggeredJobRef.current = null;
     const outputMode = normalizeOutputMode(data?.aspectRatio);
+    const generationMode = String(data?.generation_mode || '').trim().toLowerCase() === 'trailer' ? 'trailer' : 'clips';
     const projectDraft = {
       title: projectTitle,
       source_kind: sourceKind,
       source_label: sourceLabel,
-      video_type: projectVideoTypeLabel(data?.contentPreset),
+      video_type: generationMode === 'trailer' ? 'Super trailer' : projectVideoTypeLabel(data?.contentPreset),
       ratio: outputMode,
       clip_count_target: Number.isFinite(data?.clipCount) ? data.clipCount : null,
       created_at: createdAt.toISOString(),
@@ -732,7 +751,6 @@ function App() {
     setResults(null);
     setBatchScheduleReport(null);
     setPackExportReport(null);
-    setIsGeneratingHighlightReel(false);
     setClipSearchResults([]);
     setClipSearchKeywords([]);
     setClipSearchPhrases([]);
@@ -758,7 +776,7 @@ function App() {
 
     try {
       let body;
-      const headers = { 'X-Gemini-Key': apiKey };
+      const headers = { 'X-Gemini-Key': apiKey, ...customHeaders };
       const language = data.language && data.language !== 'auto' ? data.language : null;
       const clipCount = Number.isFinite(data.clipCount) ? data.clipCount : null;
       const whisperBackend = data.whisperBackend || null;
@@ -770,6 +788,11 @@ function App() {
       const clipLengthTarget = ['short', 'balanced', 'long'].includes(data.clipLengthTarget) ? data.clipLengthTarget : null;
       const styleTemplate = typeof data.styleTemplate === 'string' && data.styleTemplate.trim() ? data.styleTemplate.trim() : null;
       const contentPreset = typeof data.contentPreset === 'string' && data.contentPreset.trim() ? data.contentPreset.trim() : null;
+      const buildTrailer = data.build_trailer === true || generationMode === 'trailer';
+      const trailerFragmentsTargetRaw = Number(data?.trailer_fragments_target);
+      const trailerFragmentsTarget = Number.isFinite(trailerFragmentsTargetRaw)
+        ? Math.max(2, Math.min(12, Math.round(trailerFragmentsTargetRaw)))
+        : null;
 
       if (data.type === 'url') {
         headers['Content-Type'] = 'application/json';
@@ -785,7 +808,12 @@ function App() {
           aspect_ratio: aspectRatio,
           clip_length_target: clipLengthTarget,
           style_template: styleTemplate,
-          content_profile: contentPreset
+          content_profile: contentPreset,
+          llm_model: data.llm_model,
+          llm_provider: data.llm_provider,
+          generation_mode: generationMode,
+          build_trailer: buildTrailer,
+          trailer_fragments_target: trailerFragmentsTarget
         });
       } else {
         const formData = new FormData();
@@ -801,12 +829,17 @@ function App() {
         if (clipLengthTarget) formData.append('clip_length_target', clipLengthTarget);
         if (styleTemplate) formData.append('style_template', styleTemplate);
         if (contentPreset) formData.append('content_profile', contentPreset);
+        if (data.llm_model) formData.append('llm_model', data.llm_model);
+        if (data.llm_provider) formData.append('llm_provider', data.llm_provider);
+        formData.append('generation_mode', generationMode);
+        formData.append('build_trailer', String(buildTrailer));
+        if (trailerFragmentsTarget) formData.append('trailer_fragments_target', String(trailerFragmentsTarget));
         body = formData;
       }
 
       const res = await apiFetch('/api/process', {
         method: 'POST',
-        headers: data.type === 'url' ? headers : { 'X-Gemini-Key': apiKey },
+        headers: data.type === 'url' ? headers : { 'X-Gemini-Key': apiKey, ...customHeaders },
         body
       });
 
@@ -850,7 +883,6 @@ function App() {
   };
 
   const handleReset = () => {
-    autoHighlightTriggeredJobRef.current = null;
     setActiveTab('home');
     setProjectsViewMode('list');
     setStudioContext(null);
@@ -863,7 +895,6 @@ function App() {
     setResults(null);
     setBatchScheduleReport(null);
     setPackExportReport(null);
-    setIsGeneratingHighlightReel(false);
     setClipSearchResults([]);
     setClipSearchKeywords([]);
     setClipSearchPhrases([]);
@@ -891,7 +922,6 @@ function App() {
 
   const handleRetryJob = async () => {
     if (!jobId) return;
-    autoHighlightTriggeredJobRef.current = null;
     setIsRetryingJob(true);
     setIsPollingPaused(false);
     setProcessUiPhase('queued');
@@ -906,7 +936,6 @@ function App() {
       setResults(null);
       setBatchScheduleReport(null);
       setPackExportReport(null);
-      setIsGeneratingHighlightReel(false);
       setStatus('processing');
       setProcessUiPhase('queued');
       setClipSearchResults([]);
@@ -1035,23 +1064,46 @@ function App() {
     });
   }, [sortedClips, clipFilter, clipTagFilter]);
 
-  const latestHighlightReel = useMemo(() => {
-    if (results && typeof results.latest_highlight_reel === 'object' && results.latest_highlight_reel) {
-      return results.latest_highlight_reel;
-    }
-    if (Array.isArray(results?.highlight_reels) && results.highlight_reels.length > 0) {
-      return results.highlight_reels[results.highlight_reels.length - 1];
-    }
-    return null;
-  }, [results]);
+  const trailerPrimaryClip = useMemo(() => {
+    if (!Array.isArray(sortedClips) || sortedClips.length === 0) return null;
+    return sortedClips.find((clip) => Boolean(clip?.is_trailer)) || sortedClips[0] || null;
+  }, [sortedClips]);
 
-  useEffect(() => {
-    if (!Array.isArray(results?.clips) || results.clips.length === 0) return;
-    const firstAspect = String(results.clips[0]?.aspect_ratio || '').trim();
-    if (firstAspect === '16:9' || firstAspect === '9:16') {
-      setHighlightAspectRatio(firstAspect);
-    }
-  }, [results?.clips]);
+  const isSuperTrailerMode = useMemo(() => {
+    const fromGeneration = String(processingMedia?.generation_mode || '').trim().toLowerCase() === 'trailer';
+    const fromProjectType = String(processingMedia?.contentPreset || '').trim().toLowerCase().includes('super trailer');
+    const fromClip = Boolean(trailerPrimaryClip?.is_trailer);
+    const fromResult = Boolean(results?.latest_trailer_url);
+    return fromGeneration || fromProjectType || (fromClip && fromResult);
+  }, [processingMedia?.generation_mode, processingMedia?.contentPreset, trailerPrimaryClip?.is_trailer, results?.latest_trailer_url]);
+
+  const showTrailerFocusLayout = useMemo(() => {
+    const hasTrailerVideo = Boolean(
+      (typeof results?.latest_trailer_url === 'string' && results.latest_trailer_url.trim()) ||
+      (typeof trailerPrimaryClip?.video_url === 'string' && trailerPrimaryClip.video_url.trim())
+    );
+    return hasTrailerVideo && isSuperTrailerMode;
+  }, [isSuperTrailerMode, results?.latest_trailer_url, trailerPrimaryClip?.video_url]);
+
+  const trailerVideoUrl = useMemo(() => {
+    const latest = String(results?.latest_trailer_url || '').trim();
+    if (latest) return getApiUrl(latest);
+    const clipVideo = String(trailerPrimaryClip?.video_url || '').trim();
+    if (clipVideo) return getApiUrl(clipVideo);
+    return '';
+  }, [results?.latest_trailer_url, trailerPrimaryClip?.video_url]);
+
+  const trailerScoreLabel = useMemo(() => {
+    const score = Number(trailerPrimaryClip?.virality_score);
+    if (!Number.isFinite(score)) return null;
+    return `${Math.round(Math.max(0, Math.min(100, score)))} VIRALITY`;
+  }, [trailerPrimaryClip?.virality_score]);
+
+  const trailerSegmentsCount = useMemo(() => {
+    const ranges = trailerPrimaryClip?.fragment_ranges;
+    if (Array.isArray(ranges) && ranges.length > 0) return ranges.length;
+    return null;
+  }, [trailerPrimaryClip?.fragment_ranges]);
 
   const applyBatchStrategy = (strategy) => {
     setBatchStrategy(strategy);
@@ -1175,7 +1227,7 @@ function App() {
     setIsBatchScheduling(true);
     setBatchScheduleReport(null);
     setPackExportReport(null);
-      setLogs((prev) => [...prev, `Encolando ${candidates.length} clips priorizados (${platforms.join(', ')}) | inicia +${startDelay}m, cada ${interval}m...`]);
+    setLogs((prev) => [...prev, `Encolando ${candidates.length} clips priorizados (${platforms.join(', ')}) | inicia +${startDelay}m, cada ${interval}m...`]);
 
     let success = 0;
     const failures = [];
@@ -1305,109 +1357,49 @@ function App() {
     }
   };
 
-  const handleGenerateHighlightReel = useCallback(async () => {
+  const handleGenerateTrailer = useCallback(async () => {
     if (!jobId) return;
-    const suggestedSegments = 0; // backend auto (sin límite fijo)
-    setIsGeneratingHighlightReel(true);
-    setLogs((prev) => [...prev, `Generando highlight reel (duración libre, ${highlightAspectRatio})...`]);
+    setIsGeneratingTrailer(true);
+    setLogs((prev) => [...prev, "Generando Super Trailer ⚡ (Súper Resumen)..."]);
 
     try {
-      const readErrorDetail = (rawText) => {
-        try {
-          const parsed = JSON.parse(String(rawText || ''));
-          if (parsed && typeof parsed.detail === 'string') return parsed.detail;
-        } catch (_) {}
-        return '';
-      };
+      const resultAspectRatio = String(results?.clips?.[0]?.aspect_ratio || '').trim();
+      const trailerAspectRatio = (resultAspectRatio === '16:9' || resultAspectRatio === '9:16')
+        ? resultAspectRatio
+        : (normalizeOutputMode(processingMedia?.aspectRatio) === '16:9' ? '16:9' : '9:16');
       const payload = {
         job_id: jobId,
-        max_segments: suggestedSegments,
-        target_duration: 0,
-        min_segment_seconds: 4.5,
-        max_segment_seconds: 11,
-        min_gap_seconds: 7,
-        aspect_ratio: highlightAspectRatio,
-        source_mode: 'semantic'
+        aspect_ratio: trailerAspectRatio
       };
-      const endpoints = ['/api/highlight/reel', '/api/highlight-reel'];
-      let data = null;
-      let lastError = null;
-      const headers = { 'Content-Type': 'application/json' };
-      if (apiKey?.trim()) {
-        headers['X-Gemini-Key'] = apiKey.trim();
-      }
 
-      for (let i = 0; i < endpoints.length; i += 1) {
-        const endpoint = endpoints[i];
-        const res = await apiFetch(endpoint, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload)
-        });
-        if (res.ok) {
-          data = await res.json();
-          break;
-        }
+      const res = await apiFetch("/api/clip/trailer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
 
+      if (!res.ok) {
         const errText = await res.text();
-        const detail = readErrorDetail(errText);
-        const endpointNotFound = res.status === 404 && /^not found$/i.test(String(detail || '').trim());
-        if (endpointNotFound && i < endpoints.length - 1) {
-          continue;
-        }
-        lastError = new Error(detail || errText || `HTTP ${res.status}`);
+        throw new Error(errText);
       }
 
-      if (!data) {
-        throw lastError || new Error('No se pudo generar highlight reel');
-      }
-
-      const reel = data?.reel;
-      if (reel && typeof reel === 'object') {
+      const data = await res.json();
+      if (data.success && data.trailer_url) {
         setResults((prev) => {
-          const base = prev && typeof prev === 'object' ? prev : { clips: [] };
-          const existing = Array.isArray(base.highlight_reels) ? base.highlight_reels : [];
-          const deduped = reel.reel_id
-            ? existing.filter((item) => item?.reel_id !== reel.reel_id)
-            : existing;
+          const base = prev && typeof prev === "object" ? prev : { clips: [] };
           return {
             ...base,
-            highlight_reels: [...deduped, reel],
-            latest_highlight_reel: reel
+            latest_trailer_url: data.trailer_url
           };
         });
-        const reelRatio = String(reel?.settings?.aspect_ratio || highlightAspectRatio || '').trim();
-        setLogs((prev) => [...prev, `Highlight reel listo (${reelRatio || 'ratio auto'}): ${reel.segments_count || '-'} momentos, ${reel.duration || '-'}s.`]);
-      } else {
-        setLogs((prev) => [...prev, 'Highlight reel generado, pero no se recibieron metadatos completos.']);
+        setLogs((prev) => [...prev, `Super Trailer listo ⚡: ${data.trailer_url}`]);
       }
     } catch (e) {
-      const rawError = String(e?.message || '');
-      const normalized = rawError.trim().toLowerCase();
-      if (normalized === 'not found') {
-        setLogs((prev) => [...prev, 'Error generando highlight reel: endpoint no disponible en backend activo (reinicia backend/Colab para cargar esta version).']);
-      } else if (normalized.includes('job not found') || normalized.includes('job output directory not found') || normalized.includes('metadata not found')) {
-        setLogs((prev) => [...prev, 'Error generando highlight reel: ese proyecto no está cargado en este backend. Abre el proyecto generado en esta sesión de Colab o vuelve a procesarlo.']);
-      } else {
-        setLogs((prev) => [...prev, `Error generando highlight reel: ${rawError}`]);
-      }
+      setLogs((prev) => [...prev, `Error generando Super Trailer: ${e.message}`]);
     } finally {
-      setIsGeneratingHighlightReel(false);
+      setIsGeneratingTrailer(false);
     }
-  }, [apiKey, highlightAspectRatio, jobId]);
-
-  useEffect(() => {
-    const outputMode = normalizeOutputMode(processingMedia?.aspectRatio);
-    if (outputMode !== 'highlight') return;
-    if (status !== 'complete') return;
-    if (!jobId) return;
-    if (isGeneratingHighlightReel) return;
-    if (autoHighlightTriggeredJobRef.current === jobId) return;
-
-    autoHighlightTriggeredJobRef.current = jobId;
-    setLogs((prev) => [...prev, 'Modo Highlight reel: generando montaje automático...']);
-    handleGenerateHighlightReel();
-  }, [status, processingMedia?.aspectRatio, jobId, isGeneratingHighlightReel, handleGenerateHighlightReel]);
+  }, [jobId, processingMedia?.aspectRatio, results?.clips, setResults, setLogs]);
 
   const handleClipSearch = async () => {
     if (!jobId) return;
@@ -1507,6 +1499,10 @@ function App() {
     loadTranscriptSegments(jobId);
   }, [status, jobId]);
 
+  useEffect(() => {
+    setTrailerInspectorTab('transcript');
+  }, [jobId]);
+
   const visibleTranscriptSegments = useMemo(() => {
     if (!Array.isArray(transcriptSegments) || transcriptSegments.length === 0) return [];
     const q = transcriptFilter.trim().toLowerCase();
@@ -1517,6 +1513,14 @@ function App() {
       return text.includes(q) || speaker.includes(q);
     });
   }, [transcriptSegments, transcriptFilter]);
+
+  const handleTranscriptSegmentPlay = useCallback((startTime) => {
+    if (showTrailerFocusLayout) {
+      seekTrailerPreview(startTime);
+      return;
+    }
+    handleClipPlay(startTime);
+  }, [showTrailerFocusLayout, seekTrailerPreview, handleClipPlay]);
 
   const availableSearchSpeakers = useMemo(() => {
     const merged = new Set();
@@ -1768,6 +1772,47 @@ function App() {
     setProjectMenuJobId(null);
   };
 
+  const removeAllProjects = async () => {
+    const total = Array.isArray(projects) ? projects.length : 0;
+    if (total === 0) return;
+    if (!window.confirm(`¿Eliminar todos los proyectos (${total})? Esta acción no se puede deshacer.`)) return;
+
+    let purgeReport = null;
+    let purgeError = '';
+    try {
+      const res = await apiFetch('/api/jobs/all?include_artifacts=true&include_uploads=true', {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        purgeReport = await res.json();
+      } else {
+        const raw = await res.text();
+        purgeError = raw || `HTTP ${res.status}`;
+      }
+    } catch (e) {
+      purgeError = String(e?.message || e || 'sin conexión al backend');
+    }
+
+    setProjects([]);
+    localStorage.removeItem(PROJECTS_STORAGE_KEY);
+    setProjectMenuJobId(null);
+    setProjectTitleEditJobId(null);
+    setProjectTitleDraft('');
+    setProjectFilter('all');
+
+    if (jobId) {
+      handleReset();
+      setActiveTab('projects');
+      setProjectsViewMode('list');
+    }
+
+    if (purgeReport?.skipped_active > 0) {
+      window.alert(`Se eliminaron ${purgeReport.removed_jobs || 0} proyectos. ${purgeReport.skipped_active} seguían en proceso y no se borraron.`);
+    } else if (purgeError) {
+      window.alert(`La lista local se limpió, pero el backend no confirmó borrado total: ${purgeError}`);
+    }
+  };
+
   const beginEditProjectTitle = (project) => {
     if (!project?.job_id) return;
     setProjectTitleEditJobId(project.job_id);
@@ -1901,7 +1946,6 @@ function App() {
     setIsPollingPaused(false);
     setProcessUiPhase('running');
     setResults(null);
-    setIsGeneratingHighlightReel(false);
     setLogs(['Cargando proyecto guardado...']);
     setProcessingMedia({
       aspectRatio: normalizeOutputMode(project?.ratio),
@@ -1984,11 +2028,10 @@ function App() {
                 setActiveTab('home');
                 setProjectsViewMode('list');
               }}
-              className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
-                activeTab === 'home'
-                  ? 'bg-primary/10 border-primary/30 text-primary'
-                  : 'bg-transparent border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-500'
-              }`}
+              className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${activeTab === 'home'
+                ? 'bg-primary/10 border-primary/30 text-primary'
+                : 'bg-transparent border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-500'
+                }`}
             >
               <span className="inline-flex items-center gap-1.5">
                 <LayoutDashboard size={14} />
@@ -2000,11 +2043,10 @@ function App() {
                 setActiveTab('projects');
                 setProjectsViewMode('list');
               }}
-              className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
-                activeTab === 'projects'
-                  ? 'bg-primary/10 border-primary/30 text-primary'
-                  : 'bg-transparent border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-500'
-              }`}
+              className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${activeTab === 'projects'
+                ? 'bg-primary/10 border-primary/30 text-primary'
+                : 'bg-transparent border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-500'
+                }`}
             >
               <span className="inline-flex items-center gap-1.5">
                 <History size={14} />
@@ -2013,11 +2055,10 @@ function App() {
             </button>
             <button
               onClick={() => setActiveTab('settings')}
-              className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
-                activeTab === 'settings'
-                  ? 'bg-primary/10 border-primary/30 text-primary'
-                  : 'bg-transparent border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-500'
-              }`}
+              className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${activeTab === 'settings'
+                ? 'bg-primary/10 border-primary/30 text-primary'
+                : 'bg-transparent border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-500'
+                }`}
             >
               <span className="inline-flex items-center gap-1.5">
                 <Settings size={14} />
@@ -2030,28 +2071,26 @@ function App() {
             <div className="hidden lg:flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-white/5">
               <span className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">Señal</span>
               <span
-                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] border ${
-                  connectivityStatus.api === 'ok'
-                    ? 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-800'
-                    : connectivityStatus.api === 'checking'
-                      ? 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800'
-                      : 'bg-red-100 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-800'
-                }`}
+                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] border ${connectivityStatus.api === 'ok'
+                  ? 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-800'
+                  : connectivityStatus.api === 'checking'
+                    ? 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800'
+                    : 'bg-red-100 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-800'
+                  }`}
                 title={connectivityStatus.error ? `API: ${connectivityStatus.error}` : 'Estado de API'}
               >
                 <span className={`w-1.5 h-1.5 rounded-full ${connectivityStatus.api === 'ok' ? 'bg-emerald-500 animate-pulse' : connectivityStatus.api === 'checking' ? 'bg-amber-500 animate-pulse' : 'bg-red-500'}`} />
                 API
               </span>
               <span
-                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] border ${
-                  connectivityStatus.tunnel === 'ok'
-                    ? 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-800'
-                    : connectivityStatus.tunnel === 'local'
-                      ? 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700'
-                      : connectivityStatus.tunnel === 'checking'
-                        ? 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800'
-                        : 'bg-red-100 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-800'
-                }`}
+                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] border ${connectivityStatus.tunnel === 'ok'
+                  ? 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-800'
+                  : connectivityStatus.tunnel === 'local'
+                    ? 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700'
+                    : connectivityStatus.tunnel === 'checking'
+                      ? 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800'
+                      : 'bg-red-100 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-800'
+                  }`}
                 title={connectivityStatus.usingNgrok ? 'Estado del túnel ngrok' : 'Conexión local activa'}
               >
                 <span className={`w-1.5 h-1.5 rounded-full ${connectivityStatus.tunnel === 'ok' ? 'bg-emerald-500 animate-pulse' : connectivityStatus.tunnel === 'local' ? 'bg-slate-500' : connectivityStatus.tunnel === 'checking' ? 'bg-amber-500 animate-pulse' : 'bg-red-500'}`} />
@@ -2115,7 +2154,10 @@ function App() {
                   <Shield size={12} /> Privacidad: las llaves viven en tu navegador (se envían al backend solo para procesar)
                 </div>
               </div>
-              <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
+              <KeyInput
+                onKeySet={setApiKey}
+                savedKey={apiKey}
+              />
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
@@ -2165,13 +2207,12 @@ function App() {
                       : 'Activa ahora: local/proxy'}
                   </p>
                   {apiBaseUrlMessage && (
-                    <p className={`text-[11px] ${
-                      apiBaseUrlMessageType === 'success'
-                        ? 'text-emerald-400'
-                        : apiBaseUrlMessageType === 'error'
-                          ? 'text-rose-400'
-                          : 'text-zinc-500'
-                    }`}>
+                    <p className={`text-[11px] ${apiBaseUrlMessageType === 'success'
+                      ? 'text-emerald-400'
+                      : apiBaseUrlMessageType === 'error'
+                        ? 'text-rose-400'
+                        : 'text-zinc-500'
+                      }`}>
                       {apiBaseUrlMessage}
                     </p>
                   )}
@@ -2396,7 +2437,11 @@ function App() {
                   </div>
 
                   <div className="max-w-6xl mx-auto">
-                    <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+                    <MediaInput
+                      onProcess={handleProcess}
+                      isProcessing={status === 'processing'}
+                      apiKey={apiKey}
+                    />
                   </div>
                   {status !== 'idle' && (
                     <div className="max-w-6xl mx-auto mt-4">
@@ -2421,319 +2466,332 @@ function App() {
               )}
 
               {activeTab === 'projects' && (
-              <div className="max-w-6xl mx-auto">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
-                  <div className="flex items-center gap-3">
-                    <h2 className="text-3xl font-bold text-slate-900 dark:text-white">Mis proyectos</h2>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setProjectFilter('all')}
-                      className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors border ${
-                        projectFilter === 'all'
-                          ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-transparent'
-                          : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700'
-                      }`}
-                    >
-                      {`Todos (${projects.length})`}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setProjectFilter('favorites')}
-                      className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors border ${
-                        projectFilter === 'favorites'
-                          ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-transparent'
-                          : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700'
-                      }`}
-                    >
-                      {`Favoritos (${favoriteProjectsCount})`}
-                    </button>
-                  </div>
-                </div>
-
-                {visibleProjects.length > 0 ? (
-                  <>
-                    <div className="hidden md:grid grid-cols-12 gap-4 px-4 py-2 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">
-                      <div className="col-span-5">Descripción</div>
-                      <div className="col-span-2">Origen</div>
-                      <div className="col-span-3">Tipo de video</div>
-                      <div className="col-span-1">Ratio</div>
-                      <div className="col-span-1" />
+                <div className="max-w-6xl mx-auto">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                    <div className="flex items-center gap-3">
+                      <h2 className="text-3xl font-bold text-slate-900 dark:text-white">Mis proyectos</h2>
                     </div>
-                    <div className="space-y-3">
-                      {visibleProjects.map((project) => (
-                        <div
-                          key={project.job_id}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => openSavedProject(project)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault();
-                              openSavedProject(project);
-                            }
-                          }}
-                          className={`relative overflow-hidden rounded-2xl border bg-white dark:bg-slate-900/60 p-4 shadow-sm hover:shadow-md transition-shadow ${
-                            project.job_id === jobId
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setProjectFilter('all')}
+                        className={`inline-flex min-w-[112px] items-center justify-center gap-2 px-4 py-1.5 rounded-full text-sm font-semibold transition-colors border ${projectFilter === 'all'
+                          ? 'bg-primary text-white border-primary shadow-sm'
+                          : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700'
+                          }`}
+                        title="Mostrar todos los proyectos"
+                      >
+                        <span className="leading-none">Todos</span>
+                        <span className={`text-xs px-1.5 py-0.5 rounded-full leading-none ${projectFilter === 'all' ? 'bg-white text-primary' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'}`}>
+                          {projects.length}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setProjectFilter('favorites')}
+                        className={`inline-flex min-w-[128px] items-center justify-center gap-2 px-4 py-1.5 rounded-full text-sm font-semibold transition-colors border ${projectFilter === 'favorites'
+                          ? 'bg-primary text-white border-primary shadow-sm'
+                          : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700'
+                          }`}
+                        title="Mostrar solo favoritos"
+                      >
+                        <span className="leading-none">Favoritos</span>
+                        <span className={`text-xs px-1.5 py-0.5 rounded-full leading-none ${projectFilter === 'favorites' ? 'bg-white text-primary' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200'}`}>
+                          {favoriteProjectsCount}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={removeAllProjects}
+                        disabled={projects.length === 0}
+                        className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-semibold transition-colors border border-red-300 dark:border-red-700 text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Eliminar todos los proyectos"
+                      >
+                        <Trash2 size={14} />
+                        Eliminar todos
+                      </button>
+                    </div>
+                  </div>
+
+                  {visibleProjects.length > 0 ? (
+                    <>
+                      <div className="hidden md:grid grid-cols-12 gap-4 px-4 py-2 text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">
+                        <div className="col-span-5">Descripción</div>
+                        <div className="col-span-2">Origen</div>
+                        <div className="col-span-3">Tipo de video</div>
+                        <div className="col-span-1">Ratio</div>
+                        <div className="col-span-1" />
+                      </div>
+                      <div className="space-y-3">
+                        {visibleProjects.map((project) => (
+                          <div
+                            key={project.job_id}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => openSavedProject(project)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                openSavedProject(project);
+                              }
+                            }}
+                            className={`relative overflow-hidden rounded-2xl border bg-white dark:bg-slate-900/60 p-4 shadow-sm hover:shadow-md transition-shadow ${project.job_id === jobId
                               ? 'border-primary/60 ring-2 ring-primary/20'
                               : 'border-slate-200 dark:border-slate-700'
-                          }`}
-                        >
-                          <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
-                            <div className="col-span-1 md:col-span-5 flex items-start gap-4">
-                              <div className="relative w-24 h-24 md:w-20 md:h-20 rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 flex-shrink-0">
-                                {project.thumbnail_url ? (
-                                  <img src={getApiUrl(project.thumbnail_url)} alt={project.title || 'Proyecto'} className="w-full h-full object-cover" />
-                                ) : project.preview_video_url ? (
-                                  <video src={getApiUrl(project.preview_video_url)} className="w-full h-full object-cover" muted playsInline preload="metadata" />
-                                ) : (
-                                  <div className="w-full h-full flex items-center justify-center">
-                                    {project.status === 'processing' ? (
-                                      <Activity size={26} className="text-slate-400 animate-spin" />
-                                    ) : (
-                                      <FileVideo size={26} className="text-slate-400" />
-                                    )}
+                              }`}
+                          >
+                            <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+                              <div className="col-span-1 md:col-span-5 flex items-start gap-4">
+                                <div className="relative w-24 h-24 md:w-20 md:h-20 rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 flex-shrink-0">
+                                  {project.thumbnail_url ? (
+                                    <img src={getApiUrl(project.thumbnail_url)} alt={project.title || 'Proyecto'} className="w-full h-full object-cover" />
+                                  ) : project.preview_video_url ? (
+                                    <video src={getApiUrl(project.preview_video_url)} className="w-full h-full object-cover" muted playsInline preload="metadata" />
+                                  ) : (
+                                    <div className="w-full h-full flex items-center justify-center">
+                                      {project.status === 'processing' ? (
+                                        <Activity size={26} className="text-slate-400 animate-spin" />
+                                      ) : (
+                                        <FileVideo size={26} className="text-slate-400" />
+                                      )}
+                                    </div>
+                                  )}
+                                  <div className="absolute bottom-1 right-1 text-[10px] px-1.5 py-0.5 rounded bg-black/70 text-white backdrop-blur-sm">
+                                    {outputModeLabel(project.ratio)}
                                   </div>
-                                )}
-                                <div className="absolute bottom-1 right-1 text-[10px] px-1.5 py-0.5 rounded bg-black/70 text-white backdrop-blur-sm">
-                                  {outputModeLabel(project.ratio)}
+                                </div>
+                                <div className="py-1 min-w-0">
+                                  {projectTitleEditJobId === project.job_id ? (
+                                    <div className="flex items-center gap-2">
+                                      <input
+                                        type="text"
+                                        value={projectTitleDraft}
+                                        onChange={(e) => setProjectTitleDraft(e.target.value)}
+                                        onClick={(e) => e.stopPropagation()}
+                                        onKeyDown={(e) => {
+                                          e.stopPropagation();
+                                          if (e.key === 'Enter') {
+                                            e.preventDefault();
+                                            saveProjectTitle(project.job_id);
+                                          } else if (e.key === 'Escape') {
+                                            e.preventDefault();
+                                            cancelEditProjectTitle();
+                                          }
+                                        }}
+                                        className="input-field py-2 text-base"
+                                        autoFocus
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          saveProjectTitle(project.job_id);
+                                        }}
+                                        className="px-2 py-1 text-xs rounded-lg border border-emerald-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/20 dark:border-emerald-700 dark:text-emerald-300"
+                                      >
+                                        Guardar
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          cancelEditProjectTitle();
+                                        }}
+                                        className="px-2 py-1 text-xs rounded-lg border border-slate-300 text-slate-600 dark:border-slate-600 dark:text-slate-300"
+                                      >
+                                        Cancelar
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <h3 className="text-xl md:text-2xl font-bold text-slate-900 dark:text-white truncate">{project.title || 'Proyecto'}</h3>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          beginEditProjectTitle(project);
+                                        }}
+                                        className="p-1 rounded-md text-slate-400 hover:text-primary hover:bg-primary/10 transition-colors shrink-0"
+                                        title="Editar título"
+                                      >
+                                        <Pencil size={14} />
+                                      </button>
+                                    </div>
+                                  )}
+                                  <div className="text-sm text-slate-500 dark:text-slate-400 space-y-0.5 mt-1">
+                                    <p>{`Creado: ${formatProjectDate(project.created_at)}`}</p>
+                                    <p>{`Expira: ${formatProjectDate(project.expires_at)}`}</p>
+                                  </div>
                                 </div>
                               </div>
-                              <div className="py-1 min-w-0">
-                                {projectTitleEditJobId === project.job_id ? (
-                                  <div className="flex items-center gap-2">
-                                    <input
-                                      type="text"
-                                      value={projectTitleDraft}
-                                      onChange={(e) => setProjectTitleDraft(e.target.value)}
-                                      onClick={(e) => e.stopPropagation()}
-                                      onKeyDown={(e) => {
-                                        e.stopPropagation();
-                                        if (e.key === 'Enter') {
-                                          e.preventDefault();
-                                          saveProjectTitle(project.job_id);
-                                        } else if (e.key === 'Escape') {
-                                          e.preventDefault();
-                                          cancelEditProjectTitle();
-                                        }
-                                      }}
-                                      className="input-field py-2 text-base"
-                                      autoFocus
-                                    />
+
+                              <div className="col-span-1 md:col-span-2">
+                                <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${projectSourceBadgeClass(project.source_kind)}`}>
+                                  {project.source_kind === 'youtube' ? <Youtube size={13} /> : project.source_kind === 'url' ? <Link2 size={13} /> : <Upload size={13} />}
+                                  {project.source_label || 'Archivo local'}
+                                </span>
+                              </div>
+
+                              <div className="col-span-1 md:col-span-3">
+                                <div className="flex flex-col">
+                                  <span className="font-semibold text-slate-900 dark:text-white text-sm">{project.video_type || 'Topic-clips'}</span>
+                                  <span className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                                    {project.clip_count_actual
+                                      ? `Número de clips: ${project.clip_count_actual}`
+                                      : project.status === 'processing'
+                                        ? 'Procesando...'
+                                        : project.status === 'error'
+                                          ? 'Error en procesamiento'
+                                          : `Objetivo: ${project.clip_count_target || '-'} clips`}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="col-span-1 md:col-span-1">
+                                <span className="font-medium text-slate-700 dark:text-slate-300 text-sm">{outputModeLabel(project.ratio)}</span>
+                              </div>
+
+                              <div className="col-span-1 md:col-span-1 flex items-center justify-end gap-1">
+                                <span className={`text-[11px] px-2 py-0.5 rounded-full border ${project.status === 'complete'
+                                  ? 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-800'
+                                  : project.status === 'error'
+                                    ? 'bg-red-100 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-800'
+                                    : 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800'
+                                  }`}>
+                                  {projectStatusLabel(project.status)}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleProjectFavorite(project.job_id);
+                                  }}
+                                  className={`p-2 rounded-full transition-colors ${project.favorite
+                                    ? 'text-pink-500 bg-pink-50 dark:bg-pink-900/20'
+                                    : 'text-slate-400 hover:text-pink-500 hover:bg-slate-100 dark:hover:bg-slate-800'
+                                    }`}
+                                  title={project.favorite ? 'Quitar de favoritos' : 'Agregar a favoritos'}
+                                >
+                                  <Heart size={16} fill={project.favorite ? 'currentColor' : 'none'} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setProjectMenuJobId((prev) => prev === project.job_id ? null : project.job_id);
+                                  }}
+                                  className="p-2 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                  title="Opciones"
+                                >
+                                  <MoreHorizontal size={16} />
+                                </button>
+                                {projectMenuJobId === project.job_id && (
+                                  <div className="absolute right-2 top-11 z-10 min-w-[160px] rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl p-1">
                                     <button
                                       type="button"
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        saveProjectTitle(project.job_id);
+                                        openSavedProject(project);
                                       }}
-                                      className="px-2 py-1 text-xs rounded-lg border border-emerald-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/20 dark:border-emerald-700 dark:text-emerald-300"
+                                      className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
                                     >
-                                      Guardar
+                                      Abrir proyecto
                                     </button>
                                     <button
                                       type="button"
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        cancelEditProjectTitle();
+                                        toggleProjectFavorite(project.job_id);
+                                        setProjectMenuJobId(null);
                                       }}
-                                      className="px-2 py-1 text-xs rounded-lg border border-slate-300 text-slate-600 dark:border-slate-600 dark:text-slate-300"
+                                      className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
                                     >
-                                      Cancelar
+                                      {project.favorite ? 'Quitar favorito' : 'Marcar favorito'}
                                     </button>
-                                  </div>
-                                ) : (
-                                  <div className="flex items-center gap-2 min-w-0">
-                                    <h3 className="text-xl md:text-2xl font-bold text-slate-900 dark:text-white truncate">{project.title || 'Proyecto'}</h3>
                                     <button
                                       type="button"
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         beginEditProjectTitle(project);
                                       }}
-                                      className="p-1 rounded-md text-slate-400 hover:text-primary hover:bg-primary/10 transition-colors shrink-0"
-                                      title="Editar título"
+                                      className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
                                     >
-                                      <Pencil size={14} />
+                                      Editar título
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        removeProject(project.job_id);
+                                      }}
+                                      className="w-full text-left px-3 py-2 text-sm text-red-600 dark:text-red-300 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20"
+                                    >
+                                      Eliminar de la lista
                                     </button>
                                   </div>
                                 )}
-                                <div className="text-sm text-slate-500 dark:text-slate-400 space-y-0.5 mt-1">
-                                  <p>{`Creado: ${formatProjectDate(project.created_at)}`}</p>
-                                  <p>{`Expira: ${formatProjectDate(project.expires_at)}`}</p>
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="col-span-1 md:col-span-2">
-                              <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${projectSourceBadgeClass(project.source_kind)}`}>
-                                {project.source_kind === 'youtube' ? <Youtube size={13} /> : project.source_kind === 'url' ? <Link2 size={13} /> : <Upload size={13} />}
-                                {project.source_label || 'Archivo local'}
-                              </span>
-                            </div>
-
-                            <div className="col-span-1 md:col-span-3">
-                              <div className="flex flex-col">
-                                <span className="font-semibold text-slate-900 dark:text-white text-sm">{project.video_type || 'Topic-clips'}</span>
-                                <span className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                                  {project.clip_count_actual
-                                    ? `Número de clips: ${project.clip_count_actual}`
-                                    : project.status === 'processing'
-                                      ? 'Procesando...'
-                                      : project.status === 'error'
-                                        ? 'Error en procesamiento'
-                                        : `Objetivo: ${project.clip_count_target || '-'} clips`}
-                                </span>
-                              </div>
-                            </div>
-
-                            <div className="col-span-1 md:col-span-1">
-                              <span className="font-medium text-slate-700 dark:text-slate-300 text-sm">{outputModeLabel(project.ratio)}</span>
-                            </div>
-
-                            <div className="col-span-1 md:col-span-1 flex items-center justify-end gap-1">
-                              <span className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                                project.status === 'complete'
-                                  ? 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-800'
-                                  : project.status === 'error'
-                                    ? 'bg-red-100 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-800'
-                                    : 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800'
-                              }`}>
-                                {projectStatusLabel(project.status)}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  toggleProjectFavorite(project.job_id);
-                                }}
-                                className={`p-2 rounded-full transition-colors ${
-                                  project.favorite
-                                    ? 'text-pink-500 bg-pink-50 dark:bg-pink-900/20'
-                                    : 'text-slate-400 hover:text-pink-500 hover:bg-slate-100 dark:hover:bg-slate-800'
-                                }`}
-                                title={project.favorite ? 'Quitar de favoritos' : 'Agregar a favoritos'}
-                              >
-                                <Heart size={16} fill={project.favorite ? 'currentColor' : 'none'} />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setProjectMenuJobId((prev) => prev === project.job_id ? null : project.job_id);
-                                }}
-                                className="p-2 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                                title="Opciones"
-                              >
-                                <MoreHorizontal size={16} />
-                              </button>
-                              {projectMenuJobId === project.job_id && (
-                                <div className="absolute right-2 top-11 z-10 min-w-[160px] rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl p-1">
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      openSavedProject(project);
-                                    }}
-                                    className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
-                                  >
-                                    Abrir proyecto
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      toggleProjectFavorite(project.job_id);
-                                      setProjectMenuJobId(null);
-                                    }}
-                                    className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
-                                  >
-                                    {project.favorite ? 'Quitar favorito' : 'Marcar favorito'}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      beginEditProjectTitle(project);
-                                    }}
-                                    className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
-                                  >
-                                    Editar título
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (window.confirm('¿Eliminar este proyecto de la lista?')) {
                                       removeProject(project.job_id);
-                                    }}
-                                    className="w-full text-left px-3 py-2 text-sm text-red-600 dark:text-red-300 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20"
-                                  >
-                                    Eliminar de la lista
-                                  </button>
-                                </div>
-                              )}
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (window.confirm('¿Eliminar este proyecto de la lista?')) {
-                                    removeProject(project.job_id);
-                                  }
-                                }}
-                                className="p-2 rounded-full text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                                title="Eliminar proyecto"
-                              >
-                                <Trash2 size={16} />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openSavedProject(project);
-                                }}
-                                className="p-2 rounded-full text-slate-400 hover:text-primary hover:bg-primary/10 transition-colors"
-                                title="Abrir proyecto"
-                              >
-                                <ChevronRight size={16} />
-                              </button>
+                                    }
+                                  }}
+                                  className="p-2 rounded-full text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                                  title="Eliminar proyecto"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openSavedProject(project);
+                                  }}
+                                  className="p-2 rounded-full text-slate-400 hover:text-primary hover:bg-primary/10 transition-colors"
+                                  title="Abrir proyecto"
+                                >
+                                  <ChevronRight size={16} />
+                                </button>
+                              </div>
                             </div>
+                            {project.status === 'processing' && (
+                              <div className="absolute left-0 right-0 bottom-0 h-1 bg-violet-100 dark:bg-slate-700">
+                                <div className="h-full w-1/3 bg-primary animate-pulse" />
+                              </div>
+                            )}
                           </div>
-                          {project.status === 'processing' && (
-                            <div className="absolute left-0 right-0 bottom-0 h-1 bg-violet-100 dark:bg-slate-700">
-                              <div className="h-full w-1/3 bg-primary animate-pulse" />
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveTab('home');
-                        setProjectsViewMode('list');
-                        window.scrollTo({ top: 0, behavior: 'smooth' });
-                      }}
-                      className="mt-6 w-full rounded-3xl border-2 border-dashed border-slate-300 dark:border-slate-700 p-8 text-center bg-white/60 dark:bg-slate-900/40 hover:bg-white dark:hover:bg-slate-900/70 transition-colors"
-                    >
-                      <div className="w-14 h-14 bg-violet-100 dark:bg-violet-900/20 rounded-full flex items-center justify-center mx-auto mb-3">
-                        <PlusCircle size={24} className="text-primary" />
+                        ))}
                       </div>
-                      <p className="text-lg font-bold text-slate-900 dark:text-white">Crear nuevo proyecto</p>
-                      <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Sube un archivo o pega una URL para comenzar.</p>
-                    </button>
-                  </>
-                ) : (
-                  <div className="rounded-3xl border-2 border-dashed border-slate-300 dark:border-slate-700 p-10 text-center bg-white/60 dark:bg-slate-900/40">
-                    <div className="w-16 h-16 bg-violet-100 dark:bg-violet-900/20 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <PlusCircle size={28} className="text-primary" />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTab('home');
+                          setProjectsViewMode('list');
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                        className="mt-6 w-full rounded-3xl border-2 border-dashed border-slate-300 dark:border-slate-700 p-8 text-center bg-white/60 dark:bg-slate-900/40 hover:bg-white dark:hover:bg-slate-900/70 transition-colors"
+                      >
+                        <div className="w-14 h-14 bg-violet-100 dark:bg-violet-900/20 rounded-full flex items-center justify-center mx-auto mb-3">
+                          <PlusCircle size={24} className="text-primary" />
+                        </div>
+                        <p className="text-lg font-bold text-slate-900 dark:text-white">Crear nuevo proyecto</p>
+                        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Sube un archivo o pega una URL para comenzar.</p>
+                      </button>
+                    </>
+                  ) : (
+                    <div className="rounded-3xl border-2 border-dashed border-slate-300 dark:border-slate-700 p-10 text-center bg-white/60 dark:bg-slate-900/40">
+                      <div className="w-16 h-16 bg-violet-100 dark:bg-violet-900/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <PlusCircle size={28} className="text-primary" />
+                      </div>
+                      <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-2">Crea tu primer proyecto</h3>
+                      <p className="text-sm text-slate-500 dark:text-slate-400 max-w-md mx-auto">
+                        Pega un enlace de YouTube o sube un video para generar clips virales automáticamente.
+                      </p>
                     </div>
-                    <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-2">Crea tu primer proyecto</h3>
-                    <p className="text-sm text-slate-500 dark:text-slate-400 max-w-md mx-auto">
-                      Pega un enlace de YouTube o sube un video para generar clips virales automáticamente.
-                    </p>
-                  </div>
-                )}
-              </div>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -2817,13 +2875,12 @@ function App() {
                         {isPollingPaused ? <Play size={12} /> : <Pause size={12} />}
                         {isPollingPaused ? 'Reanudar' : 'Pausar'}
                       </button>
-                      <span className={`text-[11px] px-2.5 py-1 rounded-full border font-semibold ${
-                        status === 'processing'
-                          ? 'bg-primary/10 border-primary/20 text-primary'
-                          : status === 'complete'
-                            ? 'bg-emerald-100 dark:bg-green-500/10 border-emerald-200 dark:border-green-500/20 text-emerald-700 dark:text-green-400'
-                            : 'bg-red-100 dark:bg-red-500/10 border-red-200 dark:border-red-500/20 text-red-700 dark:text-red-400'
-                      }`}>
+                      <span className={`text-[11px] px-2.5 py-1 rounded-full border font-semibold ${status === 'processing'
+                        ? 'bg-primary/10 border-primary/20 text-primary'
+                        : status === 'complete'
+                          ? 'bg-emerald-100 dark:bg-green-500/10 border-emerald-200 dark:border-green-500/20 text-emerald-700 dark:text-green-400'
+                          : 'bg-red-100 dark:bg-red-500/10 border-red-200 dark:border-red-500/20 text-red-700 dark:text-red-400'
+                        }`}>
                         {status === 'processing' ? (isPollingPaused ? 'PAUSADO' : 'EN PROCESO') : status === 'complete' ? 'COMPLETADO' : 'ERROR'}
                       </span>
                     </div>
@@ -2836,9 +2893,8 @@ function App() {
                     </div>
                     <div className="w-full h-2.5 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
                       <div
-                        className={`h-full transition-all duration-500 ${
-                          status === 'error' ? 'bg-red-400' : 'bg-gradient-to-r from-primary to-indigo-400'
-                        }`}
+                        className={`h-full transition-all duration-500 ${status === 'error' ? 'bg-red-400' : 'bg-gradient-to-r from-primary to-indigo-400'
+                          }`}
                         style={{ width: `${processingTimeline.progressPercent}%` }}
                       />
                     </div>
@@ -2882,8 +2938,8 @@ function App() {
                     </div>
                     <h2 className="text-lg font-semibold flex items-center gap-2 text-slate-900 dark:text-white">
                       <Sparkles className="text-yellow-400" size={20} />
-                      Clips generados
-                      {sortedClips.length > 0 && (
+                      {showTrailerFocusLayout ? 'Super trailer' : 'Clips generados'}
+                      {!showTrailerFocusLayout && sortedClips.length > 0 && (
                         <span className="text-xs bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-white px-2 py-0.5 rounded-full ml-auto border border-slate-200 dark:border-transparent">
                           {visibleClips.length}/{sortedClips.length} Clips
                         </span>
@@ -2896,7 +2952,9 @@ function App() {
                       </span>
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 text-slate-700 dark:text-zinc-300">
                         <Scissors size={12} />
-                        {`Objetivo: ${processingMedia?.clipCount || '-'} clips`}
+                        {showTrailerFocusLayout
+                          ? `Segmentos: ${trailerSegmentsCount || '-'}`
+                          : `Objetivo: ${processingMedia?.clipCount || '-'} clips`}
                       </span>
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 text-slate-700 dark:text-zinc-300">
                         <LayoutDashboard size={12} />
@@ -2910,565 +2968,724 @@ function App() {
                     </div>
                   </div>
 
-                {sortedClips.length > 0 && (
-                  <div className="mb-4 shrink-0 flex flex-wrap items-center gap-2">
-                    <span className="text-xs text-slate-500 dark:text-zinc-500">Orden:</span>
-                    <select
-                      value={clipSort}
-                      onChange={(e) => setClipSort(e.target.value)}
-                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
-                    >
-                      <option value="top">Mayor puntaje</option>
-                      <option value="balanced">Línea de tiempo</option>
-                      <option value="safe">Más seguros</option>
-                    </select>
-                    <span className="text-xs text-slate-500 dark:text-zinc-500 ml-1">Filtro:</span>
-                    <select
-                      value={clipFilter}
-                      onChange={(e) => setClipFilter(e.target.value)}
-                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
-                    >
-                      <option value="all">Todos</option>
-                      <option value="top">Alto (80+)</option>
-                      <option value="medium">Medio (65-79)</option>
-                      <option value="low">Bajo (&lt;65)</option>
-                    </select>
-                    <span className="text-xs text-slate-500 dark:text-zinc-500">Etiqueta:</span>
-                    <select
-                      value={clipTagFilter}
-                      onChange={(e) => setClipTagFilter(e.target.value)}
-                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
-                    >
-                      <option value="all">Todas</option>
-                      {availableTags.map((tag) => (
-                        <option key={tag} value={tag}>{tag}</option>
-                      ))}
-                    </select>
-                    <span className="text-xs text-slate-500 dark:text-zinc-500">Estrategia:</span>
-                    <select
-                      value={batchStrategy}
-                      onChange={(e) => applyBatchStrategy(e.target.value)}
-                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
-                    >
-                      <option value="growth">Crecimiento</option>
-                      <option value="balanced">Balanceada</option>
-                      <option value="conservative">Conservadora</option>
-                      <option value="custom">Personalizada</option>
-                    </select>
-                    <span className="text-xs text-slate-500 dark:text-zinc-500 ml-1">N clips:</span>
-                    <input
-                      type="number"
-                      min="1"
-                      max="10"
-                      value={batchTopCount}
-                      onChange={(e) => {
-                        setBatchStrategy('custom');
-                        setBatchTopCount(Math.max(1, Math.min(10, Number(e.target.value || 1))));
-                      }}
-                      className="w-16 text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
-                    />
-                    <span className="text-xs text-slate-500 dark:text-zinc-500">Inicia en:</span>
-                    <select
-                      value={batchStartDelayMinutes}
-                      onChange={(e) => {
-                        setBatchStrategy('custom');
-                        setBatchStartDelayMinutes(Number(e.target.value));
-                      }}
-                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
-                    >
-                      <option value={0}>ahora</option>
-                      <option value={5}>5m</option>
-                      <option value={15}>15m</option>
-                      <option value={30}>30m</option>
-                      <option value={60}>60m</option>
-                    </select>
-                    <span className="text-xs text-slate-500 dark:text-zinc-500">Cada:</span>
-                    <select
-                      value={batchIntervalMinutes}
-                      onChange={(e) => {
-                        setBatchStrategy('custom');
-                        setBatchIntervalMinutes(Number(e.target.value));
-                      }}
-                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
-                    >
-                      <option value={15}>15m</option>
-                      <option value={30}>30m</option>
-                      <option value={60}>60m</option>
-                      <option value={120}>120m</option>
-                      <option value={240}>240m</option>
-                    </select>
-                    <span className="text-xs text-slate-500 dark:text-zinc-500">Alcance:</span>
-                    <select
-                      value={batchScope}
-                      onChange={(e) => {
-                        setBatchStrategy('custom');
-                        setBatchScope(e.target.value);
-                      }}
-                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
-                    >
-                      <option value="visible">Visible</option>
-                      <option value="global">Global</option>
-                    </select>
-                    <button
-                      onClick={handleQueueTopClips}
-                      disabled={isBatchScheduling || (batchScope === 'global' ? sortedClips.length === 0 : visibleClips.length === 0)}
-                      className="ml-1 text-xs bg-violet-100 dark:bg-primary/20 border border-violet-300 dark:border-primary/40 text-violet-700 dark:text-primary rounded-md px-2 py-1 hover:bg-violet-200 dark:hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                      title="Programa lote usando N clips e intervalo actual"
-                    >
-                      {isBatchScheduling ? 'Encolando...' : `Encolar ${Math.max(1, Math.min(10, Number(batchTopCount) || 1))}`}
-                    </button>
-                    <button
-                      onClick={handleExportPack}
-                      disabled={isExportingPack || !jobId}
-                      className="text-xs bg-emerald-100 dark:bg-emerald-500/20 border border-emerald-300 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 rounded-md px-2 py-1 hover:bg-emerald-200 dark:hover:bg-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                      title="Exportar paquete para agencia (zip)"
-                    >
-                      {isExportingPack ? 'Exportando...' : 'Exportar paquete'}
-                    </button>
-                    <span className="text-xs text-slate-500 dark:text-zinc-500">Reel ratio:</span>
-                    <select
-                      value={highlightAspectRatio}
-                      onChange={(e) => setHighlightAspectRatio(e.target.value === '16:9' ? '16:9' : '9:16')}
-                      className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
-                      title="Ratio de salida para highlight reel"
-                    >
-                      <option value="9:16">9:16</option>
-                      <option value="16:9">16:9</option>
-                    </select>
-                    <button
-                      onClick={handleGenerateHighlightReel}
-                      disabled={isGeneratingHighlightReel || !jobId || status !== 'complete'}
-                      className="text-xs bg-cyan-100 dark:bg-cyan-500/20 border border-cyan-300 dark:border-cyan-500/40 text-cyan-700 dark:text-cyan-300 rounded-md px-2 py-1 hover:bg-cyan-200 dark:hover:bg-cyan-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                      title="Compone un reel corto con varios momentos top para impulsar el video completo"
-                    >
-                      {isGeneratingHighlightReel ? 'Armando reel...' : 'Generar highlight reel'}
-                    </button>
-                  </div>
-                )}
-
-                {sortedClips.length > 0 && (
-                  <div className="mb-4 rounded-lg border border-white/10 bg-white/[0.02] p-3">
-                    <div className="flex items-center gap-2">
-                      <Search size={14} className="text-zinc-400" />
+                  {!showTrailerFocusLayout && sortedClips.length > 0 && (
+                    <div className="mb-4 shrink-0 flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-slate-500 dark:text-zinc-500">Orden:</span>
                       <select
-                        value={clipSearchModePreset}
-                        onChange={(e) => setClipSearchModePreset(e.target.value)}
-                        className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200 shrink-0"
-                        title="Modo de búsqueda: Exacta prioriza precisión, Amplia prioriza cobertura."
+                        value={clipSort}
+                        onChange={(e) => setClipSort(e.target.value)}
+                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
                       >
-                        <option value="exact">Exacta</option>
-                        <option value="balanced">Balanceada</option>
-                        <option value="broad">Amplia</option>
+                        <option value="top">Mayor puntaje</option>
+                        <option value="balanced">Línea de tiempo</option>
+                        <option value="safe">Más seguros</option>
                       </select>
-                      <input
-                        type="text"
-                        value={clipSearchQuery}
-                        onChange={(e) => setClipSearchQuery(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') handleClipSearch();
-                        }}
-                        placeholder="Clip Anything: ej. 'cuando habla de deuda' o 'momento polémico'"
-                        className="flex-1 text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
-                      />
-                      <button
-                        onClick={handleClipSearch}
-                        disabled={isSearchingClips || !clipSearchQuery.trim()}
-                        className="text-xs bg-white/10 border border-white/20 rounded-md px-2 py-1.5 text-zinc-200 hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                      <span className="text-xs text-slate-500 dark:text-zinc-500 ml-1">Filtro:</span>
+                      <select
+                        value={clipFilter}
+                        onChange={(e) => setClipFilter(e.target.value)}
+                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
                       >
-                        {isSearchingClips ? 'Buscando...' : 'Buscar'}
+                        <option value="all">Todos</option>
+                        <option value="top">Alto (80+)</option>
+                        <option value="medium">Medio (65-79)</option>
+                        <option value="low">Bajo (&lt;65)</option>
+                      </select>
+                      <span className="text-xs text-slate-500 dark:text-zinc-500">Etiqueta:</span>
+                      <select
+                        value={clipTagFilter}
+                        onChange={(e) => setClipTagFilter(e.target.value)}
+                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                      >
+                        <option value="all">Todas</option>
+                        {availableTags.map((tag) => (
+                          <option key={tag} value={tag}>{tag}</option>
+                        ))}
+                      </select>
+                      <span className="text-xs text-slate-500 dark:text-zinc-500">Estrategia:</span>
+                      <select
+                        value={batchStrategy}
+                        onChange={(e) => applyBatchStrategy(e.target.value)}
+                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                      >
+                        <option value="growth">Crecimiento</option>
+                        <option value="balanced">Balanceada</option>
+                        <option value="conservative">Conservadora</option>
+                        <option value="custom">Personalizada</option>
+                      </select>
+                      <span className="text-xs text-slate-500 dark:text-zinc-500 ml-1">N clips:</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="10"
+                        value={batchTopCount}
+                        onChange={(e) => {
+                          setBatchStrategy('custom');
+                          setBatchTopCount(Math.max(1, Math.min(10, Number(e.target.value || 1))));
+                        }}
+                        className="w-16 text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                      />
+                      <span className="text-xs text-slate-500 dark:text-zinc-500">Inicia en:</span>
+                      <select
+                        value={batchStartDelayMinutes}
+                        onChange={(e) => {
+                          setBatchStrategy('custom');
+                          setBatchStartDelayMinutes(Number(e.target.value));
+                        }}
+                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                      >
+                        <option value={0}>ahora</option>
+                        <option value={5}>5m</option>
+                        <option value={15}>15m</option>
+                        <option value={30}>30m</option>
+                        <option value={60}>60m</option>
+                      </select>
+                      <span className="text-xs text-slate-500 dark:text-zinc-500">Cada:</span>
+                      <select
+                        value={batchIntervalMinutes}
+                        onChange={(e) => {
+                          setBatchStrategy('custom');
+                          setBatchIntervalMinutes(Number(e.target.value));
+                        }}
+                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                      >
+                        <option value={15}>15m</option>
+                        <option value={30}>30m</option>
+                        <option value={60}>60m</option>
+                        <option value={120}>120m</option>
+                        <option value={240}>240m</option>
+                      </select>
+                      <span className="text-xs text-slate-500 dark:text-zinc-500">Alcance:</span>
+                      <select
+                        value={batchScope}
+                        onChange={(e) => {
+                          setBatchStrategy('custom');
+                          setBatchScope(e.target.value);
+                        }}
+                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                      >
+                        <option value="visible">Visible</option>
+                        <option value="global">Global</option>
+                      </select>
+                      <button
+                        onClick={handleQueueTopClips}
+                        disabled={isBatchScheduling || (batchScope === 'global' ? sortedClips.length === 0 : visibleClips.length === 0)}
+                        className="ml-1 text-xs bg-violet-100 dark:bg-primary/20 border border-violet-300 dark:border-primary/40 text-violet-700 dark:text-primary rounded-md px-2 py-1 hover:bg-violet-200 dark:hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Programa lote usando N clips e intervalo actual"
+                      >
+                        {isBatchScheduling ? 'Encolando...' : `Encolar ${Math.max(1, Math.min(10, Number(batchTopCount) || 1))}`}
+                      </button>
+                      <button
+                        onClick={handleExportPack}
+                        disabled={isExportingPack || !jobId}
+                        className="text-xs bg-emerald-100 dark:bg-emerald-500/20 border border-emerald-300 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 rounded-md px-2 py-1 hover:bg-emerald-200 dark:hover:bg-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Exportar paquete para agencia (zip)"
+                      >
+                        {isExportingPack ? 'Exportando...' : 'Exportar paquete'}
+                      </button>
+                      <button
+                        onClick={handleGenerateTrailer}
+                        disabled={isGeneratingTrailer || !jobId || status !== 'complete'}
+                        className="text-xs bg-amber-100 dark:bg-amber-500/20 border border-amber-300 dark:border-amber-500/40 text-amber-700 dark:text-amber-300 rounded-md px-2 py-1 hover:bg-amber-200 dark:hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Genera un Super Trailer (Súper Resumen) con fragmentos explosivos y transiciones"
+                      >
+                        {isGeneratingTrailer ? 'Generando trailer...' : 'Generar Super Trailer ⚡'}
                       </button>
                     </div>
-                    <div className="mt-2 grid grid-cols-1 lg:grid-cols-4 gap-2">
-                      <select
-                        value={clipSearchChapterFilter}
-                        onChange={(e) => setClipSearchChapterFilter(e.target.value)}
-                        className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
-                        title="Limita búsqueda a un capítulo detectado automáticamente"
-                      >
-                        <option value="-1">Todos los capítulos</option>
-                        {clipSearchChapters.map((chapter) => (
-                          <option key={`chapter-filter-${chapter.chapter_index}`} value={String(chapter.chapter_index)}>
-                            {`#${chapter.chapter_index + 1} ${chapter.title || 'Capítulo'} (${chapter.start}s-${chapter.end}s)`}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={clipSearchStartTime}
-                        onChange={(e) => setClipSearchStartTime(e.target.value)}
-                        placeholder="Desde seg (opcional)"
-                        className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
-                      />
-                      <input
-                        type="number"
-                        min="0"
-                        step="1"
-                        value={clipSearchEndTime}
-                        onChange={(e) => setClipSearchEndTime(e.target.value)}
-                        placeholder="Hasta seg (opcional)"
-                        className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
-                      />
-                      <select
-                        value={clipSearchSpeakerFilter}
-                        onChange={(e) => setClipSearchSpeakerFilter(e.target.value)}
-                        className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
-                        title="Filtra por hablante si hay diarización"
-                      >
-                        <option value="all">Todos los hablantes</option>
-                        {availableSearchSpeakers.map((speaker) => (
-                          <option key={`speaker-filter-${speaker}`} value={speaker}>{speaker}</option>
-                        ))}
-                      </select>
-                    </div>
+                  )}
 
-                    {clipSearchError && (
-                      <p className="mt-2 text-[11px] text-red-300">{clipSearchError}</p>
-                    )}
+                  {!showTrailerFocusLayout && sortedClips.length > 0 && (
+                    <div className="mb-4 rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                      <div className="flex items-center gap-2">
+                        <Search size={14} className="text-zinc-400" />
+                        <select
+                          value={clipSearchModePreset}
+                          onChange={(e) => setClipSearchModePreset(e.target.value)}
+                          className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200 shrink-0"
+                          title="Modo de búsqueda: Exacta prioriza precisión, Amplia prioriza cobertura."
+                        >
+                          <option value="exact">Exacta</option>
+                          <option value="balanced">Balanceada</option>
+                          <option value="broad">Amplia</option>
+                        </select>
+                        <input
+                          type="text"
+                          value={clipSearchQuery}
+                          onChange={(e) => setClipSearchQuery(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleClipSearch();
+                          }}
+                          placeholder="Clip Anything: ej. 'cuando habla de deuda' o 'momento polémico'"
+                          className="flex-1 text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                        />
+                        <button
+                          onClick={handleClipSearch}
+                          disabled={isSearchingClips || !clipSearchQuery.trim()}
+                          className="text-xs bg-white/10 border border-white/20 rounded-md px-2 py-1.5 text-zinc-200 hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isSearchingClips ? 'Buscando...' : 'Buscar'}
+                        </button>
+                      </div>
+                      <div className="mt-2 grid grid-cols-1 lg:grid-cols-4 gap-2">
+                        <select
+                          value={clipSearchChapterFilter}
+                          onChange={(e) => setClipSearchChapterFilter(e.target.value)}
+                          className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                          title="Limita búsqueda a un capítulo detectado automáticamente"
+                        >
+                          <option value="-1">Todos los capítulos</option>
+                          {clipSearchChapters.map((chapter) => (
+                            <option key={`chapter-filter-${chapter.chapter_index}`} value={String(chapter.chapter_index)}>
+                              {`#${chapter.chapter_index + 1} ${chapter.title || 'Capítulo'} (${chapter.start}s-${chapter.end}s)`}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={clipSearchStartTime}
+                          onChange={(e) => setClipSearchStartTime(e.target.value)}
+                          placeholder="Desde seg (opcional)"
+                          className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                        />
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={clipSearchEndTime}
+                          onChange={(e) => setClipSearchEndTime(e.target.value)}
+                          placeholder="Hasta seg (opcional)"
+                          className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                        />
+                        <select
+                          value={clipSearchSpeakerFilter}
+                          onChange={(e) => setClipSearchSpeakerFilter(e.target.value)}
+                          className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                          title="Filtra por hablante si hay diarización"
+                        >
+                          <option value="all">Todos los hablantes</option>
+                          {availableSearchSpeakers.map((speaker) => (
+                            <option key={`speaker-filter-${speaker}`} value={speaker}>{speaker}</option>
+                          ))}
+                        </select>
+                      </div>
 
-                    {!clipSearchError && (clipSearchResults.length > 0 || clipSearchChapters.length > 0 || clipHybridShortlist.length > 0) && (
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-slate-600 dark:text-zinc-400">
-                        <span className={`uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-                          clipSearchProvider === 'gemini'
+                      {clipSearchError && (
+                        <p className="mt-2 text-[11px] text-red-300">{clipSearchError}</p>
+                      )}
+
+                      {!clipSearchError && (clipSearchResults.length > 0 || clipSearchChapters.length > 0 || clipHybridShortlist.length > 0) && (
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-slate-600 dark:text-zinc-400">
+                          <span className={`uppercase tracking-wider px-1.5 py-0.5 rounded border ${clipSearchProvider === 'gemini'
                             ? 'bg-green-50 dark:bg-green-500/15 border-green-300 dark:border-green-500/30 text-green-700 dark:text-green-300'
                             : 'bg-slate-100 dark:bg-zinc-500/15 border-slate-300 dark:border-zinc-500/30 text-slate-700 dark:text-zinc-300'
-                        }`}>
-                          {`semántica: ${clipSearchProvider}`}
-                        </span>
-                        <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-blue-50 dark:bg-blue-500/15 border-blue-300 dark:border-blue-500/30 text-blue-700 dark:text-blue-300">
-                          {`intención: ${clipSearchMode}`}
-                        </span>
-                        <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-cyan-50 dark:bg-cyan-500/15 border-cyan-300 dark:border-cyan-500/30 text-cyan-700 dark:text-cyan-300">
-                          {`modo: ${clipSearchModePreset}`}
-                        </span>
-                        {clipSearchRelaxed && (
-                          <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-amber-50 dark:bg-amber-500/15 border-amber-300 dark:border-amber-500/30 text-amber-700 dark:text-amber-300">
-                            relajado
+                            }`}>
+                            {`semántica: ${clipSearchProvider}`}
                           </span>
-                        )}
-                        {clipSearchKeywords.length > 0 && (
-                          <span className="truncate text-slate-600 dark:text-zinc-400">
-                            {`palabras clave: ${clipSearchKeywords.join(', ')}`}
+                          <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-blue-50 dark:bg-blue-500/15 border-blue-300 dark:border-blue-500/30 text-blue-700 dark:text-blue-300">
+                            {`intención: ${clipSearchMode}`}
                           </span>
-                        )}
-                        {clipSearchPhrases.length > 0 && (
-                          <span className="truncate text-slate-500 dark:text-zinc-500">
-                            {`frases: ${clipSearchPhrases.join(' | ')}`}
+                          <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-cyan-50 dark:bg-cyan-500/15 border-cyan-300 dark:border-cyan-500/30 text-cyan-700 dark:text-cyan-300">
+                            {`modo: ${clipSearchModePreset}`}
                           </span>
-                        )}
-                        {clipSearchScope?.applied && (
-                          <span className="truncate text-emerald-700 dark:text-emerald-300">
-                            {`alcance: ${clipSearchScope.start ?? '-'}s-${clipSearchScope.end ?? '-'}s${clipSearchScope.speaker ? ` | hablante ${clipSearchScope.speaker}` : ''}${clipSearchScope.chapter?.chapter_index !== undefined ? ` | cap #${Number(clipSearchScope.chapter.chapter_index) + 1}` : ''}`}
-                          </span>
-                        )}
-                      </div>
-                    )}
-
-                    {clipSearchResults.length > 0 && (
-                      <div className="mt-2 max-h-36 overflow-y-auto border border-white/10 rounded bg-black/20 divide-y divide-white/5">
-                        {clipSearchResults.map((m, i) => (
-                          <div key={`${m.start}-${m.end}-${i}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
-                            <div className="min-w-0">
-                              <div className="text-zinc-200 truncate">{m.snippet || `Coincidencia ${i + 1}`}</div>
-                              <div className="text-zinc-500">{`${m.start}s - ${m.end}s | híbrido ${m.match_score} | sem ${m.semantic_score ?? '-'} | clave ${m.keyword_score ?? '-'} | viral ${m.virality_boost ?? '-'}`}</div>
-                              {Array.isArray(m.speakers) && m.speakers.length > 0 && (
-                                <div className="text-zinc-500 truncate">{`hablante: ${m.speakers.join(', ')}`}</div>
-                              )}
-                            </div>
-                            <button
-                              onClick={() => handleClipPlay(m.start)}
-                              className="shrink-0 text-[11px] bg-primary/20 border border-primary/40 text-primary rounded px-2 py-1 hover:bg-primary/30"
-                            >
-                              Reproducir
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {clipSearchChapters.length > 0 && (
-                      <div className="mt-2 border border-white/10 rounded bg-black/20">
-                        <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400 border-b border-white/10">
-                          Capítulos automáticos
+                          {clipSearchRelaxed && (
+                            <span className="uppercase tracking-wider px-1.5 py-0.5 rounded border bg-amber-50 dark:bg-amber-500/15 border-amber-300 dark:border-amber-500/30 text-amber-700 dark:text-amber-300">
+                              relajado
+                            </span>
+                          )}
+                          {clipSearchKeywords.length > 0 && (
+                            <span className="truncate text-slate-600 dark:text-zinc-400">
+                              {`palabras clave: ${clipSearchKeywords.join(', ')}`}
+                            </span>
+                          )}
+                          {clipSearchPhrases.length > 0 && (
+                            <span className="truncate text-slate-500 dark:text-zinc-500">
+                              {`frases: ${clipSearchPhrases.join(' | ')}`}
+                            </span>
+                          )}
+                          {clipSearchScope?.applied && (
+                            <span className="truncate text-emerald-700 dark:text-emerald-300">
+                              {`alcance: ${clipSearchScope.start ?? '-'}s-${clipSearchScope.end ?? '-'}s${clipSearchScope.speaker ? ` | hablante ${clipSearchScope.speaker}` : ''}${clipSearchScope.chapter?.chapter_index !== undefined ? ` | cap #${Number(clipSearchScope.chapter.chapter_index) + 1}` : ''}`}
+                            </span>
+                          )}
                         </div>
-                        <div className="max-h-36 overflow-y-auto divide-y divide-white/5">
-                          {clipSearchChapters.map((chapter) => (
-                            <div key={`chapter-${chapter.chapter_index}-${chapter.start}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
+                      )}
+
+                      {clipSearchResults.length > 0 && (
+                        <div className="mt-2 max-h-36 overflow-y-auto border border-white/10 rounded bg-black/20 divide-y divide-white/5">
+                          {clipSearchResults.map((m, i) => (
+                            <div key={`${m.start}-${m.end}-${i}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
                               <div className="min-w-0">
-                                <div className="text-zinc-200 truncate">{chapter.title || `Capítulo ${chapter.chapter_index + 1}`}</div>
-                                <div className="text-zinc-500 truncate">{`${chapter.start}s - ${chapter.end}s${Array.isArray(chapter.keywords) && chapter.keywords.length > 0 ? ` | ${chapter.keywords.join(', ')}` : ''}`}</div>
-                              </div>
-                              <div className="shrink-0 flex items-center gap-1.5">
-                                <button
-                                  onClick={() => {
-                                    setClipSearchChapterFilter(String(chapter.chapter_index));
-                                    setClipSearchStartTime('');
-                                    setClipSearchEndTime('');
-                                  }}
-                                  className="text-[11px] bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 rounded px-2 py-1 hover:bg-emerald-500/25"
-                                >
-                                  Acotar
-                                </button>
-                                <button
-                                  onClick={() => handleClipPlay(chapter.start)}
-                                  className="text-[11px] bg-white/10 border border-white/20 text-zinc-200 rounded px-2 py-1 hover:bg-white/15"
-                                >
-                                  Reproducir
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {clipHybridShortlist.length > 0 && (
-                      <div className="mt-2 border border-white/10 rounded bg-black/20">
-                        <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400 border-b border-white/10">
-                          Lista corta híbrida (Semántica + puntaje de viralidad)
-                        </div>
-                        <div className="max-h-36 overflow-y-auto divide-y divide-white/5">
-                          {clipHybridShortlist.map((item, i) => (
-                            <div key={`shortlist-${item.clip_index}-${i}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="text-zinc-200 truncate">{item.title || `Clip ${item.clip_index + 1}`}</div>
-                                <div className="text-zinc-500 truncate">{`${item.start}s - ${item.end}s | híbrido ${item.hybrid_score} | viralidad ${item.virality_score}`}</div>
+                                <div className="text-zinc-200 truncate">{m.snippet || `Coincidencia ${i + 1}`}</div>
+                                <div className="text-zinc-500">{`${m.start}s - ${m.end}s | híbrido ${m.match_score} | sem ${m.semantic_score ?? '-'} | clave ${m.keyword_score ?? '-'} | viral ${m.virality_boost ?? '-'}`}</div>
+                                {Array.isArray(m.speakers) && m.speakers.length > 0 && (
+                                  <div className="text-zinc-500 truncate">{`hablante: ${m.speakers.join(', ')}`}</div>
+                                )}
                               </div>
                               <button
-                                onClick={() => handleClipPlay(item.start)}
-                                className="shrink-0 text-[11px] bg-primary/15 border border-primary/30 text-primary rounded px-2 py-1 hover:bg-primary/25"
+                                onClick={() => handleClipPlay(m.start)}
+                                className="shrink-0 text-[11px] bg-primary/20 border border-primary/40 text-primary rounded px-2 py-1 hover:bg-primary/30"
                               >
                                 Reproducir
                               </button>
                             </div>
                           ))}
                         </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {status === 'complete' && jobId && (
-                  <div className="mb-4 rounded-lg border border-white/10 bg-white/[0.02] p-3">
-                    <div className="flex items-center gap-2 mb-2">
-                      <History size={14} className="text-zinc-400" />
-                      <span className="text-xs text-zinc-300 font-medium">Sincronía de transcript</span>
-                      <span className="text-[10px] text-zinc-500">{`${visibleTranscriptSegments.length}/${transcriptTotal || transcriptSegments.length} segmentos`}</span>
-                      {transcriptHasSpeakers && (
-                        <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border bg-violet-500/15 border-violet-500/30 text-violet-300">
-                          etiquetas de speaker
-                        </span>
                       )}
-                      <button
-                        onClick={() => loadTranscriptSegments(jobId)}
-                        disabled={isLoadingTranscript}
-                        className="ml-auto text-[11px] bg-white/10 border border-white/20 rounded px-2 py-1 text-zinc-200 hover:bg-white/15 disabled:opacity-50"
-                      >
-                        {isLoadingTranscript ? 'Cargando...' : 'Recargar'}
-                      </button>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={transcriptFilter}
-                        onChange={(e) => setTranscriptFilter(e.target.value)}
-                        placeholder="Filtrar transcript..."
-                        className="flex-1 text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
-                      />
-                    </div>
-                    {transcriptError && (
-                      <p className="mt-2 text-[11px] text-red-300">{transcriptError}</p>
-                    )}
-                    {!transcriptError && visibleTranscriptSegments.length > 0 && (
-                      <div className="mt-2 max-h-56 overflow-y-auto border border-white/10 rounded bg-black/20 divide-y divide-white/5">
-                        {visibleTranscriptSegments.map((seg) => (
-                          <div key={`seg-${seg.segment_index}-${seg.start}`} className="px-2 py-1.5 text-[11px] flex items-start justify-between gap-2">
-                            <div className="min-w-0">
-                              <div className="text-zinc-500">
-                                {`${formatTimelineTime(seg.start)} - ${formatTimelineTime(seg.end)}`}
-                                {seg.speaker ? ` | ${seg.speaker}` : ''}
-                              </div>
-                              <div className="text-zinc-200 line-clamp-2">{seg.text}</div>
-                            </div>
-                            <button
-                              onClick={() => handleClipPlay(seg.start)}
-                              className="shrink-0 text-[11px] bg-primary/20 border border-primary/40 text-primary rounded px-2 py-1 hover:bg-primary/30"
-                            >
-                              Reproducir
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {!transcriptError && !isLoadingTranscript && visibleTranscriptSegments.length === 0 && (
-                      <p className="mt-2 text-[11px] text-zinc-500">No se encontraron segmentos para este filtro.</p>
-                    )}
-                  </div>
-                )}
 
-                {batchScheduleReport && (
-                  <div className={`mb-4 text-xs rounded-lg border px-3 py-2 ${
-                    batchScheduleReport.failures.length === 0
-                      ? 'bg-green-500/10 border-green-500/30 text-green-300'
-                      : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
-                  }`}>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p>{`Lote programado: ${batchScheduleReport.success}/${batchScheduleReport.total} en cola.`}</p>
-                      <button
-                        onClick={handleBatchReportCsvDownload}
-                        className="text-[11px] bg-white/10 border border-white/20 rounded px-2 py-1 hover:bg-white/15"
-                      >
-                        Exportar CSV del lote
-                      </button>
-                    </div>
-                    <p className="mt-1 text-[11px] text-zinc-300">
-                      {`Estrategia: ${strategyLabel(batchScheduleReport.strategy || 'custom')} | Alcance: ${scopeLabel(batchScheduleReport.scope || 'visible')} | N clips: ${batchScheduleReport.top_count ?? '-'} | Cada: ${batchScheduleReport.interval_minutes ?? '-'}m`}
-                    </p>
-                    {batchScheduleReport.failures.length > 0 && (
-                      <p className="mt-1 text-[11px] text-amber-300">
-                        {batchScheduleReport.failures[0]}
-                      </p>
-                    )}
-                    {Array.isArray(batchScheduleReport.timeline) && batchScheduleReport.timeline.length > 0 && (
-                      <div className="mt-3 max-h-36 overflow-y-auto border border-white/10 rounded bg-black/20">
-                        <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400 border-b border-white/10">
-                          Calendario de cola
-                        </div>
-                        <div className="divide-y divide-white/5">
-                          {batchScheduleReport.timeline.map((item, idx) => (
-                            <div key={`${item.clip_index}-${item.scheduled_at}-${idx}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="text-zinc-200 truncate">{item.clip_title}</div>
-                                <div className="text-zinc-500">{new Date(item.scheduled_at).toLocaleString()}</div>
+                      {clipSearchChapters.length > 0 && (
+                        <div className="mt-2 border border-white/10 rounded bg-black/20">
+                          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400 border-b border-white/10">
+                            Capítulos automáticos
+                          </div>
+                          <div className="max-h-36 overflow-y-auto divide-y divide-white/5">
+                            {clipSearchChapters.map((chapter) => (
+                              <div key={`chapter-${chapter.chapter_index}-${chapter.start}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                  <div className="text-zinc-200 truncate">{chapter.title || `Capítulo ${chapter.chapter_index + 1}`}</div>
+                                  <div className="text-zinc-500 truncate">{`${chapter.start}s - ${chapter.end}s${Array.isArray(chapter.keywords) && chapter.keywords.length > 0 ? ` | ${chapter.keywords.join(', ')}` : ''}`}</div>
+                                </div>
+                                <div className="shrink-0 flex items-center gap-1.5">
+                                  <button
+                                    onClick={() => {
+                                      setClipSearchChapterFilter(String(chapter.chapter_index));
+                                      setClipSearchStartTime('');
+                                      setClipSearchEndTime('');
+                                    }}
+                                    className="text-[11px] bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 rounded px-2 py-1 hover:bg-emerald-500/25"
+                                  >
+                                    Acotar
+                                  </button>
+                                  <button
+                                    onClick={() => handleClipPlay(chapter.start)}
+                                    className="text-[11px] bg-white/10 border border-white/20 text-zinc-200 rounded px-2 py-1 hover:bg-white/15"
+                                  >
+                                    Reproducir
+                                  </button>
+                                </div>
                               </div>
-                              <span className={`shrink-0 px-1.5 py-0.5 rounded border ${
-                                item.status === 'scheduled'
-                                  ? 'bg-green-500/15 border-green-500/30 text-green-300'
-                                  : 'bg-red-500/15 border-red-500/30 text-red-300'
-                              }`}>
-                                {queueStatusLabel(item.status)}
-                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {clipHybridShortlist.length > 0 && (
+                        <div className="mt-2 border border-white/10 rounded bg-black/20">
+                          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400 border-b border-white/10">
+                            Lista corta híbrida (Semántica + puntaje de viralidad)
+                          </div>
+                          <div className="max-h-36 overflow-y-auto divide-y divide-white/5">
+                            {clipHybridShortlist.map((item, i) => (
+                              <div key={`shortlist-${item.clip_index}-${i}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                  <div className="text-zinc-200 truncate">{item.title || `Clip ${item.clip_index + 1}`}</div>
+                                  <div className="text-zinc-500 truncate">{`${item.start}s - ${item.end}s | híbrido ${item.hybrid_score} | viralidad ${item.virality_score}`}</div>
+                                </div>
+                                <button
+                                  onClick={() => handleClipPlay(item.start)}
+                                  className="shrink-0 text-[11px] bg-primary/15 border border-primary/30 text-primary rounded px-2 py-1 hover:bg-primary/25"
+                                >
+                                  Reproducir
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {!showTrailerFocusLayout && status === 'complete' && jobId && (
+                    <div className="mb-4 rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <History size={14} className="text-zinc-400" />
+                        <span className="text-xs text-zinc-300 font-medium">Sincronía de transcript</span>
+                        <span className="text-[10px] text-zinc-500">{`${visibleTranscriptSegments.length}/${transcriptTotal || transcriptSegments.length} segmentos`}</span>
+                        {transcriptHasSpeakers && (
+                          <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border bg-violet-500/15 border-violet-500/30 text-violet-300">
+                            etiquetas de speaker
+                          </span>
+                        )}
+                        <button
+                          onClick={() => loadTranscriptSegments(jobId)}
+                          disabled={isLoadingTranscript}
+                          className="ml-auto text-[11px] bg-white/10 border border-white/20 rounded px-2 py-1 text-zinc-200 hover:bg-white/15 disabled:opacity-50"
+                        >
+                          {isLoadingTranscript ? 'Cargando...' : 'Recargar'}
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={transcriptFilter}
+                          onChange={(e) => setTranscriptFilter(e.target.value)}
+                          placeholder="Filtrar transcript..."
+                          className="flex-1 text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                        />
+                      </div>
+                      {transcriptError && (
+                        <p className="mt-2 text-[11px] text-red-300">{transcriptError}</p>
+                      )}
+                      {!transcriptError && visibleTranscriptSegments.length > 0 && (
+                        <div className="mt-2 max-h-56 overflow-y-auto border border-white/10 rounded bg-black/20 divide-y divide-white/5">
+                          {visibleTranscriptSegments.map((seg) => (
+                            <div key={`seg-${seg.segment_index}-${seg.start}`} className="px-2 py-1.5 text-[11px] flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="text-zinc-500">
+                                  {`${formatTimelineTime(seg.start)} - ${formatTimelineTime(seg.end)}`}
+                                  {seg.speaker ? ` | ${seg.speaker}` : ''}
+                                </div>
+                                <div className="text-zinc-200 line-clamp-2">{seg.text}</div>
+                              </div>
+                              <button
+                                onClick={() => handleTranscriptSegmentPlay(seg.start)}
+                                className="shrink-0 text-[11px] bg-primary/20 border border-primary/40 text-primary rounded px-2 py-1 hover:bg-primary/30"
+                              >
+                                Reproducir
+                              </button>
                             </div>
                           ))}
                         </div>
+                      )}
+                      {!transcriptError && !isLoadingTranscript && visibleTranscriptSegments.length === 0 && (
+                        <p className="mt-2 text-[11px] text-zinc-500">No se encontraron segmentos para este filtro.</p>
+                      )}
+                    </div>
+                  )}
+
+                  {batchScheduleReport && (
+                    <div className={`mb-4 text-xs rounded-lg border px-3 py-2 ${batchScheduleReport.failures.length === 0
+                      ? 'bg-green-500/10 border-green-500/30 text-green-300'
+                      : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                      }`}>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p>{`Lote programado: ${batchScheduleReport.success}/${batchScheduleReport.total} en cola.`}</p>
+                        <button
+                          onClick={handleBatchReportCsvDownload}
+                          className="text-[11px] bg-white/10 border border-white/20 rounded px-2 py-1 hover:bg-white/15"
+                        >
+                          Exportar CSV del lote
+                        </button>
                       </div>
-                    )}
-                  </div>
-                )}
-                {packExportReport && (
-                  <div className={`mb-4 text-xs rounded-lg border px-3 py-2 ${
-                    packExportReport.success === false
+                      <p className="mt-1 text-[11px] text-zinc-300">
+                        {`Estrategia: ${strategyLabel(batchScheduleReport.strategy || 'custom')} | Alcance: ${scopeLabel(batchScheduleReport.scope || 'visible')} | N clips: ${batchScheduleReport.top_count ?? '-'} | Cada: ${batchScheduleReport.interval_minutes ?? '-'}m`}
+                      </p>
+                      {batchScheduleReport.failures.length > 0 && (
+                        <p className="mt-1 text-[11px] text-amber-300">
+                          {batchScheduleReport.failures[0]}
+                        </p>
+                      )}
+                      {Array.isArray(batchScheduleReport.timeline) && batchScheduleReport.timeline.length > 0 && (
+                        <div className="mt-3 max-h-36 overflow-y-auto border border-white/10 rounded bg-black/20">
+                          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400 border-b border-white/10">
+                            Calendario de cola
+                          </div>
+                          <div className="divide-y divide-white/5">
+                            {batchScheduleReport.timeline.map((item, idx) => (
+                              <div key={`${item.clip_index}-${item.scheduled_at}-${idx}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                  <div className="text-zinc-200 truncate">{item.clip_title}</div>
+                                  <div className="text-zinc-500">{new Date(item.scheduled_at).toLocaleString()}</div>
+                                </div>
+                                <span className={`shrink-0 px-1.5 py-0.5 rounded border ${item.status === 'scheduled'
+                                  ? 'bg-green-500/15 border-green-500/30 text-green-300'
+                                  : 'bg-red-500/15 border-red-500/30 text-red-300'
+                                  }`}>
+                                  {queueStatusLabel(item.status)}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {packExportReport && (
+                    <div className={`mb-4 text-xs rounded-lg border px-3 py-2 ${packExportReport.success === false
                       ? 'bg-red-500/10 border-red-500/30 text-red-300'
                       : 'bg-blue-500/10 border-blue-500/30 text-blue-300'
-                  }`}>
-                    {packExportReport.success === false
-                      ? <p>{`Error exportando paquete: ${packExportReport.error}`}</p>
-                      : <p>{`Paquete listo: ${packExportReport.video_files_added} videos, ${packExportReport.srt_files_added} SRT, ${packExportReport.thumbnail_files_added || 0} miniaturas, ${packExportReport.platform_variant_rows || 0} filas de copy por plataforma, ${packExportReport.platform_video_variant_files_added || 0} videos variante por plataforma, ${packExportReport.clips_in_manifest} clips en el manifiesto.`}</p>}
-                  </div>
-                )}
-                {latestHighlightReel?.video_url && (
-                  <div className="mb-4 rounded-lg border border-cyan-500/35 bg-cyan-500/10 p-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-xs text-cyan-200">
-                        {`Highlight reel (${latestHighlightReel?.settings?.aspect_ratio || '-'}): ${latestHighlightReel.segments_count || '-'} momentos | ${latestHighlightReel.duration || '-'}s`}
-                      </p>
-                      <div className="flex items-center gap-2">
-                        <a
-                          href={getApiUrl(latestHighlightReel.video_url)}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-[11px] bg-cyan-500/20 border border-cyan-400/40 text-cyan-200 rounded px-2 py-1 hover:bg-cyan-500/30"
-                        >
-                          Abrir video
-                        </a>
-                        <a
-                          href={getApiUrl(latestHighlightReel.video_url)}
-                          download
-                          className="text-[11px] bg-white/10 border border-white/20 text-zinc-100 rounded px-2 py-1 hover:bg-white/15"
-                        >
-                          Descargar
-                        </a>
-                      </div>
+                      }`}>
+                      {packExportReport.success === false
+                        ? <p>{`Error exportando paquete: ${packExportReport.error}`}</p>
+                        : <p>{`Paquete listo: ${packExportReport.video_files_added} videos, ${packExportReport.srt_files_added} SRT, ${packExportReport.thumbnail_files_added || 0} miniaturas, ${packExportReport.platform_variant_rows || 0} filas de copy por plataforma, ${packExportReport.platform_video_variant_files_added || 0} videos variante por plataforma, ${packExportReport.clips_in_manifest} clips en el manifiesto.`}</p>}
                     </div>
-                    <video
-                      controls
-                      src={getApiUrl(latestHighlightReel.video_url)}
-                      className="mt-2 w-full max-h-[420px] rounded border border-white/10 bg-black/30"
-                    />
-                    {Array.isArray(latestHighlightReel.segments) && latestHighlightReel.segments.length > 0 && (
-                      <div className="mt-2 max-h-32 overflow-y-auto border border-white/10 rounded bg-black/20 divide-y divide-white/5">
-                        {latestHighlightReel.segments.slice(0, 8).map((segment, idx) => (
-                          <div key={`reel-segment-${segment.clip_index}-${idx}`} className="px-2 py-1.5 text-[11px] text-zinc-300 flex items-center justify-between gap-2">
-                            <span className="truncate">{segment.title || `Momento ${idx + 1}`}</span>
-                            <span className="shrink-0 text-zinc-500">{`${segment.duration || '-'}s | clip ${Number(segment.clip_index) + 1}`}</span>
-                          </div>
-                        ))}
+                  )}
+                  {!showTrailerFocusLayout && results?.latest_trailer_url && (
+                    <div className="mb-4 rounded-lg border border-amber-500/35 bg-amber-500/10 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs text-amber-200 flex items-center gap-2">
+                          <span className="text-lg">⚡</span>
+                          Super Trailer listo (Súper Resumen Fast-Paced)
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <a
+                            href={getApiUrl(results.latest_trailer_url)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[11px] bg-amber-500/20 border border-amber-400/40 text-amber-200 rounded px-2 py-1 hover:bg-amber-500/30"
+                          >
+                            Abrir Trailer
+                          </a>
+                          <a
+                            href={getApiUrl(results.latest_trailer_url)}
+                            download
+                            className="text-[11px] bg-white/10 border border-white/20 text-zinc-100 rounded px-2 py-1 hover:bg-white/15"
+                          >
+                            Descargar
+                          </a>
+                        </div>
                       </div>
+                      <video
+                        controls
+                        src={getApiUrl(results.latest_trailer_url)}
+                        className="mt-2 w-full max-h-[420px] rounded border border-white/10 bg-black/30"
+                      />
+                    </div>
+                  )}
+
+                  <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
+                    {showTrailerFocusLayout ? (
+                      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 pb-6">
+                        <section className="xl:col-span-8 rounded-2xl border border-slate-200 dark:border-white/10 bg-slate-50/60 dark:bg-white/[0.03] overflow-hidden">
+                          <div className="p-4 border-b border-slate-200 dark:border-white/10 bg-white/70 dark:bg-white/[0.02]">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-[11px] text-slate-500 dark:text-zinc-500 truncate">
+                                  {`Proyecto / ${processingProjectName} / Super Trailer`}
+                                </div>
+                                <h3 className="mt-1 text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                                  <Sparkles size={18} className="text-amber-500" />
+                                  Super Trailer (Fast-Paced)
+                                </h3>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {trailerScoreLabel && (
+                                  <span className="inline-flex items-center rounded-full border border-amber-300 dark:border-amber-500/30 bg-amber-100 dark:bg-amber-500/10 px-2.5 py-1 text-[11px] font-semibold text-amber-700 dark:text-amber-300">
+                                    {trailerScoreLabel}
+                                  </span>
+                                )}
+                                <button
+                                  onClick={handleGenerateTrailer}
+                                  disabled={isGeneratingTrailer || !jobId || status !== 'complete'}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 dark:border-white/20 bg-white dark:bg-white/10 px-3 py-1.5 text-xs text-slate-700 dark:text-zinc-200 hover:bg-slate-100 dark:hover:bg-white/20 disabled:opacity-50"
+                                >
+                                  <RefreshCw size={12} />
+                                  {isGeneratingTrailer ? 'Regenerando...' : 'Regenerar'}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="p-4">
+                            <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-black overflow-hidden shadow-sm">
+                              {trailerVideoUrl ? (
+                                <video
+                                  ref={trailerPreviewRef}
+                                  controls
+                                  src={trailerVideoUrl}
+                                  className="w-full max-h-[68vh] bg-black"
+                                />
+                              ) : (
+                                <div className="h-[320px] flex items-center justify-center text-sm text-zinc-400">
+                                  No se encontró el video del trailer.
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="px-4 pb-4">
+                            <div className="inline-flex items-center rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.03] p-1 text-xs">
+                              <button
+                                onClick={() => setTrailerInspectorTab('transcript')}
+                                className={`px-3 py-1.5 rounded-lg transition-colors ${trailerInspectorTab === 'transcript'
+                                  ? 'bg-primary/15 text-primary font-semibold'
+                                  : 'text-slate-600 dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-white/10'
+                                  }`}
+                              >
+                                Transcript
+                              </button>
+                              <button
+                                onClick={() => setTrailerInspectorTab('social')}
+                                className={`px-3 py-1.5 rounded-lg transition-colors ${trailerInspectorTab === 'social'
+                                  ? 'bg-primary/15 text-primary font-semibold'
+                                  : 'text-slate-600 dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-white/10'
+                                  }`}
+                              >
+                                Social
+                              </button>
+                              <button
+                                onClick={() => setTrailerInspectorTab('settings')}
+                                className={`px-3 py-1.5 rounded-lg transition-colors ${trailerInspectorTab === 'settings'
+                                  ? 'bg-primary/15 text-primary font-semibold'
+                                  : 'text-slate-600 dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-white/10'
+                                  }`}
+                              >
+                                Ajustes
+                              </button>
+                            </div>
+
+                            <div className="mt-3 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-3 text-sm">
+                              {trailerInspectorTab === 'transcript' && (
+                                <p className="text-slate-700 dark:text-zinc-300 leading-relaxed">
+                                  {trailerPrimaryClip?.transcript_excerpt || trailerPrimaryClip?.transcript_text || 'No hay extracto de transcript disponible para este trailer.'}
+                                </p>
+                              )}
+                              {trailerInspectorTab === 'social' && (
+                                <p className="text-slate-700 dark:text-zinc-300 leading-relaxed">
+                                  {trailerPrimaryClip?.video_description_for_tiktok || trailerPrimaryClip?.video_description_for_instagram || 'No hay copy social generado para este trailer.'}
+                                </p>
+                              )}
+                              {trailerInspectorTab === 'settings' && (
+                                <div className="flex flex-wrap gap-2 text-xs">
+                                  <span className="px-2 py-1 rounded-full border border-slate-300 dark:border-white/15 bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-zinc-300">
+                                    {`Formato: ${outputModeLabel(processingMedia?.aspectRatio || trailerPrimaryClip?.aspect_ratio)}`}
+                                  </span>
+                                  <span className="px-2 py-1 rounded-full border border-slate-300 dark:border-white/15 bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-zinc-300">
+                                    {`Duración: ${formatTimelineTime(Math.max(0, Number(trailerPrimaryClip?.end || 0) - Number(trailerPrimaryClip?.start || 0)))}`}
+                                  </span>
+                                  <span className="px-2 py-1 rounded-full border border-slate-300 dark:border-white/15 bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-zinc-300">
+                                    {`Segmentos: ${trailerSegmentsCount || '-'}`}
+                                  </span>
+                                  <span className="px-2 py-1 rounded-full border border-slate-300 dark:border-white/15 bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-zinc-300">
+                                    {`Transiciones: ${trailerSegmentsCount ? Math.max(0, trailerSegmentsCount - 1) : '-'}`}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="mt-3 flex items-center gap-2">
+                              <button
+                                onClick={() => trailerPrimaryClip && openClipStudio({
+                                  clip: trailerPrimaryClip,
+                                  clipIndex: trailerPrimaryClip?.clip_index,
+                                  currentVideoUrl: trailerVideoUrl
+                                })}
+                                disabled={!trailerPrimaryClip || !jobId}
+                                className="text-xs rounded-lg border border-violet-300 dark:border-primary/40 bg-violet-100 dark:bg-primary/20 text-violet-700 dark:text-primary px-3 py-1.5 hover:bg-violet-200 dark:hover:bg-primary/30 disabled:opacity-50"
+                              >
+                                Editar
+                              </button>
+                              {trailerVideoUrl && (
+                                <a
+                                  href={trailerVideoUrl}
+                                  download
+                                  className="text-xs rounded-lg border border-emerald-300 dark:border-emerald-500/40 bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 px-3 py-1.5 hover:bg-emerald-200 dark:hover:bg-emerald-500/30"
+                                >
+                                  Descargar
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                        </section>
+
+                        <aside className="xl:col-span-4 rounded-2xl border border-slate-200 dark:border-white/10 bg-white/70 dark:bg-white/[0.02] p-4 h-fit">
+                          <div className="flex items-center gap-2 mb-2">
+                            <History size={14} className="text-slate-500 dark:text-zinc-400" />
+                            <span className="text-xs text-slate-700 dark:text-zinc-300 font-medium">Sincronía de transcript</span>
+                            <span className="text-[10px] text-slate-500 dark:text-zinc-500">{`${visibleTranscriptSegments.length}/${transcriptTotal || transcriptSegments.length} segmentos`}</span>
+                            <button
+                              onClick={() => loadTranscriptSegments(jobId)}
+                              disabled={isLoadingTranscript}
+                              className="ml-auto text-[11px] rounded border border-slate-300 dark:border-white/20 bg-white dark:bg-white/10 px-2 py-1 text-slate-700 dark:text-zinc-200 hover:bg-slate-100 dark:hover:bg-white/20 disabled:opacity-50"
+                            >
+                              {isLoadingTranscript ? 'Cargando...' : 'Recargar'}
+                            </button>
+                          </div>
+                          <input
+                            type="text"
+                            value={transcriptFilter}
+                            onChange={(e) => setTranscriptFilter(e.target.value)}
+                            placeholder="Buscar en transcript..."
+                            className="w-full text-xs rounded-md border border-slate-300 dark:border-white/15 bg-white dark:bg-black/30 px-2 py-1.5 text-slate-700 dark:text-zinc-200"
+                          />
+                          {transcriptError && (
+                            <p className="mt-2 text-[11px] text-red-400">{transcriptError}</p>
+                          )}
+                          {!transcriptError && visibleTranscriptSegments.length > 0 && (
+                            <div className="mt-2 max-h-[62vh] overflow-y-auto rounded border border-slate-200 dark:border-white/10 divide-y divide-slate-200 dark:divide-white/5 bg-white dark:bg-black/20">
+                              {visibleTranscriptSegments.map((seg) => (
+                                <button
+                                  key={`trailer-seg-${seg.segment_index}-${seg.start}`}
+                                  onClick={() => handleTranscriptSegmentPlay(seg.start)}
+                                  className="w-full text-left px-2 py-2 hover:bg-primary/5 transition-colors"
+                                >
+                                  <div className="text-[10px] text-slate-500 dark:text-zinc-500">
+                                    {`${formatTimelineTime(seg.start)} - ${formatTimelineTime(seg.end)}`}
+                                    {seg.speaker ? ` | ${seg.speaker}` : ''}
+                                  </div>
+                                  <div className="text-xs text-slate-700 dark:text-zinc-200 line-clamp-2">{seg.text}</div>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          {!transcriptError && !isLoadingTranscript && visibleTranscriptSegments.length === 0 && (
+                            <p className="mt-2 text-[11px] text-slate-500 dark:text-zinc-500">No se encontraron segmentos para este filtro.</p>
+                          )}
+                        </aside>
+                      </div>
+                    ) : (
+                      visibleClips.length > 0 ? (
+                        <div className="grid grid-cols-1 gap-4 pb-10">
+                          {visibleClips.map((clip, i) => {
+                            const clipRefIndex = Number(clip?.clip_index);
+                            const focusMatch = Number.isFinite(clipRefIndex) && clipRefIndex === focusedClipIndex;
+                            return (
+                              <div
+                                key={`${clip.clip_index}-${clip.video_url || i}`}
+                                ref={(node) => setClipCardRef(clipRefIndex, node)}
+                                tabIndex={-1}
+                                data-clip-index={Number.isFinite(clipRefIndex) ? clipRefIndex : undefined}
+                                className={`rounded-2xl outline-none transition-shadow ${focusMatch ? 'ring-2 ring-primary/50 shadow-[0_0_0_4px_rgba(124,58,237,0.14)]' : ''}`}
+                              >
+                                <ResultCard
+                                  clip={clip}
+                                  displayIndex={i}
+                                  clipIndex={clip.clip_index}
+                                  jobId={jobId}
+                                  uploadPostKey={uploadPostKey}
+                                  uploadUserId={uploadUserId}
+                                  geminiApiKey={apiKey}
+                                  onOpenStudio={openClipStudio}
+                                  onPlay={(time) => handleClipPlay(time)}
+                                  onPause={handleClipPause}
+                                  onClipPatched={handleStudioClipPatched}
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        status === 'processing' ? (
+                          <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-4 opacity-50">
+                            <div className="w-12 h-12 rounded-full border-2 border-zinc-800 border-t-primary animate-spin" />
+                            <p className="text-sm">Esperando clips...</p>
+                          </div>
+                        ) : sortedClips.length > 0 ? (
+                          <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-2">
+                            <p>Ningún clip coincide con este filtro.</p>
+                          </div>
+                        ) : status === 'error' ? (
+                          <div className="h-full flex flex-col items-center justify-center text-red-400 space-y-2">
+                            <p>Generación fallida.</p>
+                            {jobId && (
+                              <button
+                                onClick={handleRetryJob}
+                                disabled={isRetryingJob}
+                                className="text-xs bg-white/10 border border-white/20 rounded-md px-3 py-1.5 text-zinc-200 hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                {isRetryingJob ? 'Reintentando...' : 'Reintentar job'}
+                              </button>
+                            )}
+                          </div>
+                        ) : null
+                      )
                     )}
                   </div>
-                )}
-
-                 <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
-                    {visibleClips.length > 0 ? (
-                       <div className="grid grid-cols-1 gap-4 pb-10">
-                           {visibleClips.map((clip, i) => {
-                             const clipRefIndex = Number(clip?.clip_index);
-                             const focusMatch = Number.isFinite(clipRefIndex) && clipRefIndex === focusedClipIndex;
-                             return (
-                               <div
-                                 key={`${clip.clip_index}-${clip.video_url || i}`}
-                                 ref={(node) => setClipCardRef(clipRefIndex, node)}
-                                 tabIndex={-1}
-                                 data-clip-index={Number.isFinite(clipRefIndex) ? clipRefIndex : undefined}
-                                 className={`rounded-2xl outline-none transition-shadow ${focusMatch ? 'ring-2 ring-primary/50 shadow-[0_0_0_4px_rgba(124,58,237,0.14)]' : ''}`}
-                               >
-                                 <ResultCard
-                                   clip={clip}
-                                   displayIndex={i}
-                                   clipIndex={clip.clip_index}
-                                   jobId={jobId}
-                                   uploadPostKey={uploadPostKey}
-                                   uploadUserId={uploadUserId}
-                                   geminiApiKey={apiKey}
-                                   onOpenStudio={openClipStudio}
-                                   onPlay={(time) => handleClipPlay(time)}
-                                   onPause={handleClipPause}
-                                 />
-                               </div>
-                             );
-                           })}
-                       </div>
-                    ) : (
-                    status === 'processing' ? (
-                      <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-4 opacity-50">
-                        <div className="w-12 h-12 rounded-full border-2 border-zinc-800 border-t-primary animate-spin" />
-                        <p className="text-sm">Esperando clips...</p>
-                      </div>
-                    ) : sortedClips.length > 0 ? (
-                      <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-2">
-                        <p>Ningún clip coincide con este filtro.</p>
-                      </div>
-                    ) : status === 'error' ? (
-                      <div className="h-full flex flex-col items-center justify-center text-red-400 space-y-2">
-                        <p>Generación fallida.</p>
-                        {jobId && (
-                          <button
-                            onClick={handleRetryJob}
-                            disabled={isRetryingJob}
-                            className="text-xs bg-white/10 border border-white/20 rounded-md px-3 py-1.5 text-zinc-200 hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {isRetryingJob ? 'Reintentando...' : 'Reintentar job'}
-                          </button>
-                        )}
-                      </div>
-                    ) : null
-                  )}
                 </div>
-              </div>
 
+              </div>
             </div>
-          </div>
           )}
 
         </div>

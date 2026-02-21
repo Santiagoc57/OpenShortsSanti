@@ -55,6 +55,8 @@ SEARCH_INDEX_CACHE: Dict[str, Dict[str, Any]] = {}
 LOCAL_EMBED_DIM = 256
 SEMANTIC_EMBED_MODEL = os.environ.get("SEMANTIC_EMBED_MODEL", "text-embedding-004")
 DEFAULT_TITLE_REWRITE_MODELS = [
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
     "gemini-1.5-flash-latest",
@@ -153,6 +155,276 @@ def _resolve_subtitle_source_filename(output_dir: str, filename: str) -> str:
         current = candidate
         depth += 1
     return current
+
+def _looks_like_trailer_clip(clip: Dict[str, Any]) -> bool:
+    if not isinstance(clip, dict):
+        return False
+    if bool(clip.get("is_trailer")):
+        return True
+    name = _safe_input_filename(clip.get("video_url", ""))
+    if name and "_trailer" in name.lower():
+        return True
+    title = str(clip.get("video_title_for_youtube_short") or clip.get("title") or "").lower()
+    return "super trailer" in title
+
+def _repair_trailer_clip_range(clip: Dict[str, Any], output_dir: str) -> Dict[str, Any]:
+    """
+    Heal stale trailer clips that were persisted with end=3.0 due missing ffprobe.
+    """
+    if not isinstance(clip, dict) or not _looks_like_trailer_clip(clip):
+        return clip
+    trailer_name = _safe_input_filename(clip.get("video_url", ""))
+    if not trailer_name:
+        return clip
+    trailer_path = os.path.join(output_dir, trailer_name)
+    if not os.path.exists(trailer_path):
+        return clip
+    real_duration = _probe_media_duration_seconds(trailer_path)
+    if real_duration < 3.5:
+        return clip
+
+    start = max(0.0, _safe_float(clip.get("start", 0.0), 0.0))
+    end = max(start, _safe_float(clip.get("end", start), start))
+    current_duration = max(0.0, end - start)
+    if current_duration < max(3.2, real_duration * 0.7):
+        clip["start"] = 0.0 if start <= 1.0 else round(start, 3)
+        clip["end"] = round(float(clip["start"]) + real_duration, 3)
+    clip["duration"] = round(real_duration, 3)
+    if clip.get("transcript_segments") and not str(clip.get("transcript_timebase", "")).strip():
+        clip["transcript_timebase"] = "clip"
+    return clip
+
+def _resolve_clip_scoped_transcript_for_srt(
+    clip_data: Dict[str, Any],
+    fallback_transcript: Dict[str, Any]
+) -> Tuple[Dict[str, Any], float, float]:
+    """
+    Returns (transcript, clip_start, clip_end) for SRT generation.
+    Supports clip-local transcript segments (timebase=clip).
+    """
+    if not isinstance(clip_data, dict):
+        return fallback_transcript, 0.0, 0.0
+
+    clip_start = max(0.0, _safe_float(clip_data.get("start", 0.0), 0.0))
+    clip_end = max(clip_start, _safe_float(clip_data.get("end", clip_start), clip_start))
+    raw_segments = clip_data.get("transcript_segments")
+    if not isinstance(raw_segments, list) or not raw_segments:
+        return fallback_transcript, clip_start, clip_end
+
+    normalized_segments: List[Dict[str, Any]] = []
+    max_seg_end = 0.0
+    for idx, seg in enumerate(raw_segments):
+        if not isinstance(seg, dict):
+            continue
+        seg_start = max(0.0, _safe_float(seg.get("start", 0.0), 0.0))
+        seg_end = max(seg_start, _safe_float(seg.get("end", seg_start), seg_start))
+        text = _normalize_space(seg.get("text", ""))
+
+        words_payload: List[Dict[str, Any]] = []
+        raw_words = seg.get("words") if isinstance(seg.get("words"), list) else []
+        for w in raw_words:
+            if not isinstance(w, dict):
+                continue
+            ws = max(seg_start, _safe_float(w.get("start", seg_start), seg_start))
+            we = max(ws, _safe_float(w.get("end", ws), ws))
+            wt = _normalize_space(w.get("word", "")) or _normalize_space(w.get("text", ""))
+            if not wt:
+                continue
+            words_payload.append({
+                "word": wt,
+                "start": round(ws, 3),
+                "end": round(we, 3)
+            })
+
+        if not text and words_payload:
+            text = _normalize_space(" ".join(item["word"] for item in words_payload))
+        if not text:
+            continue
+
+        normalized_segments.append({
+            "segment_index": int(_safe_float(seg.get("segment_index", idx), idx)),
+            "start": round(seg_start, 3),
+            "end": round(seg_end, 3),
+            "text": text,
+            "speaker": _normalize_space(seg.get("speaker", "")) or None,
+            "words": words_payload
+        })
+        max_seg_end = max(max_seg_end, seg_end)
+
+    if not normalized_segments:
+        return fallback_transcript, clip_start, clip_end
+
+    transcript_text = _normalize_space(clip_data.get("transcript_text", "")) or _normalize_space(
+        " ".join(seg.get("text", "") for seg in normalized_segments)
+    )
+    scoped_transcript = {
+        "text": transcript_text,
+        "segments": normalized_segments
+    }
+
+    timebase = str(clip_data.get("transcript_timebase", "")).strip().lower()
+    if timebase == "clip":
+        clip_duration = max(0.0, clip_end - clip_start)
+        local_end = max(0.1, max_seg_end, clip_duration)
+        return scoped_transcript, 0.0, local_end
+    return scoped_transcript, clip_start, clip_end
+
+def _srt_timestamp_to_seconds(value: str) -> float:
+    raw = str(value or "").strip().replace(",", ".")
+    parts = raw.split(":")
+    if len(parts) != 3:
+        return 0.0
+    try:
+        hh = float(parts[0])
+        mm = float(parts[1])
+        ss = float(parts[2])
+        return max(0.0, hh * 3600 + mm * 60 + ss)
+    except Exception:
+        return 0.0
+
+def _seconds_to_srt_timestamp(seconds: float) -> str:
+    total = max(0.0, float(seconds or 0.0))
+    hh = int(total // 3600)
+    mm = int((total % 3600) // 60)
+    ss = int(total % 60)
+    ms = int(round((total - int(total)) * 1000))
+    if ms >= 1000:
+        ms = 0
+        ss += 1
+        if ss >= 60:
+            ss = 0
+            mm += 1
+            if mm >= 60:
+                mm = 0
+                hh += 1
+    return f"{hh:02d}:{mm:02d}:{ss:02d},{ms:03d}"
+
+def _parse_srt_blocks(raw_srt: str) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    blocks = re.split(r"\n\s*\n", str(raw_srt or "").strip())
+    for block in blocks:
+        lines = [ln.rstrip() for ln in block.splitlines() if str(ln).strip()]
+        if len(lines) < 2:
+            continue
+        if re.match(r"^\d+$", lines[0].strip()):
+            timeline = lines[1].strip() if len(lines) > 1 else ""
+            text_lines = lines[2:]
+        else:
+            timeline = lines[0].strip()
+            text_lines = lines[1:]
+        if "-->" not in timeline:
+            continue
+        start_raw, end_raw = [part.strip() for part in timeline.split("-->", 1)]
+        start_s = _srt_timestamp_to_seconds(start_raw)
+        end_s = _srt_timestamp_to_seconds(end_raw)
+        text = "\n".join(str(line or "") for line in text_lines).strip()
+        if not text or end_s <= start_s:
+            continue
+        entries.append({
+            "start": start_s,
+            "end": end_s,
+            "text": text
+        })
+    return entries
+
+def _shift_and_trim_srt(raw_srt: str, shift_seconds: float, window_duration: float) -> str:
+    entries = _parse_srt_blocks(raw_srt)
+    if not entries:
+        return ""
+    safe_window = max(0.1, _safe_float(window_duration, 0.0))
+    out_chunks: List[str] = []
+    out_idx = 1
+    for entry in entries:
+        start = _safe_float(entry.get("start"), 0.0) + _safe_float(shift_seconds, 0.0)
+        end = _safe_float(entry.get("end"), 0.0) + _safe_float(shift_seconds, 0.0)
+        if end <= 0.0 or start >= safe_window:
+            continue
+        clipped_start = max(0.0, start)
+        clipped_end = min(safe_window, end)
+        if (clipped_end - clipped_start) < 0.04:
+            continue
+        text = str(entry.get("text", "")).strip()
+        if not text:
+            continue
+        out_chunks.append(
+            f"{out_idx}\n"
+            f"{_seconds_to_srt_timestamp(clipped_start)} --> {_seconds_to_srt_timestamp(clipped_end)}\n"
+            f"{text}"
+        )
+        out_idx += 1
+    return "\n\n".join(out_chunks)
+
+def _build_trailer_timeline_from_fragments(
+    fragments: Any,
+    fade_duration: float = 0.5,
+    duration_cap: Optional[float] = None
+) -> Dict[str, Any]:
+    safe_fade = max(0.0, _safe_float(fade_duration, 0.5))
+    if not isinstance(fragments, list) or not fragments:
+        return {
+            "transition_points": [],
+            "fragment_ranges": [],
+            "timeline_duration": 0.0,
+            "fade_duration": safe_fade,
+        }
+
+    valid: List[Tuple[float, float]] = []
+    for frag in fragments:
+        if not isinstance(frag, dict):
+            continue
+        fs = max(0.0, _safe_float(frag.get("start", 0.0), 0.0))
+        fe = max(fs, _safe_float(frag.get("end", fs), fs))
+        if (fe - fs) < 0.08:
+            continue
+        valid.append((fs, fe))
+
+    if not valid:
+        return {
+            "transition_points": [],
+            "fragment_ranges": [],
+            "timeline_duration": 0.0,
+            "fade_duration": safe_fade,
+        }
+
+    markers: List[float] = []
+    ranges: List[Dict[str, Any]] = []
+    cursor = 0.0
+    for idx, (fs, fe) in enumerate(valid):
+        dur = max(0.0, fe - fs)
+        out_start = cursor
+        out_end = out_start + dur
+        ranges.append({
+            "fragment_index": idx,
+            "start": round(out_start, 3),
+            "end": round(out_end, 3),
+            "source_start": round(fs, 3),
+            "source_end": round(fe, 3),
+        })
+        if idx < len(valid) - 1:
+            t_start = max(0.0, out_end - safe_fade)
+            markers.append(round(t_start, 3))
+            cursor = t_start
+        else:
+            cursor = out_end
+
+    total = max(0.0, cursor)
+    if duration_cap is not None:
+        total = min(total, max(0.0, float(duration_cap)))
+        markers = [round(max(0.0, min(total, float(p))), 3) for p in markers]
+        ranges = [
+            {
+                **r,
+                "start": round(max(0.0, min(total, _safe_float(r.get("start", 0.0), 0.0))), 3),
+                "end": round(max(0.0, min(total, _safe_float(r.get("end", 0.0), 0.0))), 3),
+            }
+            for r in ranges
+        ]
+    return {
+        "transition_points": markers,
+        "fragment_ranges": ranges,
+        "timeline_duration": round(total, 3),
+        "fade_duration": safe_fade,
+    }
 
 def _probe_media_duration_seconds(media_path: str) -> float:
     cmd = [
@@ -715,24 +987,15 @@ def _smart_ref_detect_scene_ranges(
 ) -> List[Tuple[int, int]]:
     safe_total = max(1, int(total_frames or 1))
     try:
-        from scenedetect import VideoManager, SceneManager
-        from scenedetect.detectors import ContentDetector
-
-        video_manager = VideoManager([video_path])
-        scene_manager = SceneManager()
-        scene_manager.add_detector(ContentDetector())
-        if int(downscale or 0) > 0:
-            video_manager.set_downscale_factor(max(1, int(downscale)))
-        else:
-            video_manager.set_downscale_factor()
-        video_manager.start()
-        scene_manager.detect_scenes(
-            frame_source=video_manager,
-            show_progress=False,
-            frame_skip=max(0, int(frame_skip or 0))
-        )
-        scene_list = scene_manager.get_scene_list()
-        video_manager.release()
+        try:
+            from scenedetect import detect_scenes as sd_detect_scenes
+        except ImportError:
+            from scenedetect import detect as sd_detect_scenes
+        try:
+            from scenedetect import ContentDetector
+        except ImportError:
+            from scenedetect.detectors import ContentDetector
+        scene_list = sd_detect_scenes(video_path, ContentDetector(), show_progress=False)
     except Exception as e:
         print(f"⚠️ SmartReframe: scene detection fallback ({e})")
         return [(0, safe_total)]
@@ -3121,6 +3384,78 @@ def _delete_persisted_job(job_id: str):
         finally:
             conn.close()
 
+def _is_uuid_like_job_id(value: str) -> bool:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return False
+    try:
+        uuid.UUID(candidate)
+        return True
+    except Exception:
+        return False
+
+def _discover_job_ids_on_disk() -> Set[str]:
+    discovered: Set[str] = set()
+
+    try:
+        for entry in os.listdir(OUTPUT_DIR):
+            candidate = str(entry).strip()
+            if _is_uuid_like_job_id(candidate):
+                discovered.add(candidate)
+    except Exception:
+        pass
+
+    try:
+        for path in glob.glob(os.path.join(UPLOAD_DIR, "*")):
+            base = os.path.basename(path)
+            if not base:
+                continue
+            prefix = base.split("_", 1)[0].strip()
+            if _is_uuid_like_job_id(prefix):
+                discovered.add(prefix)
+    except Exception:
+        pass
+
+    return discovered
+
+def _delete_path_if_exists(path: str) -> bool:
+    try:
+        if not os.path.exists(path):
+            return False
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            os.remove(path)
+        return True
+    except Exception:
+        return False
+
+def _purge_job_artifacts(job_id: str, include_artifacts: bool = True, include_uploads: bool = True) -> Dict[str, int]:
+    removed_artifact_paths = 0
+    removed_upload_paths = 0
+
+    if include_artifacts:
+        job_output_dir = os.path.join(OUTPUT_DIR, job_id)
+        if _delete_path_if_exists(job_output_dir):
+            removed_artifact_paths += 1
+        for pattern in (
+            os.path.join(OUTPUT_DIR, f"{job_id}_*"),
+            os.path.join(OUTPUT_DIR, f"temp_{job_id}_*"),
+        ):
+            for path in glob.glob(pattern):
+                if _delete_path_if_exists(path):
+                    removed_artifact_paths += 1
+
+    if include_uploads:
+        for path in glob.glob(os.path.join(UPLOAD_DIR, f"{job_id}_*")):
+            if _delete_path_if_exists(path):
+                removed_upload_paths += 1
+
+    return {
+        "removed_artifact_paths": removed_artifact_paths,
+        "removed_upload_paths": removed_upload_paths,
+    }
+
 def _load_persisted_job(job_id: str) -> Optional[Dict[str, Any]]:
     with _JOBS_DB_LOCK:
         conn = _jobs_db_connect()
@@ -3181,6 +3516,7 @@ def _materialize_result_from_metadata(job_id: str, metadata: Dict[str, Any], met
 
     base_name = os.path.basename(metadata_path).replace("_metadata.json", "")
     clips: List[Dict[str, Any]] = []
+    trailer_url = str(metadata.get("latest_trailer_url", "") or "").strip() if isinstance(metadata, dict) else ""
     for i, raw_clip in enumerate(shorts):
         clip = _normalize_clip_payload(
             dict(raw_clip) if isinstance(raw_clip, dict) else {},
@@ -3196,12 +3532,63 @@ def _materialize_result_from_metadata(job_id: str, metadata: Dict[str, Any], met
             clip_name = f"{base_name}_clip_{i+1}.mp4"
             if os.path.exists(os.path.join(output_dir, clip_name)):
                 clip["video_url"] = f"/videos/{job_id}/{clip_name}"
+        clip = _repair_trailer_clip_range(clip, output_dir)
+        if _looks_like_trailer_clip(clip):
+            raw_markers = clip.get("transition_points")
+            if not isinstance(raw_markers, list) or not raw_markers:
+                clip_duration = max(
+                    0.0,
+                    _safe_float(clip.get("end", 0.0), 0.0) - _safe_float(clip.get("start", 0.0), 0.0)
+                )
+                timeline_meta = _build_trailer_timeline_from_fragments(
+                    metadata.get("trailer_fragments", []) if isinstance(metadata, dict) else [],
+                    fade_duration=_safe_float(clip.get("transition_duration", 0.5), 0.5),
+                    duration_cap=clip_duration if clip_duration > 0 else None
+                )
+                if timeline_meta.get("transition_points"):
+                    clip["transition_points"] = timeline_meta["transition_points"]
+                    clip["fragment_ranges"] = timeline_meta.get("fragment_ranges", [])
+                    clip["transition_duration"] = timeline_meta.get("fade_duration", 0.5)
         clips.append(clip)
+
+    if not clips and trailer_url:
+        trailer_name = _safe_input_filename(trailer_url)
+        trailer_path = os.path.join(output_dir, trailer_name) if trailer_name else ""
+        trailer_duration = _probe_media_duration_seconds(trailer_path) if trailer_path and os.path.exists(trailer_path) else 0.0
+        synthetic_clip = _normalize_clip_payload(
+            {
+                "clip_index": 0,
+                "start": 0.0,
+                "end": max(3.0, float(trailer_duration or 0.0)),
+                "video_title_for_youtube_short": "Super Trailer",
+                "video_description_for_tiktok": "Resumen rápido con los mejores momentos.",
+                "video_description_for_instagram": "Resumen rápido con los mejores momentos.",
+                "virality_score": 90,
+                "selection_confidence": 0.9,
+                "is_trailer": True,
+            },
+            0,
+            transcript=transcript_data
+        )
+        if trailer_name:
+            synthetic_clip["video_url"] = f"/videos/{job_id}/{trailer_name}"
+        timeline_meta = _build_trailer_timeline_from_fragments(
+            metadata.get("trailer_fragments", []) if isinstance(metadata, dict) else [],
+            fade_duration=0.5,
+            duration_cap=max(0.0, _safe_float(synthetic_clip.get("end", 0.0), 0.0))
+        )
+        if timeline_meta.get("transition_points"):
+            synthetic_clip["transition_points"] = timeline_meta["transition_points"]
+            synthetic_clip["fragment_ranges"] = timeline_meta.get("fragment_ranges", [])
+            synthetic_clip["transition_duration"] = timeline_meta.get("fade_duration", 0.5)
+        clips = [synthetic_clip]
 
     result_payload: Dict[str, Any] = {
         "clips": clips,
         "cost_analysis": metadata.get("cost_analysis") if isinstance(metadata, dict) else None
     }
+    if trailer_url:
+        result_payload["latest_trailer_url"] = trailer_url
     if isinstance(metadata.get("highlight_reels"), list):
         result_payload["highlight_reels"] = metadata.get("highlight_reels", [])
         if result_payload["highlight_reels"]:
@@ -3641,6 +4028,9 @@ async def run_job(job_id, job_data):
                 base_name = os.path.basename(target_json).replace('_metadata.json', '')
                 clips = data.get('shorts', [])
                 cost_analysis = data.get('cost_analysis')
+                trailer_url = str(data.get("latest_trailer_url", "") or "").strip() if isinstance(data, dict) else ""
+                trailer_name = _safe_input_filename(trailer_url) if trailer_url else ""
+                trailer_path = os.path.join(output_dir, trailer_name) if trailer_name else ""
 
                 transcript_data = data.get('transcript') if isinstance(data, dict) else None
                 title_variants_changed = False
@@ -3665,7 +4055,20 @@ async def run_job(job_id, job_data):
                      )
                      social_variants_changed = bool(social_variants_changed or social_changed)
                      clip_filename = f"{base_name}_clip_{i+1}.mp4"
-                     clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+                     clip_path = os.path.join(output_dir, clip_filename)
+                     existing_video_url = str(clip.get("video_url", "") or "").strip()
+                     selected_video_url = ""
+                     if existing_video_url:
+                         existing_name = _safe_input_filename(existing_video_url)
+                         if existing_name and os.path.exists(os.path.join(output_dir, existing_name)):
+                             selected_video_url = f"/videos/{job_id}/{existing_name}"
+                     if not selected_video_url and os.path.exists(clip_path):
+                         selected_video_url = f"/videos/{job_id}/{clip_filename}"
+                     if not selected_video_url and trailer_name and os.path.exists(trailer_path):
+                         selected_video_url = f"/videos/{job_id}/{trailer_name}"
+                     if selected_video_url:
+                         clip['video_url'] = selected_video_url
+                     clip = _repair_trailer_clip_range(clip, output_dir)
 
                 if (title_variants_changed or social_variants_changed) and isinstance(data, dict):
                     try:
@@ -3674,8 +4077,32 @@ async def run_job(job_id, job_data):
                             json.dump(data, f, indent=2, ensure_ascii=False)
                     except Exception:
                         pass
-                
-                jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
+
+                if (not isinstance(clips, list) or len(clips) == 0) and trailer_name and os.path.exists(trailer_path):
+                    trailer_duration = _probe_media_duration_seconds(trailer_path)
+                    synthetic_clip = _normalize_clip_payload(
+                        {
+                            "clip_index": 0,
+                            "start": 0.0,
+                            "end": max(3.0, float(trailer_duration or 0.0)),
+                            "video_title_for_youtube_short": "Super Trailer",
+                            "video_description_for_tiktok": "Resumen rápido con los mejores momentos.",
+                            "video_description_for_instagram": "Resumen rápido con los mejores momentos.",
+                            "virality_score": 90,
+                            "selection_confidence": 0.9,
+                            "video_url": f"/videos/{job_id}/{trailer_name}",
+                            "is_trailer": True,
+                        },
+                        0,
+                        transcript=transcript_data
+                    )
+                    synthetic_clip = _repair_trailer_clip_range(synthetic_clip, output_dir)
+                    clips = [synthetic_clip]
+
+                result_payload = {'clips': clips, 'cost_analysis': cost_analysis}
+                if trailer_url:
+                    result_payload['latest_trailer_url'] = trailer_url
+                jobs[job_id]['result'] = result_payload
                 _persist_job_state(job_id)
             else:
                  await _fail_or_retry("No metadata file generated.")
@@ -3701,15 +4128,21 @@ async def process_endpoint(
     clip_length_target: Optional[str] = Form(None),
     style_template: Optional[str] = Form(None),
     content_profile: Optional[str] = Form(None),
+    llm_model: Optional[str] = Form(None),
+    llm_provider: Optional[str] = Form(None),
+    generation_mode: Optional[str] = Form(None),
+    build_trailer: Optional[str] = Form(None),
+    trailer_fragments_target: Optional[int] = Form(None),
+    groq_api_key: Optional[str] = Form(None),
     max_auto_retries: Optional[int] = Form(None),
     retry_delay_seconds: Optional[int] = Form(None)
 ):
-    api_key = request.headers.get("X-Gemini-Key")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+    x_gemini_key = request.headers.get("X-Gemini-Key")
+    x_groq_key = request.headers.get("X-Groq-Key")
     
     # Handle JSON body manually for URL payload
     content_type = request.headers.get("content-type", "")
+    body: Dict[str, Any] = {}
     if "application/json" in content_type:
         body = await request.json()
         url = body.get("url")
@@ -3724,6 +4157,13 @@ async def process_endpoint(
         clip_length_target = body.get("clip_length_target") or clip_length_target
         style_template = body.get("style_template") or style_template
         content_profile = body.get("content_profile") or content_profile
+        llm_model = body.get("llm_model") or llm_model
+        llm_provider = body.get("llm_provider") or llm_provider
+        generation_mode = body.get("generation_mode") or generation_mode
+        build_trailer = body.get("build_trailer") if body.get("build_trailer") is not None else build_trailer
+        if body.get("trailer_fragments_target") is not None:
+            trailer_fragments_target = body.get("trailer_fragments_target")
+        groq_api_key = body.get("groq_api_key") or groq_api_key
         if body.get("max_auto_retries") is not None:
             max_auto_retries = body.get("max_auto_retries")
         if body.get("retry_delay_seconds") is not None:
@@ -3742,6 +4182,14 @@ async def process_endpoint(
     content_profile = _normalize_space(content_profile or "") or None
     if content_profile:
         content_profile = re.sub(r"[^a-zA-Z0-9_-]", "", content_profile)[:40] or None
+    generation_mode = str(generation_mode or "clips").strip().lower()
+    generation_mode = "trailer" if generation_mode in {"trailer", "super_trailer", "super-trailer"} else "clips"
+    build_trailer_flag = _parse_form_bool(build_trailer, default=False) or generation_mode == "trailer"
+    if trailer_fragments_target is not None:
+        try:
+            trailer_fragments_target = max(2, min(12, int(trailer_fragments_target)))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Invalid trailer_fragments_target. Must be an integer between 2 and 12")
     max_auto_retries = max(0, min(5, int(max_auto_retries if max_auto_retries is not None else MAX_AUTO_RETRIES_DEFAULT)))
     retry_delay_seconds = max(0, min(300, int(retry_delay_seconds if retry_delay_seconds is not None else JOB_RETRY_DELAY_SECONDS_DEFAULT)))
 
@@ -3749,11 +4197,38 @@ async def process_endpoint(
     job_output_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(job_output_dir, exist_ok=True)
     
+    # Defaults if not provided in form or json body
+    llm_provider = llm_provider or "gemini"
+    llm_model = llm_model or "gemini-2.5-flash-lite"
+
+    
     # Prepare Command
     python_bin = sys.executable or shutil.which("python3") or "python3"
-    cmd = [python_bin, "-u", "main.py"] # -u for unbuffered
+    cmd = [python_bin, "-u", "main.py"] 
     env = os.environ.copy()
-    env["GEMINI_API_KEY"] = api_key # Override with key from request
+    
+    if llm_provider == 'gemini':
+        env["GEMINI_API_KEY"] = x_gemini_key
+        if not x_gemini_key:
+            raise HTTPException(status_code=400, detail="Missing Gemini API Key (X-Gemini-Key header)")
+    elif llm_provider == 'groq':
+        final_groq_key = x_groq_key or (body.get("groq_api_key") if "application/json" in content_type else None)
+        env["GROQ_API_KEY"] = final_groq_key
+        # Allow main.py to fallback to Gemini automatically when Groq hits hard limits.
+        if x_gemini_key:
+            env["GEMINI_API_KEY"] = x_gemini_key
+        if not final_groq_key:
+            raise HTTPException(status_code=400, detail="Missing Groq API Key (X-Groq-Key header or payload)")
+        cmd.extend(["--llm-provider", "groq", "--groq-api-key", final_groq_key])
+    
+    if llm_model:
+        cmd.extend(["--llm-model", str(llm_model)])
+    if build_trailer_flag:
+        cmd.append("--build-trailer")
+    if generation_mode == "trailer":
+        cmd.append("--trailer-only")
+    if trailer_fragments_target is not None:
+        cmd.extend(["--trailer-fragments-target", str(trailer_fragments_target)])
     
     if url:
         cmd.extend(["-u", url])
@@ -3873,6 +4348,51 @@ async def list_recent_jobs(limit: int = 20):
     items = sorted(items, key=lambda row: row.get("updated_at", 0), reverse=True)
     return {"items": items[:safe_limit]}
 
+@app.delete("/api/jobs/all")
+async def delete_all_jobs(
+    include_artifacts: bool = True,
+    include_uploads: bool = True,
+):
+    persisted = _load_all_persisted_jobs(limit=4000)
+    candidate_ids: Set[str] = set(jobs.keys()) | set(persisted.keys()) | _discover_job_ids_on_disk()
+
+    removed_ids: List[str] = []
+    skipped_active: List[str] = []
+    removed_artifact_paths_total = 0
+    removed_upload_paths_total = 0
+
+    for job_id in sorted(candidate_ids):
+        job = jobs.get(job_id)
+        status = str(job.get("status", "")).lower() if isinstance(job, dict) else ""
+        is_active = status in {"queued", "retrying", "processing"}
+        if is_active:
+            skipped_active.append(job_id)
+            continue
+
+        if job_id in jobs:
+            del jobs[job_id]
+        _delete_persisted_job(job_id)
+        SEARCH_INDEX_CACHE.pop(job_id, None)
+
+        cleanup = _purge_job_artifacts(
+            job_id=job_id,
+            include_artifacts=include_artifacts,
+            include_uploads=include_uploads,
+        )
+        removed_artifact_paths_total += int(cleanup.get("removed_artifact_paths", 0))
+        removed_upload_paths_total += int(cleanup.get("removed_upload_paths", 0))
+        removed_ids.append(job_id)
+
+    return {
+        "success": True,
+        "removed_jobs": len(removed_ids),
+        "removed_ids": removed_ids,
+        "skipped_active": len(skipped_active),
+        "skipped_active_ids": skipped_active,
+        "removed_artifact_paths": removed_artifact_paths_total,
+        "removed_upload_paths": removed_upload_paths_total,
+    }
+
 @app.post("/api/retry/{job_id}")
 async def retry_job(job_id: str):
     job = _ensure_job_context(job_id)
@@ -3911,7 +4431,9 @@ async def edit_clip(
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
     # Determine API Key
-    final_api_key = req.api_key or x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    final_api_key = req.api_key or x_gemini_key
+    if not final_api_key:
+        raise HTTPException(status_code=400, detail="Gemini API Key is required. Please set it in the configuration.")
     
     if not final_api_key:
         raise HTTPException(status_code=400, detail="Missing Gemini API Key (Header or Body)")
@@ -4070,7 +4592,19 @@ async def add_subtitles(req: SubtitleRequest):
     if req.clip_index >= len(clips):
         raise HTTPException(status_code=404, detail="Clip not found")
         
-    clip_data = clips[req.clip_index]
+    raw_clip_data = clips[req.clip_index]
+    clip_data = _repair_trailer_clip_range(
+        dict(raw_clip_data) if isinstance(raw_clip_data, dict) else {},
+        output_dir
+    )
+    if isinstance(raw_clip_data, dict):
+        for key in ("start", "end", "duration", "transcript_timebase"):
+            if key in clip_data:
+                raw_clip_data[key] = clip_data[key]
+    effective_transcript, srt_clip_start, srt_clip_end = _resolve_clip_scoped_transcript_for_srt(
+        clip_data=clip_data,
+        fallback_transcript=transcript
+    )
     
     # Video Path
     if req.input_filename:
@@ -4116,7 +4650,17 @@ async def add_subtitles(req: SubtitleRequest):
             temp_srt_name = f"subs_tmp_{req.clip_index}_{int(time.time())}.srt"
             temp_srt_path = os.path.join(output_dir, temp_srt_name)
             try:
-                success = generate_srt(transcript, clip_data['start'], clip_data['end'], temp_srt_path)
+                success = generate_srt(effective_transcript, srt_clip_start, srt_clip_end, temp_srt_path)
+                if (not success) and (effective_transcript is not transcript):
+                    success = generate_srt(
+                        transcript,
+                        max(0.0, _safe_float(clip_data.get('start', 0.0), 0.0)),
+                        max(
+                            max(0.0, _safe_float(clip_data.get('start', 0.0), 0.0)),
+                            _safe_float(clip_data.get('end', 0.0), 0.0)
+                        ),
+                        temp_srt_path
+                    )
                 if not success:
                     raise HTTPException(status_code=400, detail="No words found for this clip range.")
                 with open(temp_srt_path, "r", encoding="utf-8") as f:
@@ -4271,10 +4815,32 @@ async def preview_subtitles(req: SubtitlePreviewRequest):
     if req.clip_index >= len(clips):
         raise HTTPException(status_code=404, detail="Clip not found")
 
-    clip_data = clips[req.clip_index]
+    raw_clip_data = clips[req.clip_index]
+    clip_data = _repair_trailer_clip_range(
+        dict(raw_clip_data) if isinstance(raw_clip_data, dict) else {},
+        output_dir
+    )
+    if isinstance(raw_clip_data, dict):
+        for key in ("start", "end", "duration", "transcript_timebase"):
+            if key in clip_data:
+                raw_clip_data[key] = clip_data[key]
+    effective_transcript, srt_clip_start, srt_clip_end = _resolve_clip_scoped_transcript_for_srt(
+        clip_data=clip_data,
+        fallback_transcript=transcript
+    )
     temp_name = f"subs_preview_{req.clip_index}_{int(time.time())}.srt"
     temp_path = os.path.join(output_dir, temp_name)
-    success = generate_srt(transcript, clip_data['start'], clip_data['end'], temp_path)
+    success = generate_srt(effective_transcript, srt_clip_start, srt_clip_end, temp_path)
+    if (not success) and (effective_transcript is not transcript):
+        success = generate_srt(
+            transcript,
+            max(0.0, _safe_float(clip_data.get('start', 0.0), 0.0)),
+            max(
+                max(0.0, _safe_float(clip_data.get('start', 0.0), 0.0)),
+                _safe_float(clip_data.get('end', 0.0), 0.0)
+            ),
+            temp_path
+        )
     if not success:
         raise HTTPException(status_code=400, detail="No words found for this clip range.")
 
@@ -4298,6 +4864,20 @@ class FastPreviewRequest(BaseModel):
     zoom: Optional[float] = None
     offset_x: Optional[float] = None
     offset_y: Optional[float] = None
+    captions_on: bool = False
+    caption_position: Optional[str] = None
+    caption_font_size: Optional[int] = None
+    caption_font_family: Optional[str] = None
+    caption_font_color: Optional[str] = None
+    caption_stroke_color: Optional[str] = None
+    caption_stroke_width: Optional[int] = None
+    caption_bold: Optional[bool] = None
+    caption_box_color: Optional[str] = None
+    caption_box_opacity: Optional[int] = None
+    caption_karaoke_mode: Optional[bool] = None
+    caption_offset_x: Optional[float] = None
+    caption_offset_y: Optional[float] = None
+    srt_content: Optional[str] = None
 
 @app.post("/api/clip/fast-preview")
 async def generate_fast_preview(req: FastPreviewRequest):
@@ -4316,6 +4896,7 @@ async def generate_fast_preview(req: FastPreviewRequest):
         metadata = json.load(f)
 
     clips = metadata.get("shorts", []) if isinstance(metadata.get("shorts"), list) else []
+    transcript_data = metadata.get("transcript") if isinstance(metadata, dict) else None
     if req.clip_index < 0 or req.clip_index >= len(clips):
         raise HTTPException(status_code=404, detail="Clip not found")
     clip_data = clips[req.clip_index] if isinstance(clips[req.clip_index], dict) else {}
@@ -4441,14 +5022,197 @@ async def generate_fast_preview(req: FastPreviewRequest):
                 pass
             continue
 
+        final_out_path = out_path
+        final_out_name = out_name
+        captions_burned = False
+
+        if bool(req.captions_on):
+            raw_srt = str(req.srt_content or "").strip()
+            if not raw_srt:
+                effective_transcript, srt_clip_start, srt_clip_end = _resolve_clip_scoped_transcript_for_srt(
+                    clip_data=clip_data,
+                    fallback_transcript=transcript_data or {}
+                )
+                temp_srt_name = f"fast_preview_srt_{req.clip_index}_{int(time.time())}_{uuid.uuid4().hex[:5]}.srt"
+                temp_srt_path = os.path.join(output_dir, temp_srt_name)
+                try:
+                    success = generate_srt(effective_transcript, srt_clip_start, srt_clip_end, temp_srt_path)
+                    if (not success) and (effective_transcript is not transcript_data) and isinstance(transcript_data, dict):
+                        success = generate_srt(
+                            transcript_data,
+                            max(0.0, _safe_float(clip_data.get("start", 0.0), 0.0)),
+                            max(
+                                max(0.0, _safe_float(clip_data.get("start", 0.0), 0.0)),
+                                _safe_float(clip_data.get("end", 0.0), 0.0)
+                            ),
+                            temp_srt_path
+                        )
+                    if not success:
+                        raise HTTPException(status_code=400, detail="No words found for this preview range.")
+                    with open(temp_srt_path, "r", encoding="utf-8") as f:
+                        raw_srt = f.read()
+                finally:
+                    if os.path.exists(temp_srt_path):
+                        try:
+                            os.remove(temp_srt_path)
+                        except Exception:
+                            pass
+
+            shift_candidates = [-requested_start]
+            if source_reason == "job_input_path":
+                shift_candidates.insert(0, clip_start - requested_start)
+            elif source_reason == "clip_uncut":
+                shift_candidates.append(clip_start - requested_start)
+
+            shifted_srt = ""
+            seen_shift: Set[float] = set()
+            for shift in shift_candidates:
+                rounded_shift = round(float(shift), 6)
+                if rounded_shift in seen_shift:
+                    continue
+                seen_shift.add(rounded_shift)
+                shifted_srt = _shift_and_trim_srt(raw_srt, shift_seconds=rounded_shift, window_duration=out_duration)
+                if shifted_srt:
+                    break
+
+            if not shifted_srt:
+                raise HTTPException(status_code=400, detail="No words found for this preview range.")
+
+            subtitle_filename = f"fast_preview_subs_{req.clip_index}_{int(time.time())}_{uuid.uuid4().hex[:6]}.ass"
+            subtitle_path = os.path.join(output_dir, subtitle_filename)
+            subtitled_name = f"fast_preview_subtitled_clip_{req.clip_index+1}_{int(time.time())}_{uuid.uuid4().hex[:6]}.mp4"
+            subtitled_path = os.path.join(output_dir, subtitled_name)
+
+            caption_position = str(
+                req.caption_position
+                or clip_data.get("caption_position")
+                or "bottom"
+            ).strip().lower()
+            if caption_position not in {"top", "middle", "bottom"}:
+                caption_position = "bottom"
+
+            caption_font_size = int(max(12, min(84, _safe_float(
+                req.caption_font_size if req.caption_font_size is not None else clip_data.get("caption_font_size"),
+                40.0
+            ))))
+            caption_font_family = _sanitize_font_name(
+                req.caption_font_family if req.caption_font_family is not None else clip_data.get("caption_font_family")
+            )
+            caption_font_color = str(req.caption_font_color or clip_data.get("caption_font_color") or "#FFFFFF")
+            caption_stroke_color = str(req.caption_stroke_color or clip_data.get("caption_stroke_color") or "#000000")
+            caption_stroke_width = int(max(0, min(8, _safe_float(
+                req.caption_stroke_width if req.caption_stroke_width is not None else clip_data.get("caption_stroke_width"),
+                3.0
+            ))))
+            caption_bold = bool(req.caption_bold if req.caption_bold is not None else clip_data.get("caption_bold", True))
+            caption_box_color = str(req.caption_box_color or clip_data.get("caption_box_color") or "#000000")
+            caption_box_opacity = int(max(0, min(100, _safe_float(
+                req.caption_box_opacity if req.caption_box_opacity is not None else clip_data.get("caption_box_opacity"),
+                0.0
+            ))))
+            caption_karaoke_mode = bool(
+                req.caption_karaoke_mode if req.caption_karaoke_mode is not None else clip_data.get("caption_karaoke_mode", False)
+            )
+            caption_offset_x = max(-100.0, min(100.0, _safe_float(
+                req.caption_offset_x if req.caption_offset_x is not None else clip_data.get("caption_offset_x"),
+                0.0
+            )))
+            caption_offset_y = max(-100.0, min(100.0, _safe_float(
+                req.caption_offset_y if req.caption_offset_y is not None else clip_data.get("caption_offset_y"),
+                0.0
+            )))
+
+            try:
+                if caption_karaoke_mode:
+                    ok_ass = generate_karaoke_ass_from_srt(
+                        shifted_srt,
+                        subtitle_path,
+                        alignment=caption_position,
+                        font_size=caption_font_size,
+                        font_name=caption_font_family,
+                        font_color=caption_font_color,
+                        active_word_color="auto",
+                        stroke_color=caption_stroke_color,
+                        stroke_width=caption_stroke_width,
+                        bold=caption_bold,
+                        box_color=caption_box_color,
+                        box_opacity=caption_box_opacity,
+                        pop_scale=118,
+                        offset_x=caption_offset_x,
+                        offset_y=caption_offset_y
+                    )
+                else:
+                    ok_ass = generate_styled_ass_from_srt(
+                        shifted_srt,
+                        subtitle_path,
+                        alignment=caption_position,
+                        font_size=caption_font_size,
+                        font_name=caption_font_family,
+                        font_color=caption_font_color,
+                        stroke_color=caption_stroke_color,
+                        stroke_width=caption_stroke_width,
+                        bold=caption_bold,
+                        box_color=caption_box_color,
+                        box_opacity=caption_box_opacity,
+                        offset_x=caption_offset_x,
+                        offset_y=caption_offset_y
+                    )
+                if not ok_ass:
+                    raise HTTPException(status_code=400, detail="No se pudo generar subtítulos para el preview rápido.")
+
+                burn_subtitles(
+                    out_path,
+                    subtitle_path,
+                    subtitled_path,
+                    alignment=caption_position,
+                    fontsize=caption_font_size,
+                    font_name=caption_font_family,
+                    font_color=caption_font_color,
+                    stroke_color=caption_stroke_color,
+                    stroke_width=caption_stroke_width,
+                    bold=caption_bold,
+                    box_color=caption_box_color,
+                    box_opacity=caption_box_opacity
+                )
+
+                if not os.path.exists(subtitled_path):
+                    raise HTTPException(status_code=500, detail="No se pudo renderizar subtítulos en preview rápido.")
+
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+
+                final_out_path = subtitled_path
+                final_out_name = subtitled_name
+                captions_burned = True
+            finally:
+                if os.path.exists(subtitle_path):
+                    try:
+                        os.remove(subtitle_path)
+                    except Exception:
+                        pass
+
+        final_w, final_h = _probe_video_dimensions(final_out_path)
+        final_duration = _probe_media_duration_seconds(final_out_path)
+        if final_w <= 0 or final_h <= 0 or final_duration < 0.2:
+            last_error = f"Invalid fast preview output from {source_reason} ({final_w}x{final_h}, {final_duration:.3f}s)"
+            try:
+                if os.path.exists(final_out_path):
+                    os.remove(final_out_path)
+            except Exception:
+                pass
+            continue
+
         return {
             "success": True,
             "clip_index": req.clip_index,
             "aspect_ratio": aspect_ratio,
             "start": round(requested_start, 3),
-            "duration": round(out_duration, 3),
+            "duration": round(final_duration, 3),
             "source_reason": source_reason,
-            "preview_video_url": f"/videos/{req.job_id}/{out_name}"
+            "preview_video_url": f"/videos/{req.job_id}/{final_out_name}",
+            "captions_burned": bool(captions_burned)
         }
 
     raise HTTPException(status_code=500, detail=last_error or "Failed to render fast preview")
@@ -4464,7 +5228,12 @@ async def retitle_clip(
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
     job = _ensure_job_context(req.job_id)
-    final_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    job_env = job.get("env", {}) if isinstance(job, dict) else {}
+    final_api_key = _normalize_space(
+        x_gemini_key
+        or job_env.get("GEMINI_API_KEY", "")
+        or os.environ.get("GEMINI_API_KEY", "")
+    ) or None
 
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     metadata_path: Optional[str] = None
@@ -4581,7 +5350,7 @@ async def rewrite_clip_social(
     req: ResocialRequest,
     x_gemini_key: Optional[str] = Header(None, alias="X-Gemini-Key")
 ):
-    _ensure_job_context(req.job_id)
+    job = _ensure_job_context(req.job_id)
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     if not os.path.isdir(output_dir):
         raise HTTPException(status_code=404, detail="Job output directory not found")
@@ -4611,7 +5380,12 @@ async def rewrite_clip_social(
         or "",
         max_chars=320
     )
-    final_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    job_env = job.get("env", {}) if isinstance(job, dict) else {}
+    final_api_key = _normalize_space(
+        x_gemini_key
+        or job_env.get("GEMINI_API_KEY", "")
+        or os.environ.get("GEMINI_API_KEY", "")
+    ) or None
 
     variants, active_index, _ = _ensure_clip_social_variant_pool(
         clip_payload,
@@ -4658,7 +5432,6 @@ async def rewrite_clip_social(
     except Exception:
         pass
 
-    job = _ensure_job_context(req.job_id)
     if isinstance(job, dict) and isinstance(job.get("result"), dict):
         result_clips = job["result"].get("clips", [])
         if isinstance(result_clips, list) and req.clip_index < len(result_clips) and isinstance(result_clips[req.clip_index], dict):
@@ -6183,6 +6956,102 @@ async def export_pack(req: ExportPackRequest):
         "platform_video_variant_files_added": platform_video_variant_files_added
     }
 
+class TrailerRequest(BaseModel):
+    job_id: str
+    aspect_ratio: Optional[str] = None
+    fragments: Optional[List[Dict[str, Any]]] = None
+
+@app.post("/api/clip/trailer")
+async def generate_trailer(req: TrailerRequest):
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    if not os.path.isdir(output_dir):
+        raise HTTPException(status_code=404, detail="Job output not found")
+
+    metadata_path = None
+    json_files = sorted(glob.glob(os.path.join(output_dir, "*_metadata.json")))
+    if json_files:
+        metadata_path = json_files[0]
+
+    metadata = {}
+    if metadata_path and os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+        except Exception:
+            pass
+
+    fragments = req.fragments or metadata.get("trailer_fragments")
+    if not fragments or len(fragments) < 2:
+        raise HTTPException(status_code=400, detail="No se encontraron fragmentos para generar el trailer.")
+
+    target_aspect_ratio = req.aspect_ratio or metadata.get("aspect_ratio") or "9:16"
+    
+    # Try to resolve source video
+    source_video_path = None
+    # 1. Check job input path if preserved
+    job = jobs.get(req.job_id)
+    if job and job.get("input_path") and os.path.exists(job["input_path"]):
+        source_video_path = job["input_path"]
+    
+    # 2. Look in output dir for files not like *_clip_* or subtitled_* or highlight_*
+    if not source_video_path:
+        candidates = []
+        for f in glob.glob(os.path.join(output_dir, "*.mp4")):
+            bn = os.path.basename(f)
+            if "_clip_" in bn or "subtitled_" in bn or "highlight_" in bn or "trailer" in bn or "temp_" in bn:
+                continue
+            candidates.append(f)
+        if candidates:
+            # Prefer largest or first
+            source_video_path = sorted(candidates, key=lambda x: os.path.getsize(x), reverse=True)[0]
+
+    if not source_video_path or not os.path.exists(source_video_path):
+        raise HTTPException(status_code=400, detail="No se encontró el video original para generar el trailer.")
+
+    # We call main.py with --build-trailer
+    # but since fragments might be customized, we pass them if possible.
+    # For now, build_super_trailer is in main.py, so we trigger a minimal run if needed,
+    # or just use the logic in main.py if we import it.
+    
+    # Actually, importing main is heavy. Let's use a temporary metadata override and call main.py.
+    # Or just call the functions directly. Let's try direct call as it's faster.
+    import main
+    video_title = os.path.splitext(os.path.basename(source_video_path))[0]
+    trailer_uncut_name = f"{video_title}_trailer_uncut.mp4"
+    trailer_final_name = f"{video_title}_trailer.mp4"
+    trailer_uncut_path = os.path.join(output_dir, trailer_uncut_name)
+    trailer_final_path = os.path.join(output_dir, trailer_final_name)
+    
+    try:
+        ok = main.build_super_trailer(source_video_path, fragments, trailer_uncut_path)
+        if not ok:
+            raise HTTPException(status_code=500, detail="Error al construir los fragmentos del trailer.")
+            
+        ok_v = main.process_video_to_vertical(trailer_uncut_path, trailer_final_path, aspect_ratio=target_aspect_ratio)
+        if not ok_v:
+            raise HTTPException(status_code=500, detail="Error al procesar el trailer verticalmente.")
+            
+        trailer_url = f"/videos/{req.job_id}/{trailer_final_name}"
+        metadata['latest_trailer_url'] = trailer_url
+        metadata['trailer_fragments'] = fragments
+        
+        # Save metadata
+        if metadata_path:
+            with open(metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+                
+        if job and isinstance(job.get("result"), dict):
+            job["result"]["latest_trailer_url"] = trailer_url
+            _persist_job_state(req.job_id)
+
+        return {
+            "success": True,
+            "trailer_url": trailer_url,
+            "fragments_used": len(fragments)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Trailer generation failed: {str(e)}")
+
 class HighlightReelRequest(BaseModel):
     job_id: str
     max_segments: int = 6
@@ -6744,7 +7613,12 @@ async def search_clips(
 
     limit = max(1, min(20, int(req.limit)))
     shortlist_limit = max(1, min(12, int(req.shortlist_limit)))
-    semantic_api_key = x_gemini_key or os.environ.get("GEMINI_API_KEY")
+    semantic_api_key = x_gemini_key
+    if not semantic_api_key:
+        # For semantic search we have a silent failure/bypass if key is missing to not block whole app, 
+        # but the user asked for strictness, so let's at least log it or raise if it's a critical path.
+        # But for /api/search usually we want an error if they expect AI search.
+        raise HTTPException(status_code=400, detail="Gemini API Key is required for semantic search.")
 
     clips = []
     if isinstance(data.get("shorts"), list):

@@ -1,23 +1,38 @@
 import time
 import cv2
-import scenedetect
 import subprocess
 import argparse
 import re
 import sys
 import math
 import zlib
-from scenedetect import VideoManager, SceneManager
-from scenedetect.detectors import ContentDetector
+import shutil
+import glob
+try:
+    from scenedetect import detect_scenes as sd_detect_scenes
+except ImportError:
+    try:
+        from scenedetect import detect as sd_detect_scenes
+    except ImportError:
+        sd_detect_scenes = None
+
+try:
+    from scenedetect import ContentDetector
+except ImportError:
+    from scenedetect.detectors import ContentDetector
 from ultralytics import YOLO
 import torch
 import os
+import numpy as np
+from tqdm import tqdm
+from autocrop import analyze_video_for_autocrop, is_variable_frame_rate, normalize_to_cfr
 import numpy as np
 from tqdm import tqdm
 import yt_dlp
 import mediapipe as mp
 # import whisper (replaced by faster_whisper inside function)
 from google import genai
+from groq import Groq
 from dotenv import load_dotenv
 import json
 from typing import List, Dict, Any, Optional, Tuple
@@ -92,6 +107,9 @@ STYLE RULES:
 - Titles: Use "Sentence case" (e.g., "Así me recibe la gente en Argentina"), only the first letter and proper names in uppercase. NO excessive capitalization.
 - Emojis: You MAY use relevant emojis in titles and social variants to increase engagement.
 - CTA: In the social descriptions, ALWAYS include a CTA in Spanish like "Sígueme y comenta X y te envío el workflow".
+
+{trailer_fragments_rule}
+
 {{
   "shorts": [
     {{
@@ -103,6 +121,13 @@ STYLE RULES:
       "topic_tags": ["<hasta 5 etiquetas cortas en español, sin #, ej: politica, debate, economia>"],
       "title_variants": ["<array de 5 títulos distintos en español, máximo 100 caracteres cada uno, sentence case, emojis permitidos>"],
       "social_variants": ["<array de 5 descripciones sociales distintas en español, incluyendo CTA, emojis permitidos, orientas a views para TikTok/IGReels>"]
+    }}
+  ],
+  "trailer_fragments": [
+    {{
+      "start": <number in seconds>,
+      "end": <number in seconds>,
+      "reason": "<breve razón en español de por qué este fragmento es bueno para el trailer>"
     }}
   ]
 }}
@@ -1093,16 +1118,18 @@ def analyze_scenes_strategy(video_path, scenes):
     return strategies
 
 def detect_scenes(video_path):
-    video_manager = VideoManager([video_path])
-    scene_manager = SceneManager()
-    scene_manager.add_detector(ContentDetector())
-    video_manager.set_downscale_factor()
-    video_manager.start()
-    scene_manager.detect_scenes(frame_source=video_manager)
-    scene_list = scene_manager.get_scene_list()
-    fps = video_manager.get_framerate()
-    video_manager.release()
-    return scene_list, fps
+    """Detect scene boundaries using PySceneDetect (Modern API)."""
+    try:
+        if sd_detect_scenes is None:
+            raise ImportError("PySceneDetect detect API not available")
+        scene_list = sd_detect_scenes(video_path, ContentDetector(), show_progress=False)
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+        return scene_list, fps
+    except Exception as e:
+        print(f"❌ Error in PySceneDetect: {str(e)}")
+        return [], 0.0
 
 def get_video_resolution(video_path):
     cap = cv2.VideoCapture(video_path)
@@ -1328,7 +1355,7 @@ Technical Details: {str(e)}
 
 def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fast", ffmpeg_crf=23, aspect_ratio=DEFAULT_ASPECT_RATIO):
     """
-    Core logic to process video using scene detection and Active Speaker Tracking (MediaPipe)
+    Core logic to process video using AutoCrop scene detection and YOLOv8 tracking
     targeting a configurable aspect ratio.
     """
     script_start_time = time.time()
@@ -1337,122 +1364,119 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
     base_name = os.path.splitext(final_output_video)[0]
     temp_video_output = f"{base_name}_temp_video.mp4"
     temp_audio_output = f"{base_name}_temp_audio.aac"
+    temp_cfr_input = f"{base_name}_temp_cfr_input.mp4"
     
     # Clean up previous temp files if they exist
-    if os.path.exists(temp_video_output): os.remove(temp_video_output)
-    if os.path.exists(temp_audio_output): os.remove(temp_audio_output)
-    if os.path.exists(final_output_video): os.remove(final_output_video)
+    for f in [temp_video_output, temp_audio_output, final_output_video, temp_cfr_input]:
+        if os.path.exists(f): 
+            try: os.remove(f)
+            except: pass
 
     print(f"🎬 Processing clip: {input_video}")
-    print("   Step 1: Detecting scenes...")
-    scenes, fps = detect_scenes(input_video)
     
-    if not scenes:
-        print("   ❌ No scenes were detected. Using full video as one scene.")
-        # If scene detection fails or finds nothing, treat whole video as one scene
-        cap = cv2.VideoCapture(input_video)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-        from scenedetect import FrameTimecode
-        scenes = [(FrameTimecode(0, fps), FrameTimecode(total_frames, fps))]
+    # Pre-processing: normalize VFR to CFR if needed
+    if is_variable_frame_rate(input_video):
+        print("   ⚠️  Variable frame rate detected — normalizing to constant frame rate first...")
+        if normalize_to_cfr(input_video, temp_cfr_input):
+            input_video = temp_cfr_input
+            print("   ✅ VFR normalization complete.")
+        else:
+            print("   ⚠️  Proceeding with original VFR file (audio sync may be affected).")
 
-    print(f"   ✅ Found {len(scenes)} scenes.")
+    print("   🧠 Step 1: Analyzing Scenes and Tracking Targets...")
+    # This does scene detection and middle-frame YOLO analysis
+    scenes_plan = analyze_video_for_autocrop(input_video)
+    
+    if not scenes_plan:
+        print("   ❌ Failed to analyze scenes. Returning original video unchanged.")
+        try:
+            shutil.copyfile(input_video, final_output_video)
+            return os.path.exists(final_output_video)
+        except Exception as copy_err:
+            print(f"   ❌ Fallback copy failed: {copy_err}")
+            return False
+        
+    print(f"   ✅ Target Plan Generated for {len(scenes_plan)} scenes.")
 
-    print("\n   🧠 Step 2: Preparing Active Tracking...")
-    original_width, original_height = get_video_resolution(input_video)
+    print("\n   ✂️ Step 2: Processing video frames...")
+    
+    cap = cv2.VideoCapture(input_video)
+    original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
     aspect_label, target_ratio = normalize_aspect_ratio(aspect_ratio)
     OUTPUT_WIDTH, OUTPUT_HEIGHT = compute_output_dimensions(original_width, original_height, target_ratio)
     print(f"   Target aspect ratio: {aspect_label} ({OUTPUT_WIDTH}x{OUTPUT_HEIGHT})")
-
-    # Initialize Cameraman
-    cameraman = SmoothedCameraman(OUTPUT_WIDTH, OUTPUT_HEIGHT, original_width, original_height, aspect_ratio=target_ratio)
-    
-    # --- New Strategy: Per-Scene Analysis ---
-    print("\n   🤖 Step 3: Analyzing Scenes for Strategy (Single vs Group)...")
-    scene_strategies = analyze_scenes_strategy(input_video, scenes)
-    # scene_strategies is a list of 'TRACK' or 'General' corresponding to scenes
-    
-    print("\n   ✂️ Step 4: Processing video frames...")
     
     command = [
         'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
         '-s', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}', '-pix_fmt', 'bgr24',
         '-r', str(fps), '-i', '-', '-c:v', 'libx264',
         '-pix_fmt', 'yuv420p',
+        '-r', str(fps), '-vsync', 'cfr',
         '-preset', str(ffmpeg_preset), '-crf', str(ffmpeg_crf), '-an',
         '-movflags', '+faststart', temp_video_output
     ]
 
     ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-    cap = cv2.VideoCapture(input_video)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
     frame_number = 0
     current_scene_index = 0
+    num_scenes = len(scenes_plan)
+    last_output_frame = None
+    dropped_frames = 0
     
-    # Pre-calculate scene boundaries
-    scene_boundaries = []
-    for s_start, s_end in scenes:
-        scene_boundaries.append((s_start.get_frames(), s_end.get_frames()))
-
-    # Global tracker for single-person shots
-    speaker_tracker = SpeakerTracker(cooldown_frames=30)
-
-    with tqdm(total=total_frames, desc="   Processing", file=sys.stdout) as pbar:
+    with tqdm(total=total_frames, desc=f"   Processing [scene 1/{num_scenes}]", file=sys.stdout) as pbar:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-
-            # Update Scene Index
-            if current_scene_index < len(scene_boundaries):
-                start_f, end_f = scene_boundaries[current_scene_index]
-                if frame_number >= end_f and current_scene_index < len(scene_boundaries) - 1:
+                
+            frame_time_sec = frame_number / fps
+            
+            # Update Scene Index based on time
+            if current_scene_index < len(scenes_plan) - 1:
+                if frame_time_sec >= scenes_plan[current_scene_index + 1]['start_sec']:
                     current_scene_index += 1
-            
-            # Determine Strategy for current frame based on scene
-            current_strategy = scene_strategies[current_scene_index] if current_scene_index < len(scene_strategies) else 'TRACK'
-            
-            # Apply Strategy
-            if current_strategy == 'GENERAL':
-                # "Plano General" -> Blur Background + Fit Width
-                output_frame = create_general_frame(frame, OUTPUT_WIDTH, OUTPUT_HEIGHT)
-                
-                # Reset cameraman/tracker so they don't drift while inactive
-                cameraman.current_center_x = original_width / 2
-                cameraman.target_center_x = original_width / 2
-                
-            else:
-                # "Single Speaker" -> Track & Crop
-                
-                # Detect every 2nd frame for performance
-                if frame_number % 2 == 0:
-                    candidates = detect_face_candidates(frame)
-                    target_box = speaker_tracker.get_target(candidates, frame_number, original_width)
-                    if target_box:
-                        cameraman.update_target(target_box)
-                    else:
-                        person_box = detect_person_yolo(frame)
-                        if person_box:
-                            cameraman.update_target(person_box)
+                    pbar.set_description(f"   Processing [scene {current_scene_index + 1}/{num_scenes}]")
 
-                # Snap camera on scene change to avoid panning from previous scene position
-                is_scene_start = (frame_number == scene_boundaries[current_scene_index][0])
-                
-                x1, y1, x2, y2 = cameraman.get_crop_box(force_snap=is_scene_start)
-                
-                # Crop
-                if y2 > y1 and x2 > x1:
-                    cropped = frame[y1:y2, x1:x2]
+            scene_data = scenes_plan[current_scene_index]
+            strategy = scene_data['strategy']
+            crop_coords = scene_data['crop_coords']
+
+            try:
+                if strategy == 'TRACK' and crop_coords:
+                    x, y, w, h = crop_coords
+                    cropped = frame[y:y+h, x:x+w]
+                    # Resize to exact output size
                     output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
+                else:  
+                    # LETTERBOX
+                    scale_factor = OUTPUT_WIDTH / original_width
+                    scaled_height = int(original_height * scale_factor)
+                    scaled_frame = cv2.resize(frame, (OUTPUT_WIDTH, scaled_height))
+
+                    output_frame = np.zeros((OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
+                    y_offset = (OUTPUT_HEIGHT - scaled_height) // 2
+                    output_frame[y_offset:y_offset + scaled_height, :] = scaled_frame
+                    
+                last_output_frame = output_frame
+            except Exception as e:
+                dropped_frames += 1
+                if last_output_frame is not None:
+                    output_frame = last_output_frame
                 else:
-                    output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
+                    output_frame = np.zeros((OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
 
             ffmpeg_process.stdin.write(output_frame.tobytes())
             frame_number += 1
             pbar.update(1)
-    
+            
+    if dropped_frames > 0:
+        print(f"  ⚠️  {dropped_frames} frame(s) could not be processed and were duplicated.")
+        
     ffmpeg_process.stdin.close()
     stderr_output = ffmpeg_process.stderr.read().decode()
     ffmpeg_process.wait()
@@ -1463,7 +1487,7 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
         print("   Stderr:", stderr_output)
         return False
 
-    print("\n   🔊 Step 5: Extracting audio...")
+    print("\n   🔊 Step 3: Extracting audio...")
     audio_extract_command = [
         'ffmpeg', '-y', '-i', input_video, '-vn', '-acodec', 'copy', temp_audio_output
     ]
@@ -1473,7 +1497,7 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
         print("\n   ❌ Audio extraction failed (maybe no audio?). Proceeding without audio.")
         pass
 
-    print("\n   ✨ Step 6: Merging...")
+    print("\n   ✨ Step 4: Merging...")
     if os.path.exists(temp_audio_output):
         merge_command = [
             'ffmpeg', '-y', '-i', temp_video_output, '-i', temp_audio_output,
@@ -1494,10 +1518,511 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
         return False
 
     # Clean up temp files
-    if os.path.exists(temp_video_output): os.remove(temp_video_output)
-    if os.path.exists(temp_audio_output): os.remove(temp_audio_output)
+    for f in [temp_video_output, temp_audio_output, temp_cfr_input]:
+        if os.path.exists(f): 
+            try: os.remove(f)
+            except: pass
     
     return True
+def build_super_trailer(input_video, fragments, output_path, ffmpeg_preset="fast", ffmpeg_crf=23):
+    """
+    Creates a fast-paced summary (Super Trailer) with crossfade transitions.
+    fragments: List[dict] with 'start', 'end' in seconds.
+    """
+    if not fragments:
+        return False
+        
+    print(f"🎬 Building Super Trailer with {len(fragments)} fragments...")
+    
+    # 1. Extract each fragment as a temp file
+    temp_dir = os.path.dirname(output_path)
+    base_name = os.path.basename(output_path).replace(".mp4", "")
+    temp_files = []
+    
+    try:
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+
+        for i, frag in enumerate(fragments):
+            start = frag['start']
+            end = frag['end']
+            temp_frag_path = os.path.join(temp_dir, f"temp_trailer_frag_{i}_{base_name}.mp4")
+            if os.path.exists(temp_frag_path):
+                try:
+                    os.remove(temp_frag_path)
+                except Exception:
+                    pass
+            
+            # Use same format for consistency
+            cut_cmd = [
+                'ffmpeg', '-y', 
+                '-ss', f"{start:.3f}", 
+                '-to', f"{end:.3f}", 
+                '-i', input_video,
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', str(ffmpeg_crf), '-preset', ffmpeg_preset,
+                '-c:a', 'aac', '-ar', '44100', '-ac', '2',
+                '-movflags', '+faststart',
+                temp_frag_path
+            ]
+            res = subprocess.run(cut_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if res.returncode == 0 and os.path.exists(temp_frag_path) and os.path.getsize(temp_frag_path) > 2048:
+                temp_files.append(temp_frag_path)
+            else:
+                stderr_output = res.stderr.decode() if res.stderr else "No stderr"
+                print(f"❌ Error extracting fragment {i}: {stderr_output}")
+        
+        if len(temp_files) < 2:
+            print(f"❌ Not enough fragments extracted ({len(temp_files)}/2).")
+            # Just copy the first one if we can't find others
+            if temp_files:
+                shutil.copyfile(temp_files[0], output_path)
+                return True
+            return False
+
+        # 2. Build the complex filter for crossfades
+        fade_dur = 0.5
+        filter_complex = ""
+        inputs = ""
+        
+        for i, f_path in enumerate(temp_files):
+            inputs += f'-i "{f_path}" '
+        
+        offsets = []
+        current_total_time = 0
+        for i in range(len(temp_files)):
+            dur = _probe_media_duration_seconds(temp_files[i])
+            if dur is None or dur <= 0.05:
+                try:
+                    fallback_dur = float(fragments[i].get('end', 0)) - float(fragments[i].get('start', 0))
+                except Exception:
+                    fallback_dur = 0.0
+                dur = max(0.3, fallback_dur)
+            offsets.append(current_total_time + dur - fade_dur)
+            current_total_time += (dur - fade_dur)
+
+        # Build video filter chain
+        for i in range(1, len(temp_files)):
+            prev_v = f"v{i-1}" if i > 1 else "0:v"
+            next_v = f"{i}:v"
+            out_v = f"v{i}"
+            offset = offsets[i-1]
+            filter_complex += f"[{prev_v}][{next_v}]xfade=transition=fade:duration={fade_dur}:offset={offset}[{out_v}]; "
+
+        # Build audio filter chain
+        for i in range(1, len(temp_files)):
+            prev_a = f"a{i-1}" if i > 1 else "0:a"
+            next_a = f"{i}:a"
+            out_a = f"a{i}"
+            filter_complex += f"[{prev_a}][{next_a}]acrossfade=d={fade_dur}:c1=tri:c2=tri[{out_a}]; "
+
+        final_v = f"[v{len(temp_files)-1}]"
+        final_a = f"[a{len(temp_files)-1}]"
+        
+        # Assemble command
+        full_cmd = ['ffmpeg', '-y']
+        for f_path in temp_files:
+            full_cmd.extend(['-i', f_path])
+        full_cmd.extend([
+            '-filter_complex', filter_complex.strip("; "),
+            '-map', final_v,
+            '-map', final_a,
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-crf', str(ffmpeg_crf),
+            '-preset', str(ffmpeg_preset),
+            '-r', '30',
+            '-vsync', 'cfr',
+            '-shortest',
+            '-movflags', '+faststart',
+            output_path
+        ])
+
+        proc = subprocess.run(full_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if proc.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 4096:
+            return True
+
+        print("❌ FFmpeg crossfade command failed. Trying hard-cut fallback...")
+        if proc.stderr:
+            print(proc.stderr.decode())
+
+        concat_list_path = os.path.join(temp_dir, f"temp_trailer_concat_{base_name}.txt")
+        try:
+            with open(concat_list_path, "w", encoding="utf-8") as f:
+                for seg_path in temp_files:
+                    safe_path = seg_path.replace("'", "'\\''")
+                    f.write(f"file '{safe_path}'\n")
+            fallback_cmd = [
+                'ffmpeg', '-y',
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', concat_list_path,
+                '-c:v', 'libx264',
+                '-pix_fmt', 'yuv420p',
+                '-crf', str(ffmpeg_crf),
+                '-preset', str(ffmpeg_preset),
+                '-c:a', 'aac',
+                '-ar', '44100',
+                '-ac', '2',
+                '-movflags', '+faststart',
+                output_path
+            ]
+            fb = subprocess.run(fallback_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if fb.returncode != 0 and fb.stderr:
+                print(fb.stderr.decode())
+            return fb.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 4096
+        finally:
+            if os.path.exists(concat_list_path):
+                try:
+                    os.remove(concat_list_path)
+                except Exception:
+                    pass
+        
+    finally:
+        # Cleanup temp fragments
+        for f in temp_files:
+            if os.path.exists(f):
+                try: os.remove(f)
+                except: pass
+
+def build_fallback_trailer_fragments(shorts, video_duration, max_fragments=6):
+    """Create fallback trailer fragments when LLM did not return trailer_fragments."""
+    safe_duration = max(0.0, float(video_duration or 0.0))
+    out = []
+
+    for clip in (shorts or []):
+        try:
+            start = max(0.0, float(clip.get("start", 0.0)))
+            end = max(start, float(clip.get("end", start)))
+        except Exception:
+            continue
+        if end - start < 2.2:
+            continue
+        seg_start = max(0.0, start + min(1.2, (end - start) * 0.15))
+        seg_end = min(end, seg_start + min(6.0, max(3.0, (end - start) * 0.35)))
+        if seg_end - seg_start < 2.2:
+            seg_end = min(end, seg_start + 3.0)
+        if seg_end - seg_start >= 2.2:
+            out.append({
+                "start": round(seg_start, 3),
+                "end": round(seg_end, 3),
+                "reason": "fallback-from-short"
+            })
+        if len(out) >= max(2, int(max_fragments or 6)):
+            break
+
+    # Absolute fallback: pick two moments in the timeline.
+    if len(out) < 2 and safe_duration >= 8.0:
+        anchors = [safe_duration * 0.20, safe_duration * 0.62]
+        for anchor in anchors:
+            seg_start = max(0.0, anchor - 1.8)
+            seg_end = min(safe_duration, seg_start + 4.2)
+            if seg_end - seg_start >= 2.2:
+                out.append({
+                    "start": round(seg_start, 3),
+                    "end": round(seg_end, 3),
+                    "reason": "timeline-fallback"
+                })
+            if len(out) >= 2:
+                break
+
+    return out
+
+
+def normalize_trailer_fragments(fragments, video_duration, max_fragments=6):
+    """Normalize and clamp trailer fragments to valid ranges and desired count."""
+    safe_duration = max(0.0, float(video_duration or 0.0))
+    safe_limit = max(2, int(max_fragments or 6))
+    out = []
+    seen = set()
+
+    for frag in (fragments or []):
+        if not isinstance(frag, dict):
+            continue
+
+        start = max(0.0, _safe_float(frag.get("start", 0.0), 0.0))
+        end = max(start, _safe_float(frag.get("end", start), start))
+        if safe_duration > 0:
+            start = min(start, safe_duration)
+            end = min(end, safe_duration)
+
+        seg_len = max(0.0, end - start)
+        if seg_len < 2.2:
+            continue
+        if seg_len > 6.2:
+            end = start + 6.0
+            if safe_duration > 0:
+                end = min(end, safe_duration)
+            seg_len = max(0.0, end - start)
+            if seg_len < 2.2:
+                continue
+
+        key = (round(start, 2), round(end, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        out.append({
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "reason": _normalize_space(frag.get("reason", "")) or "llm-selected"
+        })
+        if len(out) >= safe_limit:
+            break
+
+    return out
+
+
+def merge_trailer_fragments(primary, fallback, target_count=6):
+    """Merge primary+fallback fragments without duplicates up to target count."""
+    safe_limit = max(2, int(target_count or 6))
+    out = []
+    seen = set()
+
+    for frag in list(primary or []) + list(fallback or []):
+        if not isinstance(frag, dict):
+            continue
+        start = _safe_float(frag.get("start", 0.0), 0.0)
+        end = _safe_float(frag.get("end", start), start)
+        key = (round(start, 2), round(end, 2))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(frag)
+        if len(out) >= safe_limit:
+            break
+
+    return out
+
+def build_trailer_transcript_from_fragments(
+    transcript: Dict[str, Any],
+    fragments: List[Dict[str, Any]],
+    fade_duration: float = 0.5
+) -> Dict[str, Any]:
+    """
+    Build a synthetic transcript aligned to the final trailer timeline.
+    Output timestamps are relative to trailer start (timebase=clip).
+    """
+    if not isinstance(transcript, dict) or not isinstance(fragments, list) or not fragments:
+        return {"text": "", "segments": []}
+
+    words = _extract_transcript_words(transcript)
+    if not words:
+        return {"text": "", "segments": []}
+
+    source_segments = transcript.get("segments", []) if isinstance(transcript.get("segments"), list) else []
+    mapped_words: List[Dict[str, Any]] = []
+    timeline_cursor = 0.0
+
+    for frag_idx, frag in enumerate(fragments):
+        frag_start = max(0.0, _safe_float((frag or {}).get("start", 0.0), 0.0))
+        frag_end = max(frag_start, _safe_float((frag or {}).get("end", frag_start), frag_start))
+        frag_duration = max(0.0, frag_end - frag_start)
+        if frag_duration < 0.08:
+            continue
+
+        for w in words:
+            ws_abs = max(frag_start, _safe_float(w.get("start", frag_start), frag_start))
+            we_abs = min(frag_end, _safe_float(w.get("end", ws_abs), ws_abs))
+            if we_abs <= frag_start or ws_abs >= frag_end:
+                continue
+            token = _normalize_space(w.get("word", ""))
+            if not token:
+                continue
+            local_start = max(0.0, ws_abs - frag_start)
+            local_end = max(local_start, we_abs - frag_start)
+            mapped_words.append({
+                "word": token,
+                "start": round(timeline_cursor + local_start, 3),
+                "end": round(timeline_cursor + local_end, 3),
+                "segment_index": int(_safe_float(w.get("segment_index", 0), 0)),
+                "fragment_index": frag_idx
+            })
+
+        if frag_idx < len(fragments) - 1:
+            timeline_cursor += max(0.2, frag_duration - max(0.0, float(fade_duration or 0.0)))
+        else:
+            timeline_cursor += frag_duration
+
+    if not mapped_words:
+        return {"text": "", "segments": []}
+
+    mapped_words.sort(key=lambda item: (float(item.get("start", 0.0)), float(item.get("end", 0.0))))
+
+    speaker_by_seg_idx: Dict[int, str] = {}
+    for idx, seg in enumerate(source_segments):
+        if not isinstance(seg, dict):
+            continue
+        speaker = _normalize_space(seg.get("speaker", ""))
+        if speaker:
+            speaker_by_seg_idx[idx] = speaker
+
+    segments_out: List[Dict[str, Any]] = []
+    current_words: List[Dict[str, Any]] = []
+
+    def flush_segment():
+        nonlocal current_words
+        if not current_words:
+            return
+        start = max(0.0, _safe_float(current_words[0].get("start", 0.0), 0.0))
+        end = max(start, _safe_float(current_words[-1].get("end", start), start))
+        text = _normalize_space(" ".join(str(w.get("word", "")).strip() for w in current_words))
+        if not text:
+            current_words = []
+            return
+        speaker_counts: Dict[str, int] = {}
+        for w in current_words:
+            seg_idx = int(_safe_float(w.get("segment_index", -1), -1))
+            speaker = speaker_by_seg_idx.get(seg_idx, "")
+            if speaker:
+                speaker_counts[speaker] = speaker_counts.get(speaker, 0) + 1
+        speaker = max(speaker_counts.items(), key=lambda x: x[1])[0] if speaker_counts else None
+        words_payload = [
+            {
+                "word": str(w.get("word", "")).strip(),
+                "start": round(max(0.0, _safe_float(w.get("start", 0.0), 0.0)), 3),
+                "end": round(max(0.0, _safe_float(w.get("end", 0.0), 0.0)), 3),
+            }
+            for w in current_words
+            if str(w.get("word", "")).strip()
+        ]
+        segments_out.append({
+            "segment_index": len(segments_out),
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": text,
+            "speaker": speaker,
+            "words": words_payload
+        })
+        current_words = []
+
+    max_chars = 28
+    max_duration = 2.25
+    max_gap = 0.45
+
+    for w in mapped_words:
+        ws = max(0.0, _safe_float(w.get("start", 0.0), 0.0))
+        we = max(ws, _safe_float(w.get("end", ws), ws))
+        token = _normalize_space(w.get("word", ""))
+        if not token:
+            continue
+
+        if not current_words:
+            current_words = [dict(w, start=ws, end=we, word=token)]
+            continue
+
+        cur_start = max(0.0, _safe_float(current_words[0].get("start", 0.0), 0.0))
+        cur_chars = sum(len(str(item.get("word", "")).strip()) + 1 for item in current_words)
+        last_end = max(cur_start, _safe_float(current_words[-1].get("end", cur_start), cur_start))
+        gap = ws - last_end
+        next_duration = we - cur_start
+
+        should_split = (
+            gap > max_gap
+            or next_duration > max_duration
+            or (cur_chars + len(token)) > max_chars
+        )
+        if should_split:
+            flush_segment()
+        current_words.append(dict(w, start=ws, end=we, word=token))
+
+    flush_segment()
+
+    transcript_text = _normalize_space(" ".join(seg.get("text", "") for seg in segments_out if isinstance(seg, dict)))
+    return {
+        "text": transcript_text,
+        "segments": segments_out
+    }
+
+def build_trailer_timeline_markers(
+    fragments: List[Dict[str, Any]],
+    fade_duration: float = 0.5
+) -> Dict[str, Any]:
+    """
+    Build transition markers and fragment ranges in trailer timeline timebase (0-based).
+    """
+    if not isinstance(fragments, list) or not fragments:
+        return {
+            "transition_points": [],
+            "fragment_ranges": [],
+            "timeline_duration": 0.0,
+            "fade_duration": max(0.0, float(fade_duration or 0.0))
+        }
+
+    safe_fade = max(0.0, float(fade_duration or 0.0))
+    valid_fragments: List[Tuple[float, float]] = []
+    for frag in fragments:
+        if not isinstance(frag, dict):
+            continue
+        fs = max(0.0, _safe_float(frag.get("start", 0.0), 0.0))
+        fe = max(fs, _safe_float(frag.get("end", fs), fs))
+        if (fe - fs) < 0.08:
+            continue
+        valid_fragments.append((fs, fe))
+
+    if not valid_fragments:
+        return {
+            "transition_points": [],
+            "fragment_ranges": [],
+            "timeline_duration": 0.0,
+            "fade_duration": safe_fade
+        }
+
+    transition_points: List[float] = []
+    fragment_ranges: List[Dict[str, Any]] = []
+    cursor = 0.0
+
+    for idx, (fs, fe) in enumerate(valid_fragments):
+        dur = max(0.0, fe - fs)
+        out_start = cursor
+        out_end = out_start + dur
+        fragment_ranges.append({
+            "fragment_index": idx,
+            "start": round(out_start, 3),
+            "end": round(out_end, 3),
+            "source_start": round(fs, 3),
+            "source_end": round(fe, 3)
+        })
+        if idx < len(valid_fragments) - 1:
+            transition_start = max(0.0, out_end - safe_fade)
+            transition_points.append(round(transition_start, 3))
+            cursor = transition_start
+        else:
+            cursor = out_end
+
+    return {
+        "transition_points": transition_points,
+        "fragment_ranges": fragment_ranges,
+        "timeline_duration": round(max(0.0, cursor), 3),
+        "fade_duration": safe_fade
+    }
+
+def _probe_media_duration_seconds(file_path):
+    try:
+        cmd = [
+            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1', file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return max(0.0, float((result.stdout or "").strip() or 0.0))
+    except Exception:
+        pass
+
+    # Fallback for environments where ffprobe is unavailable (e.g. some local mac setups).
+    try:
+        fb = subprocess.run(['ffmpeg', '-i', file_path], capture_output=True, text=True)
+        raw = str(fb.stderr or "")
+        match = re.search(r"Duration:\s+(\d+):(\d+):(\d+(?:\.\d+)?)", raw)
+        if match:
+            hh, mm, ss = match.groups()
+            return (float(hh) * 3600.0) + (float(mm) * 60.0) + float(ss)
+    except Exception:
+        pass
+    return 0.0
+
 
 def transcribe_video(video_path, language=None, backend=None, model_name=None, word_timestamps=True, compute_type=None, cpu_threads=0, num_workers=1):
     backend = (backend or os.getenv("WHISPER_BACKEND", "faster")).lower()
@@ -1608,21 +2133,56 @@ def transcribe_video(video_path, language=None, backend=None, model_name=None, w
         'language': info.language
     }
 
-def get_viral_clips(transcript_result, video_duration, max_clips=None, clip_length_target=None):
-    print("🤖  Analyzing with Gemini...")
-    
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found in environment variables.")
+def _is_groq_rate_limit_error(err):
+    msg = str(err or "").lower()
+    if not msg:
+        return False
+    return (
+        "rate_limit_exceeded" in msg
+        or "rate limit reached" in msg
+        or "error code: 429" in msg
+        or "too many requests" in msg
+    )
+
+def _extract_retry_after_seconds(err):
+    msg = str(err or "")
+    match = re.search(r"try again in\s*([0-9]+(?:\.[0-9]+)?)s", msg, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
         return None
 
-
-    client = genai.Client(api_key=api_key)
+def get_viral_clips(
+    transcript_result,
+    video_duration,
+    max_clips=None,
+    clip_length_target=None,
+    trailer_fragments_target=6,
+    model_name='gemini-2.5-flash-lite',
+    llm_provider='gemini',
+    groq_api_key=None
+):
+    print(f"🤖  Analyzing with {llm_provider.capitalize()}...")
     
-    # We use gemini-2.5-flash as requested.
-    model_name = 'gemini-2.5-flash' 
+    if llm_provider == 'gemini':
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            print("❌ Error: GEMINI_API_KEY not found in environment variables.")
+            return None
+        client = genai.Client(api_key=api_key)
+    elif llm_provider == 'groq':
+        api_key = groq_api_key or os.getenv("GROQ_API_KEY")
+        if not api_key:
+            print("❌ Error: GROQ_API_KEY not found in environment variables.")
+            return None
+        client = Groq(api_key=api_key)
+    else:
+        print(f"❌ Error: Unsupported LLM provider: {llm_provider}")
+        return None
     
-    print(f"🤖  Initializing Gemini with model: {model_name}")
+    print(f"🤖  Initializing {llm_provider.capitalize()} with model: {model_name}")
 
     # Extract words
     words = []
@@ -1638,79 +2198,80 @@ def get_viral_clips(transcript_result, video_duration, max_clips=None, clip_leng
     if max_clips:
         max_clips_rule = f"IMPORTANT: Return at most {max_clips} clips."
     length_rule = clip_length_guidance(clip_length_target)
+    trailer_target = max(2, min(12, int(trailer_fragments_target or 6)))
+    trailer_min = max(2, trailer_target - 1)
+    trailer_max = min(12, trailer_target + 1)
+    trailer_rule = (
+        "TRAILER RULE: Identify additional \"explosive\" or \"hooky\" fragments (3-6 seconds each) "
+        f"to create a Super Trailer summary. Prefer {trailer_target} fragments (allowed range: {trailer_min}-{trailer_max})."
+    )
 
     prompt = GEMINI_PROMPT_TEMPLATE.format(
         video_duration=video_duration,
         transcript_text=json.dumps(transcript_result['text']),
         words_json=json.dumps(words),
         max_clips_rule=max_clips_rule,
-        clip_length_rule=length_rule
+        clip_length_rule=length_rule,
+        trailer_fragments_rule=trailer_rule
     )
 
-    try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt
-        )
-        
-        # --- Cost Calculation ---
+    max_attempts = 2 if llm_provider == 'groq' else 1
+    for attempt in range(1, max_attempts + 1):
         try:
-            usage = response.usage_metadata
-            if usage:
-                # Gemini 2.5 Flash Pricing (Dec 2025)
-                # Input: $0.10 per 1M tokens
-                # Output: $0.40 per 1M tokens
-                
-                input_price_per_million = 0.10
-                output_price_per_million = 0.40
-                
-                prompt_tokens = usage.prompt_token_count
-                output_tokens = usage.candidates_token_count
-                
-                input_cost = (prompt_tokens / 1_000_000) * input_price_per_million
-                output_cost = (output_tokens / 1_000_000) * output_price_per_million
-                total_cost = input_cost + output_cost
-                
-                cost_analysis = {
-                    "input_tokens": prompt_tokens,
-                    "output_tokens": output_tokens,
-                    "input_cost": input_cost,
-                    "output_cost": output_cost,
-                    "total_cost": total_cost,
-                    "model": model_name
-                }
+            if llm_provider == 'gemini':
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={'response_mime_type': 'application/json'}
+                )
+                result_json = json.loads(response.text)
+            elif llm_provider == 'groq':
+                chat_completion = client.chat.completions.create(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=model_name,
+                    response_format={"type": "json_object"},
+                )
+                result_json = json.loads(chat_completion.choices[0].message.content)
+            else:
+                return None
 
-                print(f"💰 Token Usage ({model_name}):")
-                print(f"   - Input Tokens: {prompt_tokens} (${input_cost:.6f})")
-                print(f"   - Output Tokens: {output_tokens} (${output_cost:.6f})")
-                print(f"   - Total Estimated Cost: ${total_cost:.6f}")
-                
+            if max_clips and isinstance(result_json.get('shorts'), list):
+                result_json['shorts'] = result_json['shorts'][:max_clips]
+
+            return result_json
         except Exception as e:
-            print(f"⚠️ Could not calculate cost: {e}")
-            cost_analysis = None
-        # ------------------------
+            if llm_provider == 'groq' and _is_groq_rate_limit_error(e) and attempt < max_attempts:
+                retry_after = _extract_retry_after_seconds(e)
+                wait_seconds = retry_after if retry_after is not None else 30.0
+                wait_seconds = max(2.0, min(wait_seconds + 1.0, 90.0))
+                print(
+                    f"⚠️ Groq rate limit alcanzado. Esperando {wait_seconds:.1f}s y reintentando "
+                    f"({attempt}/{max_attempts})..."
+                )
+                time.sleep(wait_seconds)
+                continue
 
-        # Clean response if it contains markdown code blocks
-        text = response.text
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-        
-        result_json = json.loads(text)
-        if cost_analysis:
-            result_json['cost_analysis'] = cost_analysis
+            if llm_provider == 'groq':
+                gemini_key = os.getenv("GEMINI_API_KEY")
+                fallback_model = os.getenv("GROQ_FALLBACK_GEMINI_MODEL", "gemini-2.5-flash-lite")
+                if gemini_key:
+                    print(
+                        f"⚠️ Groq no disponible ({e}). Fallback automatico a Gemini ({fallback_model})."
+                    )
+                    return get_viral_clips(
+                        transcript_result=transcript_result,
+                        video_duration=video_duration,
+                        max_clips=max_clips,
+                        clip_length_target=clip_length_target,
+                        model_name=fallback_model,
+                        llm_provider='gemini',
+                        groq_api_key=None
+                    )
 
-        if max_clips and isinstance(result_json.get('shorts'), list):
-            result_json['shorts'] = result_json['shorts'][:max_clips]
+            print(f"❌ {llm_provider.capitalize()} Error: {e}")
+            return None
 
-        result_json = normalize_shorts_payload(result_json)
-            
-        return result_json
-    except Exception as e:
-        print(f"❌ Gemini Error: {e}")
-        return None
+    return None
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="AutoCrop with Viral Clip Detection.")
@@ -1733,6 +2294,12 @@ if __name__ == '__main__':
     parser.add_argument('--clip-length-target', type=str, default=None, help="Preferred clip length profile: short|balanced|long.")
     parser.add_argument('--style-template', type=str, default=None, help="UI template id used for this generation (metadata only).")
     parser.add_argument('--content-profile', type=str, default=None, help="Content profile selected in UI (metadata only).")
+    parser.add_argument('--llm-model', type=str, default='gemini-2.5-flash-lite', help="Gemini model name.")
+    parser.add_argument('--llm-provider', type=str, default='gemini', help="LLM provider: gemini or groq.")
+    parser.add_argument('--groq-api-key', type=str, default=None, help="Groq API Key.")
+    parser.add_argument('--build-trailer', action='store_true', help="If true, generates a Super Trailer from identified fragments.")
+    parser.add_argument('--trailer-only', action='store_true', help="If true, skips clip rendering and generates only the Super Trailer.")
+    parser.add_argument('--trailer-fragments-target', type=int, default=6, help="Desired number of highlighted segments for Super Trailer (2-12).")
     
     args = parser.parse_args()
 
@@ -1740,6 +2307,9 @@ if __name__ == '__main__':
 
     if args.max_clips:
         args.max_clips = max(1, min(15, args.max_clips))
+    args.trailer_fragments_target = max(2, min(12, int(args.trailer_fragments_target or 6)))
+    if args.trailer_only:
+        args.build_trailer = True
     args.word_timestamps = str(args.word_timestamps).lower() in ("1", "true", "yes", "y")
     if args.clip_length_target:
         args.clip_length_target = str(args.clip_length_target).strip().lower()
@@ -1839,7 +2409,11 @@ if __name__ == '__main__':
             transcript,
             duration,
             max_clips=args.max_clips,
-            clip_length_target=args.clip_length_target
+            clip_length_target=args.clip_length_target,
+            trailer_fragments_target=args.trailer_fragments_target,
+            model_name=args.llm_model,
+            llm_provider=args.llm_provider,
+            groq_api_key=args.groq_api_key
         )
         
         if not clips_data or 'shorts' not in clips_data:
@@ -1858,7 +2432,8 @@ if __name__ == '__main__':
             clips_data["generation_profile"] = {
                 "clip_length_target": args.clip_length_target or "default",
                 "style_template": (str(args.style_template).strip() if args.style_template else None),
-                "content_profile": (str(args.content_profile).strip() if args.content_profile else None)
+                "content_profile": (str(args.content_profile).strip() if args.content_profile else None),
+                "trailer_fragments_target": args.trailer_fragments_target
             }
             post = clips_data.get("postprocess", {}) if isinstance(clips_data, dict) else {}
             smart_meta = post.get("smart_boundaries", {}) if isinstance(post, dict) else {}
@@ -1888,41 +2463,166 @@ if __name__ == '__main__':
                 json.dump(clips_data, f, indent=2)
             print(f"   Saved metadata to {metadata_file}")
 
-            # 5. Process each clip
-            for i, clip in enumerate(clips_data['shorts']):
-                start = clip['start']
-                end = clip['end']
-                print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
-                print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
+            shorts_for_trailer = list(clips_data.get('shorts', []))
+
+            # 5. Process each clip (skip in trailer-only mode)
+            if not args.trailer_only:
+                for i, clip in enumerate(clips_data['shorts']):
+                    start = clip['start']
+                    end = clip['end']
+                    print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
+                    print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
+                    
+                    # Cut clip
+                    clip_filename = f"{video_title}_clip_{i+1}.mp4"
+                    clip_uncut_filename = f"{video_title}_clip_{i+1}_uncut.mp4"
+                    clip_final_path = os.path.join(output_dir, clip_filename)
+                    clip_uncut_path = os.path.join(output_dir, clip_uncut_filename)
+                    
+                    # ffmpeg cut
+                    # Using re-encoding for precision as requested by strict seconds
+                    # Save directly to the uncut path first so we preserve the original frame.
+                    cut_command = [
+                        'ffmpeg', '-y', 
+                        '-ss', str(start), 
+                        '-to', str(end), 
+                        '-i', input_video,
+                        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', str(args.ffmpeg_crf), '-preset', str(args.ffmpeg_preset),
+                        '-c:a', 'aac',
+                        '-movflags', '+faststart',
+                        clip_uncut_path
+                    ]
+                    subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    
+                    # Process vertical from the uncut source instead of input_video to save processing time
+                    # but input_video would also work if uncut_path is deleted. Let's use uncut_path.
+                    success = process_video_to_vertical(clip_uncut_path, clip_final_path, args.ffmpeg_preset, args.ffmpeg_crf, args.aspect_ratio)
+                    
+                    if success:
+                        print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
+                        print(f"   ✅ Uncut Clip {i+1} saved: {clip_uncut_path}")
+            else:
+                print("🎯 Trailer-only mode: omitiendo render de clips individuales.")
+
+            # 6. Optional Super Trailer
+            target_trailer_fragments = max(2, int(args.trailer_fragments_target or 6))
+            trailer_fragments = normalize_trailer_fragments(
+                clips_data.get("trailer_fragments", []),
+                duration,
+                max_fragments=target_trailer_fragments
+            )
+            if len(trailer_fragments) < target_trailer_fragments:
+                fallback_fragments = normalize_trailer_fragments(
+                    build_fallback_trailer_fragments(
+                        shorts_for_trailer,
+                        duration,
+                        max_fragments=target_trailer_fragments
+                    ),
+                    duration,
+                    max_fragments=target_trailer_fragments
+                )
+                trailer_fragments = merge_trailer_fragments(
+                    trailer_fragments,
+                    fallback_fragments,
+                    target_count=target_trailer_fragments
+                )
+            if trailer_fragments:
+                clips_data["trailer_fragments"] = trailer_fragments
+
+            if args.build_trailer:
+                print(
+                    f"🎞️ Super Trailer configurado para {target_trailer_fragments} segmentos "
+                    f"(disponibles: {len(trailer_fragments)})."
+                )
+
+            if args.build_trailer and len(trailer_fragments) >= 2:
+                print("\n⚡ Generating Super Trailer...")
+                trailer_uncut_path = os.path.join(output_dir, f"{video_title}_trailer_uncut.mp4")
+                trailer_final_path = os.path.join(output_dir, f"{video_title}_trailer.mp4")
                 
-                # Cut clip
-                clip_filename = f"{video_title}_clip_{i+1}.mp4"
-                clip_uncut_filename = f"{video_title}_clip_{i+1}_uncut.mp4"
-                clip_final_path = os.path.join(output_dir, clip_filename)
-                clip_uncut_path = os.path.join(output_dir, clip_uncut_filename)
-                
-                # ffmpeg cut
-                # Using re-encoding for precision as requested by strict seconds
-                # Save directly to the uncut path first so we preserve the original frame.
-                cut_command = [
-                    'ffmpeg', '-y', 
-                    '-ss', str(start), 
-                    '-to', str(end), 
-                    '-i', input_video,
-                    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', str(args.ffmpeg_crf), '-preset', str(args.ffmpeg_preset),
-                    '-c:a', 'aac',
-                    '-movflags', '+faststart',
-                    clip_uncut_path
-                ]
-                subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                
-                # Process vertical from the uncut source instead of input_video to save processing time
-                # but input_video would also work if uncut_path is deleted. Let's use uncut_path.
-                success = process_video_to_vertical(clip_uncut_path, clip_final_path, args.ffmpeg_preset, args.ffmpeg_crf, args.aspect_ratio)
-                
-                if success:
-                    print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
-                    print(f"   ✅ Uncut Clip {i+1} saved: {clip_uncut_path}")
+                # Build the horizontal trailer first
+                ok = build_super_trailer(input_video, trailer_fragments, trailer_uncut_path, args.ffmpeg_preset, args.ffmpeg_crf)
+                if ok:
+                    print(f"   ✅ Uncut Trailer ready: {trailer_uncut_path}")
+                    # Apply AutoCrop to the trailer
+                    ok_v = process_video_to_vertical(trailer_uncut_path, trailer_final_path, args.ffmpeg_preset, args.ffmpeg_crf, args.aspect_ratio)
+                    if ok_v:
+                        print(f"   ✅ Super Trailer ready: {trailer_final_path}")
+                        clips_data['latest_trailer_url'] = f"/videos/{os.path.basename(output_dir)}/{os.path.basename(trailer_final_path)}"
+                        # Update metadata one last time
+                        with open(metadata_file, 'w') as f:
+                            json.dump(clips_data, f, indent=2)
+                else:
+                    print("   ❌ Failed to build Super Trailer fragments.")
+
+            if args.trailer_only:
+                trailer_url = str(clips_data.get("latest_trailer_url", "") or "").strip()
+                trailer_duration = 0.0
+                if trailer_url:
+                    trailer_name = trailer_url.split("/")[-1]
+                    trailer_path = os.path.join(output_dir, trailer_name)
+                    if os.path.exists(trailer_path):
+                        trailer_duration = _probe_media_duration_seconds(trailer_path)
+                trailer_timeline_meta = build_trailer_timeline_markers(
+                    fragments=trailer_fragments,
+                    fade_duration=0.5
+                )
+                trailer_transcript = build_trailer_transcript_from_fragments(
+                    transcript=transcript,
+                    fragments=trailer_fragments,
+                    fade_duration=0.5
+                )
+                if trailer_duration <= 0.0:
+                    try:
+                        transcript_end = max(
+                            (_safe_float(seg.get("end", 0.0), 0.0) for seg in trailer_transcript.get("segments", [])),
+                            default=0.0
+                        )
+                        trailer_duration = max(
+                            transcript_end,
+                            _safe_float(trailer_timeline_meta.get("timeline_duration", 0.0), 0.0)
+                        )
+                    except Exception:
+                        trailer_duration = 0.0
+
+                base_clip = shorts_for_trailer[0] if shorts_for_trailer else {}
+                trailer_title = (
+                    (base_clip.get("video_title_for_youtube_short") if isinstance(base_clip, dict) else None)
+                    or "Super Trailer"
+                )
+                trailer_desc = (
+                    (base_clip.get("video_description_for_tiktok") if isinstance(base_clip, dict) else None)
+                    or "Resumen rápido con los mejores momentos."
+                )
+
+                synthetic_clip = {
+                    "clip_index": 0,
+                    "start": 0.0,
+                    "end": round(max(3.0, trailer_duration or 0.0), 3),
+                    "aspect_ratio": args.aspect_ratio,
+                    "virality_score": int((base_clip.get("virality_score", 90) if isinstance(base_clip, dict) else 90) or 90),
+                    "selection_confidence": float((base_clip.get("selection_confidence", 0.9) if isinstance(base_clip, dict) else 0.9) or 0.9),
+                    "score_reason": "Montaje resumen de momentos clave.",
+                    "video_title_for_youtube_short": str(trailer_title),
+                    "video_description_for_tiktok": str(trailer_desc),
+                    "video_description_for_instagram": str(trailer_desc),
+                    "video_url": trailer_url or None,
+                    "title_variants": (base_clip.get("title_variants", []) if isinstance(base_clip, dict) else []),
+                    "social_variants": (base_clip.get("social_variants", []) if isinstance(base_clip, dict) else []),
+                    "is_trailer": True,
+                    "transition_points": trailer_timeline_meta.get("transition_points", []),
+                    "fragment_ranges": trailer_timeline_meta.get("fragment_ranges", []),
+                    "transition_duration": _safe_float(trailer_timeline_meta.get("fade_duration", 0.5), 0.5),
+                }
+                if trailer_transcript.get("segments"):
+                    trailer_text = _normalize_space(trailer_transcript.get("text", ""))
+                    synthetic_clip["transcript_segments"] = trailer_transcript.get("segments", [])
+                    synthetic_clip["transcript_text"] = trailer_text
+                    synthetic_clip["transcript_excerpt"] = trailer_text[:420]
+                    synthetic_clip["transcript_timebase"] = "clip"
+                clips_data["shorts"] = [synthetic_clip]
+                with open(metadata_file, 'w') as f:
+                    json.dump(clips_data, f, indent=2)
 
     # Clean up original if requested
     if args.url and not args.keep_original and os.path.exists(input_video):
