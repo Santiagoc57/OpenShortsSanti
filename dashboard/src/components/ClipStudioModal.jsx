@@ -21,7 +21,8 @@ const CAPTION_PRESETS = [
       strokeWidth: 1,
       bold: true,
       boxColor: '#111827',
-      boxOpacity: 72
+      boxOpacity: 72,
+      animation: 'slide'
     }
   },
   {
@@ -42,7 +43,8 @@ const CAPTION_PRESETS = [
       strokeWidth: 5,
       bold: true,
       boxColor: '#000000',
-      boxOpacity: 0
+      boxOpacity: 0,
+      animation: 'bounce'
     },
     karaokeMode: true
   },
@@ -64,7 +66,8 @@ const CAPTION_PRESETS = [
       strokeWidth: 5,
       bold: true,
       boxColor: '#000000',
-      boxOpacity: 0
+      boxOpacity: 0,
+      animation: 'pop'
     },
     karaokeMode: true
   },
@@ -86,7 +89,8 @@ const CAPTION_PRESETS = [
       strokeWidth: 5,
       bold: true,
       boxColor: '#000000',
-      boxOpacity: 0
+      boxOpacity: 0,
+      animation: 'pop'
     },
     karaokeMode: true
   },
@@ -108,7 +112,8 @@ const CAPTION_PRESETS = [
       strokeWidth: 2,
       bold: true,
       boxColor: '#1D4ED8',
-      boxOpacity: 78
+      boxOpacity: 78,
+      animation: 'slide'
     }
   },
   {
@@ -129,7 +134,8 @@ const CAPTION_PRESETS = [
       strokeWidth: 0,
       bold: true,
       boxColor: '#FFFFFF',
-      boxOpacity: 100
+      boxOpacity: 100,
+      animation: 'none'
     }
   },
   {
@@ -150,7 +156,8 @@ const CAPTION_PRESETS = [
       strokeWidth: 6,
       bold: true,
       boxColor: '#000000',
-      boxOpacity: 0
+      boxOpacity: 0,
+      animation: 'bounce'
     }
   }
 ];
@@ -194,6 +201,7 @@ const EMOTION_COLOR_RULES = [
   { color: '#00E5FF', keywords: ['tip', 'clave', 'estrategia', 'tutorial', 'paso', 'metodo', 'método'] },
   { color: '#B266FF', keywords: ['mindset', 'increible', 'increíble', 'wow', 'sorpresa', 'impacto'] }
 ];
+const SPEAKER_COLOR_PALETTE = ['#39FF14', '#00E5FF', '#FFC400', '#FF4D4D', '#B266FF', '#22D3EE', '#F97316', '#F43F5E'];
 const BRAND_KIT_STORAGE_KEY = 'brandKitV1';
 
 const normalizeSubtitleFontFamily = (value) => {
@@ -232,7 +240,9 @@ const readStoredBrandKitSubtitleStyle = () => {
       bold: typeof parsed.subtitle_bold === 'boolean' ? parsed.subtitle_bold : true,
       boxColor: String(parsed.subtitle_box_color || '#000000'),
       boxOpacity: clampNum(parsed.subtitle_box_opacity, 0, 0, 100),
-      karaokeMode: false
+      karaokeMode: false,
+      subtitleAnimation: 'none',
+      speakerColorMode: false
     };
   } catch (_) {
     return null;
@@ -299,6 +309,16 @@ const suggestEmotionColorForText = (value) => {
   if (text.includes('!')) return '#FFC400';
   if (text.includes('?')) return '#00E5FF';
   return ACTIVE_WORD_COLOR;
+};
+
+const pickSpeakerColorForLabel = (label) => {
+  const safe = normalizeEmojiText(label);
+  if (!safe) return ACTIVE_WORD_COLOR;
+  let digest = 0;
+  for (let i = 0; i < safe.length; i += 1) {
+    digest = ((digest * 33) + safe.charCodeAt(i)) % 1000003;
+  }
+  return SPEAKER_COLOR_PALETTE[Math.abs(digest) % SPEAKER_COLOR_PALETTE.length];
 };
 
 const stripSubtitlePunctuation = (value) => {
@@ -511,6 +531,8 @@ export default function ClipStudioModal({
   const [boxColor, setBoxColor] = useState('#000000');
   const [boxOpacity, setBoxOpacity] = useState(20);
   const [karaokeMode, setKaraokeMode] = useState(false);
+  const [subtitleAnimation, setSubtitleAnimation] = useState('none');
+  const [speakerColorMode, setSpeakerColorMode] = useState(false);
   const [punctuationOn, setPunctuationOn] = useState(true);
   const [emojiOn, setEmojiOn] = useState(true);
   const [captionOffsetX, setCaptionOffsetX] = useState(clamp(Number(clip?.caption_offset_x || 0), -100, 100));
@@ -717,12 +739,20 @@ export default function ClipStudioModal({
     const duration = Math.max(0.2, end - start);
     const progress = Math.max(0, Math.min(0.9999, (Number(previewCurrentTime || 0) - start) / duration));
     const activeIndex = Math.min(words.length - 1, Math.floor(progress * words.length));
+    const absoluteTime = Number(baseClipStart || 0) + Number(previewCurrentTime || 0);
+    const activeSpeaker = speakerColorMode && Array.isArray(transcriptSegments)
+      ? (transcriptSegments.find((seg) => {
+        const segStart = Number(seg?.start || 0);
+        const segEnd = Number(seg?.end || segStart);
+        return absoluteTime >= segStart && absoluteTime <= (segEnd + 0.05);
+      })?.speaker || '')
+      : '';
     return {
       words,
       activeIndex,
-      activeColor: suggestEmotionColorForText(rawText)
+      activeColor: activeSpeaker ? pickSpeakerColorForLabel(activeSpeaker) : suggestEmotionColorForText(rawText)
     };
-  }, [karaokeMode, activeSubtitleEntry, previewCurrentTime, punctuationOn]);
+  }, [karaokeMode, activeSubtitleEntry, previewCurrentTime, punctuationOn, baseClipStart, transcriptSegments, speakerColorMode]);
   const captionDragEnabled = captionsOn && (section === 'captions' || section === 'subtitle_edit');
   const captionAnchorTopPercent = position === 'top' ? 12 : position === 'middle' ? 50 : 86;
 
@@ -983,6 +1013,8 @@ export default function ClipStudioModal({
     setBoxColor(preset.style.boxColor);
     setBoxOpacity(preset.style.boxOpacity);
     setKaraokeMode(Boolean(preset.karaokeMode));
+    setSubtitleAnimation(String(preset.style?.animation || 'none'));
+    setSpeakerColorMode(Boolean(preset.style?.speakerColorMode));
   };
 
   const loadTranscript = async () => {
@@ -1212,7 +1244,9 @@ export default function ClipStudioModal({
       clip?.caption_bold,
       clip?.caption_box_color,
       clip?.caption_box_opacity,
-      clip?.caption_karaoke_mode
+      clip?.caption_karaoke_mode,
+      clip?.caption_animation,
+      clip?.caption_speaker_color_mode
     ].some((v) => v !== undefined && v !== null && String(v) !== '');
 
     if (hasClipStyle) {
@@ -1227,6 +1261,10 @@ export default function ClipStudioModal({
       setBoxColor(String(clip?.caption_box_color || CAPTION_PRESETS[0].style.boxColor));
       setBoxOpacity(clamp(Number(clip?.caption_box_opacity ?? CAPTION_PRESETS[0].style.boxOpacity), 0, 100));
       setKaraokeMode(Boolean(clip?.caption_karaoke_mode));
+      setSubtitleAnimation(['none', 'pop', 'bounce', 'slide'].includes(String(clip?.caption_animation || '').toLowerCase())
+        ? String(clip?.caption_animation || '').toLowerCase()
+        : 'none');
+      setSpeakerColorMode(Boolean(clip?.caption_speaker_color_mode));
       setSelectedPreset('');
     } else {
       const brandKitStyle = readStoredBrandKitSubtitleStyle();
@@ -1241,6 +1279,8 @@ export default function ClipStudioModal({
         setBoxColor(String(brandKitStyle.boxColor || '#000000'));
         setBoxOpacity(clamp(Number(brandKitStyle.boxOpacity), 0, 100));
         setKaraokeMode(Boolean(brandKitStyle.karaokeMode));
+        setSubtitleAnimation(String(brandKitStyle.subtitleAnimation || 'none'));
+        setSpeakerColorMode(Boolean(brandKitStyle.speakerColorMode));
         setSelectedPreset('');
       } else {
         applyPreset(CAPTION_PRESETS[0].id);
@@ -1282,6 +1322,8 @@ export default function ClipStudioModal({
     clip?.caption_box_color,
     clip?.caption_box_opacity,
     clip?.caption_karaoke_mode,
+    clip?.caption_animation,
+    clip?.caption_speaker_color_mode,
     clip?.transcript_segments,
     clip?.transcript_timebase,
     clip?.video_title_for_youtube_short,
@@ -1470,6 +1512,8 @@ export default function ClipStudioModal({
     let appliedCaptionBoxColor = boxColor;
     let appliedCaptionBoxOpacity = Number(boxOpacity);
     let appliedCaptionKaraokeMode = Boolean(karaokeMode);
+    let appliedCaptionAnimation = String(subtitleAnimation || 'none');
+    let appliedCaptionSpeakerColorMode = Boolean(speakerColorMode);
     let subtitleSrtPayload = srtContent || null;
 
     try {
@@ -1604,6 +1648,8 @@ export default function ClipStudioModal({
             box_color: appliedCaptionBoxColor,
             box_opacity: appliedCaptionBoxOpacity,
             karaoke_mode: appliedCaptionKaraokeMode,
+            subtitle_animation: appliedCaptionAnimation,
+            speaker_color_mode: appliedCaptionSpeakerColorMode,
             caption_offset_x: appliedCaptionOffsetX,
             caption_offset_y: appliedCaptionOffsetY,
             srt_content: subtitleSrtPayload,
@@ -1638,6 +1684,12 @@ export default function ClipStudioModal({
         appliedCaptionKaraokeMode = typeof subtitleData?.caption_karaoke_mode === 'boolean'
           ? subtitleData.caption_karaoke_mode
           : appliedCaptionKaraokeMode;
+        appliedCaptionAnimation = ['none', 'pop', 'bounce', 'slide'].includes(String(subtitleData?.caption_animation || '').toLowerCase())
+          ? String(subtitleData.caption_animation).toLowerCase()
+          : appliedCaptionAnimation;
+        appliedCaptionSpeakerColorMode = typeof subtitleData?.caption_speaker_color_mode === 'boolean'
+          ? subtitleData.caption_speaker_color_mode
+          : appliedCaptionSpeakerColorMode;
         if (subtitleData?.new_video_url) {
           resultingUrl = getApiUrl(subtitleData.new_video_url);
           workingFile = extractFilename(subtitleData.new_video_url);
@@ -1695,7 +1747,9 @@ export default function ClipStudioModal({
           caption_bold: appliedCaptionBold,
           caption_box_color: appliedCaptionBoxColor,
           caption_box_opacity: appliedCaptionBoxOpacity,
-          caption_karaoke_mode: appliedCaptionKaraokeMode
+          caption_karaoke_mode: appliedCaptionKaraokeMode,
+          caption_animation: appliedCaptionAnimation,
+          caption_speaker_color_mode: appliedCaptionSpeakerColorMode
         }
       });
       if (downloadAfter && resultingUrl) {
@@ -1784,6 +1838,8 @@ export default function ClipStudioModal({
         caption_box_color: String(boxColor || '#000000'),
         caption_box_opacity: Number(boxOpacity),
         caption_karaoke_mode: Boolean(karaokeMode),
+        caption_animation: String(subtitleAnimation || 'none'),
+        caption_speaker_color_mode: Boolean(speakerColorMode),
         caption_offset_x: Number(captionOffsetX),
         caption_offset_y: Number(captionOffsetY),
         srt_content: captionsOn ? (srtContent || null) : null
@@ -2463,6 +2519,47 @@ export default function ClipStudioModal({
                         <label className="text-xs text-zinc-600 dark:text-zinc-300">Caja (%)
                           <input type="number" min="0" max="100" value={boxOpacity} onChange={(e) => setBoxOpacity(Number(e.target.value || 0))} className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm" />
                         </label>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <label className="text-xs text-zinc-600 dark:text-zinc-300">Animación
+                          <select
+                            value={subtitleAnimation}
+                            onChange={(e) => {
+                              const next = String(e.target.value || 'none').toLowerCase();
+                              setSubtitleAnimation(['none', 'pop', 'bounce', 'slide'].includes(next) ? next : 'none');
+                              setSavedPulse(false);
+                            }}
+                            className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm"
+                          >
+                            <option value="none">Sin animación</option>
+                            <option value="pop">Pop</option>
+                            <option value="bounce">Bounce</option>
+                            <option value="slide">Slide</option>
+                          </select>
+                        </label>
+                        <div className="text-xs text-zinc-600 dark:text-zinc-300">
+                          Color por hablante
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={speakerColorMode}
+                            onClick={() => {
+                              setSpeakerColorMode((v) => !v);
+                              setSavedPulse(false);
+                            }}
+                            className={`mt-1 flex h-10 w-full items-center justify-between rounded-md border px-2 text-xs transition-colors ${
+                              speakerColorMode
+                                ? 'border-violet-400 bg-violet-100/70 dark:bg-violet-900/25 text-violet-700 dark:text-violet-300'
+                                : 'border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 text-zinc-600 dark:text-zinc-300'
+                            }`}
+                            title="Asigna color de resaltado según el hablante detectado en transcript."
+                          >
+                            <span>{speakerColorMode ? 'Activo' : 'Inactivo'}</span>
+                            <span className={`inline-block h-4 w-7 rounded-full ${speakerColorMode ? 'bg-violet-500' : 'bg-zinc-300 dark:bg-zinc-600'}`}>
+                              <span className={`block h-3 w-3 rounded-full bg-white transition-transform ${speakerColorMode ? 'translate-x-3.5' : 'translate-x-0.5'} mt-0.5`} />
+                            </span>
+                          </button>
+                        </div>
                       </div>
                       <label className="inline-flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
                         <input type="checkbox" checked={bold} onChange={(e) => setBold(e.target.checked)} /> Negrita

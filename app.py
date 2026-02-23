@@ -336,6 +336,49 @@ def _resolve_clip_scoped_transcript_for_srt(
         return scoped_transcript, 0.0, local_end
     return scoped_transcript, clip_start, clip_end
 
+def _build_caption_speaker_segments(
+    transcript: Optional[Dict[str, Any]],
+    *,
+    shift_seconds: float = 0.0,
+    window_duration: Optional[float] = None
+) -> List[Dict[str, Any]]:
+    if not isinstance(transcript, dict):
+        return []
+    segments = transcript.get("segments")
+    if not isinstance(segments, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    shift = float(shift_seconds or 0.0)
+    limit = None
+    if window_duration is not None:
+        try:
+            limit = max(0.0, float(window_duration))
+        except Exception:
+            limit = None
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        speaker = _normalize_space(seg.get("speaker", ""))
+        if not speaker:
+            continue
+        start_raw = _safe_float(seg.get("start", 0.0), 0.0) + shift
+        end_raw = _safe_float(seg.get("end", start_raw), start_raw) + shift
+        start = max(0.0, start_raw)
+        end = max(start, end_raw)
+        if limit is not None:
+            if start >= limit:
+                continue
+            end = min(limit, end)
+        if end <= start:
+            continue
+        out.append({
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "speaker": speaker
+        })
+    out.sort(key=lambda item: (item["start"], item["end"]))
+    return out
+
 def _srt_timestamp_to_seconds(value: str) -> float:
     raw = str(value or "").strip().replace(",", ".")
     parts = raw.split(":")
@@ -4659,6 +4702,9 @@ class SubtitleRequest(BaseModel):
     box_color: str = "#000000"
     box_opacity: int = 0
     karaoke_mode: bool = False
+    subtitle_animation: str = "none"
+    speaker_color_mode: bool = False
+    speaker_color_palette: Optional[List[str]] = None
     caption_offset_x: float = 0.0  # -100..100
     caption_offset_y: float = 0.0  # -100..100
     srt_content: Optional[str] = None
@@ -4676,12 +4722,27 @@ def _coerce_caption_style(
     box_color: Optional[str] = "#000000",
     box_opacity: Optional[int] = 0,
     karaoke_mode: Optional[bool] = False,
+    subtitle_animation: Optional[str] = "none",
+    speaker_color_mode: Optional[bool] = False,
+    speaker_color_palette: Optional[List[str]] = None,
     offset_x: Optional[float] = 0.0,
     offset_y: Optional[float] = 0.0,
 ) -> Dict[str, Any]:
     resolved_position = str(position or "bottom").strip().lower()
     if resolved_position not in {"top", "middle", "bottom"}:
         resolved_position = "bottom"
+    resolved_animation = str(subtitle_animation or "none").strip().lower()
+    if resolved_animation not in {"none", "pop", "bounce", "slide"}:
+        resolved_animation = "none"
+    palette: List[str] = []
+    if isinstance(speaker_color_palette, list):
+        for raw in speaker_color_palette:
+            token = str(raw or "").strip()
+            if re.match(r"^#[0-9a-fA-F]{6}$", token):
+                if token.upper() not in palette:
+                    palette.append(token.upper())
+            if len(palette) >= 12:
+                break
     resolved_font_family = _sanitize_font_name(font_family)
     return {
         "position": resolved_position,
@@ -4694,6 +4755,9 @@ def _coerce_caption_style(
         "box_color": str(box_color or "#000000"),
         "box_opacity": int(max(0, min(100, _safe_float(box_opacity, 0.0)))),
         "karaoke_mode": bool(karaoke_mode),
+        "subtitle_animation": resolved_animation,
+        "speaker_color_mode": bool(speaker_color_mode),
+        "speaker_palette": palette or None,
         "offset_x": max(-100.0, min(100.0, _safe_float(offset_x, 0.0))),
         "offset_y": max(-100.0, min(100.0, _safe_float(offset_y, 0.0))),
     }
@@ -4706,6 +4770,7 @@ async def _render_subtitled_video_with_ass(
     clip_index: int,
     raw_srt_content: str,
     style: Dict[str, Any],
+    speaker_segments: Optional[List[Dict[str, Any]]] = None,
     ass_prefix: str = "subs",
     empty_error_detail: str = "No se pudo generar subtítulos para este clip."
 ) -> None:
@@ -4727,6 +4792,10 @@ async def _render_subtitled_video_with_ass(
                 box_color=style["box_color"],
                 box_opacity=style["box_opacity"],
                 pop_scale=118,
+                subtitle_animation=style.get("subtitle_animation", "none"),
+                speaker_color_mode=bool(style.get("speaker_color_mode", False)),
+                speaker_segments=speaker_segments or [],
+                speaker_palette=style.get("speaker_palette"),
                 offset_x=style["offset_x"],
                 offset_y=style["offset_y"],
             )
@@ -4743,6 +4812,10 @@ async def _render_subtitled_video_with_ass(
                 bold=style["bold"],
                 box_color=style["box_color"],
                 box_opacity=style["box_opacity"],
+                subtitle_animation=style.get("subtitle_animation", "none"),
+                speaker_color_mode=bool(style.get("speaker_color_mode", False)),
+                speaker_segments=speaker_segments or [],
+                speaker_palette=style.get("speaker_palette"),
                 offset_x=style["offset_x"],
                 offset_y=style["offset_y"],
             )
@@ -4845,6 +4918,9 @@ async def add_subtitles(req: SubtitleRequest):
         box_color=req.box_color,
         box_opacity=req.box_opacity,
         karaoke_mode=req.karaoke_mode,
+        subtitle_animation=req.subtitle_animation,
+        speaker_color_mode=req.speaker_color_mode,
+        speaker_color_palette=req.speaker_color_palette,
         offset_x=req.caption_offset_x,
         offset_y=req.caption_offset_y,
     )
@@ -4855,6 +4931,8 @@ async def add_subtitles(req: SubtitleRequest):
     output_nonce = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
     output_filename = f"subtitled_{base_name}_{output_nonce}.mp4"
     output_path = os.path.join(output_dir, output_filename)
+    speaker_transcript_source: Dict[str, Any] = effective_transcript
+    speaker_shift_base = srt_clip_start
     
     try:
         # 1. Generate or use provided SRT
@@ -4866,15 +4944,20 @@ async def add_subtitles(req: SubtitleRequest):
             try:
                 success = generate_srt(effective_transcript, srt_clip_start, srt_clip_end, temp_srt_path)
                 if (not success) and (effective_transcript is not transcript):
+                    fallback_srt_start = max(0.0, _safe_float(clip_data.get('start', 0.0), 0.0))
+                    fallback_srt_end = max(
+                        fallback_srt_start,
+                        _safe_float(clip_data.get('end', 0.0), 0.0)
+                    )
                     success = generate_srt(
                         transcript,
-                        max(0.0, _safe_float(clip_data.get('start', 0.0), 0.0)),
-                        max(
-                            max(0.0, _safe_float(clip_data.get('start', 0.0), 0.0)),
-                            _safe_float(clip_data.get('end', 0.0), 0.0)
-                        ),
+                        fallback_srt_start,
+                        fallback_srt_end,
                         temp_srt_path
                     )
+                    if success:
+                        speaker_transcript_source = transcript
+                        speaker_shift_base = fallback_srt_start
                 if not success:
                     raise HTTPException(status_code=400, detail="No words found for this clip range.")
                 with open(temp_srt_path, "r", encoding="utf-8") as f:
@@ -4883,6 +4966,10 @@ async def add_subtitles(req: SubtitleRequest):
                 if os.path.exists(temp_srt_path):
                     os.remove(temp_srt_path)
 
+        speaker_segments = _build_caption_speaker_segments(
+            speaker_transcript_source,
+            shift_seconds=-speaker_shift_base
+        )
         await _render_subtitled_video_with_ass(
             input_path=input_path,
             output_path=output_path,
@@ -4890,6 +4977,7 @@ async def add_subtitles(req: SubtitleRequest):
             clip_index=req.clip_index,
             raw_srt_content=raw_srt_content,
             style=style,
+            speaker_segments=speaker_segments,
             ass_prefix="subs",
             empty_error_detail=(
                 "No se pudo generar karaoke para este clip."
@@ -4916,6 +5004,9 @@ async def add_subtitles(req: SubtitleRequest):
             clips[req.clip_index]['caption_box_color'] = str(style["box_color"] or "#000000")
             clips[req.clip_index]['caption_box_opacity'] = int(style["box_opacity"])
             clips[req.clip_index]['caption_karaoke_mode'] = bool(style["karaoke_mode"])
+            clips[req.clip_index]['caption_animation'] = str(style.get("subtitle_animation") or "none")
+            clips[req.clip_index]['caption_speaker_color_mode'] = bool(style.get("speaker_color_mode", False))
+            clips[req.clip_index]['caption_speaker_color_palette'] = style.get("speaker_palette")
             with open(json_files[0], 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception:
@@ -4935,6 +5026,9 @@ async def add_subtitles(req: SubtitleRequest):
             job['result']['clips'][req.clip_index]['caption_box_color'] = str(style["box_color"] or "#000000")
             job['result']['clips'][req.clip_index]['caption_box_opacity'] = int(style["box_opacity"])
             job['result']['clips'][req.clip_index]['caption_karaoke_mode'] = bool(style["karaoke_mode"])
+            job['result']['clips'][req.clip_index]['caption_animation'] = str(style.get("subtitle_animation") or "none")
+            job['result']['clips'][req.clip_index]['caption_speaker_color_mode'] = bool(style.get("speaker_color_mode", False))
+            job['result']['clips'][req.clip_index]['caption_speaker_color_palette'] = style.get("speaker_palette")
             _persist_job_state(req.job_id)
 
         return {
@@ -4951,7 +5045,10 @@ async def add_subtitles(req: SubtitleRequest):
             "caption_bold": bool(style["bold"]),
             "caption_box_color": str(style["box_color"] or "#000000"),
             "caption_box_opacity": int(style["box_opacity"]),
-            "caption_karaoke_mode": bool(style["karaoke_mode"])
+            "caption_karaoke_mode": bool(style["karaoke_mode"]),
+            "caption_animation": str(style.get("subtitle_animation") or "none"),
+            "caption_speaker_color_mode": bool(style.get("speaker_color_mode", False)),
+            "caption_speaker_color_palette": style.get("speaker_palette")
         }
         
     except Exception as e:
@@ -5057,6 +5154,9 @@ class FastPreviewRequest(BaseModel):
     caption_box_color: Optional[str] = None
     caption_box_opacity: Optional[int] = None
     caption_karaoke_mode: Optional[bool] = None
+    caption_animation: Optional[str] = None
+    caption_speaker_color_mode: Optional[bool] = None
+    caption_speaker_color_palette: Optional[List[str]] = None
     caption_offset_x: Optional[float] = None
     caption_offset_y: Optional[float] = None
     srt_content: Optional[str] = None
@@ -5210,25 +5310,32 @@ async def generate_fast_preview(req: FastPreviewRequest):
 
         if bool(req.captions_on):
             raw_srt = str(req.srt_content or "").strip()
+            effective_transcript, srt_clip_start, srt_clip_end = _resolve_clip_scoped_transcript_for_srt(
+                clip_data=clip_data,
+                fallback_transcript=transcript_data or {}
+            )
+            speaker_transcript_source: Dict[str, Any] = effective_transcript
+            speaker_shift_base = srt_clip_start
             if not raw_srt:
-                effective_transcript, srt_clip_start, srt_clip_end = _resolve_clip_scoped_transcript_for_srt(
-                    clip_data=clip_data,
-                    fallback_transcript=transcript_data or {}
-                )
                 temp_srt_name = f"fast_preview_srt_{req.clip_index}_{int(time.time())}_{uuid.uuid4().hex[:5]}.srt"
                 temp_srt_path = os.path.join(output_dir, temp_srt_name)
                 try:
                     success = generate_srt(effective_transcript, srt_clip_start, srt_clip_end, temp_srt_path)
                     if (not success) and (effective_transcript is not transcript_data) and isinstance(transcript_data, dict):
+                        fallback_srt_start = max(0.0, _safe_float(clip_data.get("start", 0.0), 0.0))
+                        fallback_srt_end = max(
+                            fallback_srt_start,
+                            _safe_float(clip_data.get("end", 0.0), 0.0)
+                        )
                         success = generate_srt(
                             transcript_data,
-                            max(0.0, _safe_float(clip_data.get("start", 0.0), 0.0)),
-                            max(
-                                max(0.0, _safe_float(clip_data.get("start", 0.0), 0.0)),
-                                _safe_float(clip_data.get("end", 0.0), 0.0)
-                            ),
+                            fallback_srt_start,
+                            fallback_srt_end,
                             temp_srt_path
                         )
+                        if success:
+                            speaker_transcript_source = transcript_data
+                            speaker_shift_base = fallback_srt_start
                     if not success:
                         raise HTTPException(status_code=400, detail="No words found for this preview range.")
                     with open(temp_srt_path, "r", encoding="utf-8") as f:
@@ -5247,6 +5354,7 @@ async def generate_fast_preview(req: FastPreviewRequest):
                 shift_candidates.append(clip_start - requested_start)
 
             shifted_srt = ""
+            selected_shift = 0.0
             seen_shift: Set[float] = set()
             for shift in shift_candidates:
                 rounded_shift = round(float(shift), 6)
@@ -5255,6 +5363,7 @@ async def generate_fast_preview(req: FastPreviewRequest):
                 seen_shift.add(rounded_shift)
                 shifted_srt = _shift_and_trim_srt(raw_srt, shift_seconds=rounded_shift, window_duration=out_duration)
                 if shifted_srt:
+                    selected_shift = rounded_shift
                     break
 
             if not shifted_srt:
@@ -5274,8 +5383,16 @@ async def generate_fast_preview(req: FastPreviewRequest):
                 box_color=(req.caption_box_color if req.caption_box_color is not None else clip_data.get("caption_box_color")),
                 box_opacity=(req.caption_box_opacity if req.caption_box_opacity is not None else clip_data.get("caption_box_opacity")),
                 karaoke_mode=(req.caption_karaoke_mode if req.caption_karaoke_mode is not None else clip_data.get("caption_karaoke_mode", False)),
+                subtitle_animation=(req.caption_animation if req.caption_animation is not None else clip_data.get("caption_animation")),
+                speaker_color_mode=(req.caption_speaker_color_mode if req.caption_speaker_color_mode is not None else clip_data.get("caption_speaker_color_mode", False)),
+                speaker_color_palette=(req.caption_speaker_color_palette if req.caption_speaker_color_palette is not None else clip_data.get("caption_speaker_color_palette")),
                 offset_x=(req.caption_offset_x if req.caption_offset_x is not None else clip_data.get("caption_offset_x")),
                 offset_y=(req.caption_offset_y if req.caption_offset_y is not None else clip_data.get("caption_offset_y")),
+            )
+            speaker_segments = _build_caption_speaker_segments(
+                speaker_transcript_source,
+                shift_seconds=(-speaker_shift_base + selected_shift),
+                window_duration=out_duration
             )
 
             await _render_subtitled_video_with_ass(
@@ -5285,6 +5402,7 @@ async def generate_fast_preview(req: FastPreviewRequest):
                 clip_index=req.clip_index,
                 raw_srt_content=shifted_srt,
                 style=style,
+                speaker_segments=speaker_segments,
                 ass_prefix="fast_preview_subs",
                 empty_error_detail="No se pudo generar subtítulos para el preview rápido.",
             )

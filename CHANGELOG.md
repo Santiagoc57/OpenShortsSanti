@@ -862,3 +862,32 @@
     - bloque `Virality` a la derecha
 - Para que sirve:
   - Evita lectura visual rara en cards angostos y mantiene jerarquía de acción > métrica.
+
+### Agregado: Animaciones de subtítulos (ASS único para preview/export)
+- Que cambiamos:
+  - Se añadieron modos de animación `none`, `pop`, `bounce`, `slide` al pipeline de subtítulos.
+  - El backend ahora recibe y persiste `caption_animation`.
+  - `POST /api/subtitle` y `POST /api/clip/fast-preview` usan los mismos campos de animación.
+- Para que sirve:
+  - Permite estilos más “TikTok” sin duplicar motores.
+  - Mantiene paridad real entre preview rápido y render final.
+
+### Agregado: Color por hablante en subtítulos
+- Que cambiamos:
+  - Se añadió modo `caption_speaker_color_mode` para colorear subtítulos por hablante detectado.
+  - Se soporta paleta opcional (`caption_speaker_color_palette`) y persistencia por clip.
+  - El render calcula color por línea/segmento usando `transcript_segments` con tiempo.
+- Para que sirve:
+  - Mejora legibilidad en clips con múltiples voces.
+  - Refuerza separación visual de speakers en estilos karaoke/no karaoke.
+
+### Actualizado: UI de Clip Studio para nuevos controles de captions
+- Que cambiamos:
+  - En `ClipStudioModal` se agregaron controles avanzados:
+    - selector de animación (`Sin animación`, `Pop`, `Bounce`, `Slide`)
+    - toggle de `Color por hablante`
+  - Los presets ahora incluyen animación sugerida.
+  - Los nuevos parámetros viajan tanto en `Aplicar` como en `Preview rápido`.
+- Para que sirve:
+  - El usuario puede decidir estilo visual desde UI sin editar backend.
+  - Reduce diferencias entre lo que se configura y lo que se exporta.

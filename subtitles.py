@@ -429,6 +429,118 @@ def _pick_emotion_color(text: str, fallback: str = "#39FF14") -> str:
         return "#00E5FF"
     return fallback
 
+_CAPTION_ANIMATIONS = {"none", "pop", "bounce", "slide"}
+_DEFAULT_SPEAKER_PALETTE = [
+    "#39FF14",
+    "#00E5FF",
+    "#FFC400",
+    "#FF4D4D",
+    "#B266FF",
+    "#22D3EE",
+    "#F97316",
+    "#F43F5E",
+]
+
+def _normalize_caption_animation(value: str, fallback: str = "none") -> str:
+    raw = str(value or fallback).strip().lower()
+    return raw if raw in _CAPTION_ANIMATIONS else fallback
+
+def _is_hex_color(value: str) -> bool:
+    return bool(re.match(r"^#[0-9a-fA-F]{6}$", str(value or "").strip()))
+
+def _normalize_speaker_palette(raw_palette=None):
+    if isinstance(raw_palette, (list, tuple)):
+        source = [str(item or "").strip() for item in raw_palette]
+    elif isinstance(raw_palette, str):
+        source = [part.strip() for part in raw_palette.split(",")]
+    else:
+        source = []
+    out = []
+    seen = set()
+    for color in source:
+        if not _is_hex_color(color):
+            continue
+        key = color.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(color.upper())
+    return out or list(_DEFAULT_SPEAKER_PALETTE)
+
+def _normalize_speaker_segments(raw_segments=None):
+    if not isinstance(raw_segments, list):
+        return []
+    out = []
+    for seg in raw_segments:
+        if not isinstance(seg, dict):
+            continue
+        speaker = str(seg.get("speaker") or "").strip()
+        if not speaker:
+            continue
+        try:
+            start = float(seg.get("start", 0.0))
+            end = float(seg.get("end", start))
+        except Exception:
+            continue
+        start = max(0.0, start)
+        end = max(start, end)
+        if end <= start:
+            continue
+        out.append({"start": start, "end": end, "speaker": speaker})
+    out.sort(key=lambda item: (item["start"], item["end"]))
+    return out
+
+def _stable_color_index(label: str, size: int) -> int:
+    if size <= 0:
+        return 0
+    digest = 0
+    for ch in str(label or "").lower():
+        digest = ((digest * 33) + ord(ch)) % 1000003
+    return digest % size
+
+def _speaker_color_for_time(
+    timestamp: float,
+    speaker_segments,
+    palette,
+    cache: dict,
+    fallback: str
+) -> str:
+    if not speaker_segments:
+        return fallback
+    t = max(0.0, float(timestamp or 0.0))
+    speaker_label = ""
+    for seg in speaker_segments:
+        if t >= float(seg["start"]) and t <= float(seg["end"]) + 0.05:
+            speaker_label = str(seg["speaker"])
+            break
+    if not speaker_label:
+        return fallback
+    if speaker_label in cache:
+        return cache[speaker_label]
+    idx = _stable_color_index(speaker_label, len(palette))
+    selected = str(palette[idx] if palette else fallback)
+    cache[speaker_label] = selected
+    return selected
+
+def _caption_motion_override(animation: str, anchor_x: int, anchor_y: int) -> str:
+    normalized = _normalize_caption_animation(animation, fallback="none")
+    if normalized == "slide":
+        return f"\\move({anchor_x},{anchor_y + 34},{anchor_x},{anchor_y},0,180)"
+    if normalized == "bounce":
+        return (
+            f"\\move({anchor_x},{anchor_y + 42},{anchor_x},{anchor_y},0,170)"
+            "\\t(170,260,\\fscx108\\fscy108)"
+            "\\t(260,360,\\fscx100\\fscy100)"
+        )
+    if normalized == "pop":
+        return (
+            f"\\pos({anchor_x},{anchor_y})"
+            "\\fscx92\\fscy92"
+            "\\t(0,120,\\fscx110\\fscy110)"
+            "\\t(120,220,\\fscx100\\fscy100)"
+        )
+    return f"\\pos({anchor_x},{anchor_y})"
+
 def _entry_anchor_for_alignment(ass_alignment: int):
     # Deprecated/unused mostly, but preserved for signature
     return 540, 1000, 972
@@ -483,7 +595,11 @@ def generate_styled_ass_from_srt(
     box_color: str = "#000000",
     box_opacity: int = 0,
     offset_x: float = 0.0,
-    offset_y: float = 0.0
+    offset_y: float = 0.0,
+    subtitle_animation: str = "none",
+    speaker_color_mode: bool = False,
+    speaker_segments=None,
+    speaker_palette=None
 ) -> bool:
     entries = _parse_srt_entries(srt_text)
     if not entries:
@@ -500,6 +616,11 @@ def generate_styled_ass_from_srt(
     back = _hex_to_ass_color(box_color, alpha=box_alpha)
     border_style = 3 if int(box_opacity) > 0 else 1
     bold_flag = -1 if bool(bold) else 0
+    normalized_animation = _normalize_caption_animation(subtitle_animation, fallback="none")
+    use_speaker_colors = bool(speaker_color_mode)
+    normalized_speakers = _normalize_speaker_segments(speaker_segments)
+    normalized_palette = _normalize_speaker_palette(speaker_palette)
+    speaker_color_cache = {}
 
     header = """[Script Info]
 ScriptType: v4.00+
@@ -531,8 +652,23 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         line_text = _escape_ass_text(str(entry.get("text", "")).strip()).replace("\n", r"\N")
         if not line_text:
             continue
+        entry_mid = float(entry["start"]) + max(0.0, (float(entry["end"]) - float(entry["start"]))) * 0.5
+        entry_hex = str(font_color or "#FFFFFF")
+        if use_speaker_colors:
+            entry_hex = _speaker_color_for_time(
+                timestamp=entry_mid,
+                speaker_segments=normalized_speakers,
+                palette=normalized_palette,
+                cache=speaker_color_cache,
+                fallback=entry_hex
+            )
+        entry_primary = _hex_to_ass_color(entry_hex, alpha=0)
+        override_parts = [_caption_motion_override(normalized_animation, anchor_x, anchor_y)]
+        if entry_primary != primary:
+            override_parts.append(f"\\c{entry_primary}")
+        line_override = "{" + "".join(override_parts) + "}"
         dialogue_lines.append(
-            f"Dialogue: 0,{_format_ass_timestamp(entry['start'])},{_format_ass_timestamp(entry['end'])},Default,,0,0,0,,{{\\pos({anchor_x},{anchor_y})}}{line_text}"
+            f"Dialogue: 0,{_format_ass_timestamp(entry['start'])},{_format_ass_timestamp(entry['end'])},Default,,0,0,0,,{line_override}{line_text}"
         )
 
     if not dialogue_lines:
@@ -559,7 +695,11 @@ def generate_karaoke_ass_from_srt(
     box_opacity: int = 0,
     pop_scale: int = 116,
     offset_x: float = 0.0,
-    offset_y: float = 0.0
+    offset_y: float = 0.0,
+    subtitle_animation: str = "none",
+    speaker_color_mode: bool = False,
+    speaker_segments=None,
+    speaker_palette=None
 ) -> bool:
     entries = _parse_srt_entries(srt_text)
     if not entries:
@@ -579,6 +719,11 @@ def generate_karaoke_ass_from_srt(
     border_style = 3 if int(box_opacity) > 0 else 1
     bold_flag = -1 if bool(bold) else 0
     safe_pop_scale = max(105, min(150, int(pop_scale)))
+    normalized_animation = _normalize_caption_animation(subtitle_animation, fallback="none")
+    use_speaker_colors = bool(speaker_color_mode)
+    normalized_speakers = _normalize_speaker_segments(speaker_segments)
+    normalized_palette = _normalize_speaker_palette(speaker_palette)
+    speaker_color_cache = {}
     # Slight extra letter spacing helps condensed display fonts (Anton/Bebas) breathe in karaoke.
     style_spacing = 1.2 if final_fontsize >= 34 else 0.8
     # Extra hard-space gap to avoid words visually "touching" when active word scales up.
@@ -621,7 +766,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         words = [w for w in re.split(r"\s+", text) if w]
         if not words:
             continue
-        entry_active_hex = _pick_emotion_color(text, fallback=base_active_hex) if use_auto_emotion else base_active_hex
+        entry_mid = float(entry["start"]) + max(0.0, (float(entry["end"]) - float(entry["start"]))) * 0.5
+        if use_speaker_colors:
+            entry_active_hex = _speaker_color_for_time(
+                timestamp=entry_mid,
+                speaker_segments=normalized_speakers,
+                palette=normalized_palette,
+                cache=speaker_color_cache,
+                fallback=base_active_hex
+            )
+        else:
+            entry_active_hex = _pick_emotion_color(text, fallback=base_active_hex) if use_auto_emotion else base_active_hex
         entry_secondary = _hex_to_ass_color(entry_active_hex, alpha=0)
         duration_cs = max(1, int(round((entry["end"] - entry["start"]) * 100)))
         per_word = max(1, duration_cs // len(words))
@@ -649,7 +804,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 else:
                     line_tokens.append(safe_w)
             line_text = word_gap_token.join(line_tokens)
-            intro_tag = f"{{\\fad(45,65)\\move({anchor_x},{anchor_from_y},{anchor_x},{anchor_to_y},0,130)}}"
+            if normalized_animation == "none":
+                intro_tag = f"{{\\fad(45,65)\\move({anchor_x},{anchor_from_y},{anchor_x},{anchor_to_y},0,130)}}"
+            else:
+                intro_tag = "{" + f"\\fad(35,55){_caption_motion_override(normalized_animation, anchor_x, anchor_to_y)}" + "}"
 
             dialogue_lines.append(
                 f"Dialogue: 0,{_format_ass_timestamp(seg_start)},{_format_ass_timestamp(seg_end)},Default,,0,0,0,,{intro_tag}{line_text}"
