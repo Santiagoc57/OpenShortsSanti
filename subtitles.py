@@ -31,12 +31,84 @@ _FONT_ALIAS_MAP = {
     "impact": "Anton",
 }
 
+_CAPTION_FONT_CATALOG = [
+    {
+        "value": "Montserrat",
+        "label": "Montserrat",
+        "description": "Versátil y legible para estilos generales.",
+    },
+    {
+        "value": "Anton",
+        "label": "Anton",
+        "description": "Impacto alto para captions estilo viral.",
+    },
+    {
+        "value": "Archivo Black",
+        "label": "Archivo Black",
+        "description": "Peso fuerte con buena legibilidad.",
+    },
+    {
+        "value": "Bebas Neue",
+        "label": "Bebas Neue",
+        "description": "Condensada para titulares cortos.",
+    },
+    {
+        "value": "Oswald",
+        "label": "Oswald",
+        "description": "Compacta y limpia para titulares.",
+    },
+    {
+        "value": "Teko",
+        "label": "Teko",
+        "description": "Display vertical con look moderno.",
+    },
+    {
+        "value": "Arial",
+        "label": "Arial",
+        "description": "Fallback clásico multiplataforma.",
+    },
+    {
+        "value": "Verdana",
+        "label": "Verdana",
+        "description": "Fallback de alta legibilidad.",
+    },
+]
+
 def _normalize_font_key(value: str) -> str:
     text = str(value or "").strip().lower()
     text = unicodedata.normalize("NFD", text)
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
     text = re.sub(r"\s+", " ", text)
     return text
+
+def _font_candidates_from_request(font_name: str):
+    requested = str(font_name or "").strip()
+    if not requested:
+        return []
+
+    key = _normalize_font_key(requested)
+    mapped = _FONT_ALIAS_MAP.get(key, requested)
+    raw_candidates = mapped if isinstance(mapped, (tuple, list)) else (mapped,)
+
+    candidates = []
+    seen = set()
+    for item in list(raw_candidates) + [requested]:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        norm = _normalize_font_key(value)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        candidates.append(value)
+    return candidates
+
+def _is_font_request_available(font_name: str, available_families=None) -> bool:
+    available = available_families if isinstance(available_families, set) else _load_available_font_families()
+    for candidate in _font_candidates_from_request(font_name):
+        if _normalize_font_key(candidate) in available:
+            return True
+    return False
 
 def _bundled_fonts_dir() -> str:
     return os.path.join(os.path.dirname(__file__), "dashboard", "public", "fonts")
@@ -149,6 +221,51 @@ def _sanitize_font_name(font_name: str, fallback: str = "Anton") -> str:
         if chosen:
             return chosen
     return "Arial"
+
+def get_caption_font_catalog(include_unavailable: bool = False):
+    """
+    Return caption fonts inventory as seen by backend renderer.
+    The UI should use this list to keep preview/export parity.
+    """
+    available = _load_available_font_families()
+    items = []
+    seen = set()
+
+    for entry in _CAPTION_FONT_CATALOG:
+        value = str(entry.get("value") or "").strip()
+        if not value:
+            continue
+        label = str(entry.get("label") or value).strip()
+        desc = str(entry.get("description") or "").strip()
+        requested_available = _is_font_request_available(value, available_families=available)
+        resolved_family = _sanitize_font_name(value, fallback="Anton")
+        resolved_available = _is_font_request_available(resolved_family, available_families=available)
+        is_available = bool(requested_available or resolved_available)
+        if not include_unavailable and not is_available:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        items.append({
+            "value": value,
+            "label": label,
+            "description": desc,
+            "available": is_available,
+            "resolved_family": resolved_family
+        })
+
+    # Guarantee at least one option.
+    if not items:
+        fallback = _sanitize_font_name("Anton", fallback="Anton")
+        items.append({
+            "value": "Anton",
+            "label": "Anton",
+            "description": "Fallback",
+            "available": True,
+            "resolved_family": fallback
+        })
+
+    return items
 
 def generate_srt(transcript, clip_start, clip_end, output_path, max_chars=20, max_duration=2.0):
     """

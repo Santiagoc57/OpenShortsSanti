@@ -140,6 +140,35 @@ const DEFAULT_BRAND_KIT = {
   subtitle_box_opacity: 60
 };
 
+const DEFAULT_CAPTION_FONT_OPTIONS = [
+  { value: 'Montserrat', label: 'Montserrat', available: true },
+  { value: 'Anton', label: 'Anton', available: true },
+  { value: 'Archivo Black', label: 'Archivo Black', available: true },
+  { value: 'Bebas Neue', label: 'Bebas Neue', available: true },
+  { value: 'Oswald', label: 'Oswald', available: true },
+  { value: 'Teko', label: 'Teko', available: true },
+  { value: 'Arial', label: 'Arial', available: true },
+  { value: 'Verdana', label: 'Verdana', available: true }
+];
+
+const normalizeCaptionFontOptions = (items) => {
+  if (!Array.isArray(items) || items.length === 0) return DEFAULT_CAPTION_FONT_OPTIONS;
+  const out = [];
+  const seen = new Set();
+  for (const raw of items) {
+    const value = String(raw?.value || '').trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push({
+      value,
+      label: String(raw?.label || value).trim() || value,
+      available: raw?.available !== false,
+      resolvedFamily: String(raw?.resolved_family || value).trim() || value
+    });
+  }
+  return out.length > 0 ? out : DEFAULT_CAPTION_FONT_OPTIONS;
+};
+
 const normalizeSubtitleFontFamily = (value) => {
   const key = String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
   if (key.startsWith('montserrat')) return 'Montserrat';
@@ -330,6 +359,7 @@ function App() {
   const [processingMedia, setProcessingMedia] = useState(null);
   const [activeTab, setActiveTab] = useState('home'); // home, projects, settings
   const [brandKit, setBrandKit] = useState(getInitialBrandKit);
+  const [captionFontOptions, setCaptionFontOptions] = useState(DEFAULT_CAPTION_FONT_OPTIONS);
   const [apiBaseUrlInput, setApiBaseUrlInput] = useState(() => getApiBaseUrl() || '');
   const [apiBaseUrlActive, setApiBaseUrlActive] = useState(() => getApiBaseUrl() || '');
   const [apiBaseUrlMessage, setApiBaseUrlMessage] = useState('');
@@ -508,6 +538,16 @@ function App() {
   }, [brandKit]);
 
   useEffect(() => {
+    const allowed = new Set((captionFontOptions || []).map((f) => String(f?.value || '').trim()).filter(Boolean));
+    if (allowed.size === 0) return;
+    setBrandKit((prev) => {
+      if (allowed.has(prev.subtitle_font_family)) return prev;
+      const fallbackFont = allowed.has('Anton') ? 'Anton' : Array.from(allowed)[0];
+      return { ...prev, subtitle_font_family: fallbackFont };
+    });
+  }, [captionFontOptions]);
+
+  useEffect(() => {
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify((projects || []).slice(0, 40)));
   }, [projects]);
 
@@ -527,6 +567,24 @@ function App() {
     const interval = setInterval(() => runConnectivityCheck(), 3 * 60 * 1000);
     return () => clearInterval(interval);
   }, [runConnectivityCheck, apiBaseUrlActive]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadFontCatalog = async () => {
+      try {
+        const res = await apiFetch('/api/subtitle/fonts');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        const nextOptions = normalizeCaptionFontOptions(data?.items);
+        if (nextOptions.length > 0) setCaptionFontOptions(nextOptions);
+      } catch (_) {
+        // Keep local fallback catalog.
+      }
+    };
+    loadFontCatalog();
+    return () => { cancelled = true; };
+  }, [apiBaseUrlActive]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2350,16 +2408,12 @@ function App() {
                             onChange={(e) => handleBrandKitFieldChange('subtitle_font_family', e.target.value)}
                             className="w-full py-2.5 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm"
                           >
-                            <option value="Montserrat">Montserrat</option>
-                            <option value="Anton">Anton</option>
-                            <option value="Archivo Black">Archivo Black</option>
-                            <option value="Bebas Neue">Bebas Neue</option>
-                            <option value="Oswald">Oswald</option>
-                            <option value="Teko">Teko</option>
-                            <option value="Impact">Impact (mapeado)</option>
-                            <option value="Arial Black">Arial Black (mapeado)</option>
-                            <option value="Arial">Arial</option>
-                            <option value="Verdana">Verdana</option>
+                            {captionFontOptions.map((font) => (
+                              <option key={font.value} value={font.value}>
+                                {font.label}
+                                {font.available === false ? ' (no disponible)' : ''}
+                              </option>
+                            ))}
                           </select>
                         </div>
                       </div>
@@ -2855,6 +2909,7 @@ function App() {
                 currentVideoUrl={studioContext.currentVideoUrl}
                 onClipPatched={handleStudioClipPatched}
                 onApplied={handleStudioApplied}
+                fontCatalog={captionFontOptions}
               />
             </div>
           )}

@@ -155,6 +155,17 @@ const CAPTION_PRESETS = [
   }
 ];
 
+const DEFAULT_FONT_OPTIONS = [
+  { value: 'Montserrat', label: 'Montserrat', available: true },
+  { value: 'Anton', label: 'Anton', available: true },
+  { value: 'Archivo Black', label: 'Archivo Black', available: true },
+  { value: 'Bebas Neue', label: 'Bebas Neue', available: true },
+  { value: 'Oswald', label: 'Oswald', available: true },
+  { value: 'Teko', label: 'Teko', available: true },
+  { value: 'Arial', label: 'Arial', available: true },
+  { value: 'Verdana', label: 'Verdana', available: true }
+];
+
 const SECTION_ITEMS = [
   { id: 'transcript', label: 'Transcripción', icon: FileText },
   { id: 'captions', label: 'Subtítulos', icon: Captions },
@@ -471,7 +482,8 @@ export default function ClipStudioModal({
   clip,
   currentVideoUrl,
   onApplied,
-  onClipPatched
+  onClipPatched,
+  fontCatalog = DEFAULT_FONT_OPTIONS
 }) {
   const [section, setSection] = useState('transcript');
   const [isApplying, setIsApplying] = useState(false);
@@ -555,6 +567,24 @@ export default function ClipStudioModal({
   }, [effectiveSplitOffsetBX, effectiveSplitOffsetBY]);
   const effectiveCaptionOffsetX = Number(captionOffsetX || 0) * CAPTION_OFFSET_FACTOR;
   const effectiveCaptionOffsetY = Number(captionOffsetY || 0) * CAPTION_OFFSET_FACTOR;
+  const captionFontOptions = useMemo(() => {
+    const source = Array.isArray(fontCatalog) && fontCatalog.length > 0
+      ? fontCatalog
+      : DEFAULT_FONT_OPTIONS;
+    const out = [];
+    const seen = new Set();
+    source.forEach((item) => {
+      const value = String(item?.value || '').trim();
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      out.push({
+        value,
+        label: String(item?.label || value).trim() || value,
+        available: item?.available !== false
+      });
+    });
+    return out.length > 0 ? out : DEFAULT_FONT_OPTIONS;
+  }, [fontCatalog]);
 
   const handleLayoutAspectChange = useCallback((nextAspectRaw) => {
     const nextAspect = nextAspectRaw === '16:9' ? '16:9' : '9:16';
@@ -2413,16 +2443,12 @@ export default function ClipStudioModal({
                             onChange={(e) => setFontFamily(normalizeSubtitleFontFamily(e.target.value))}
                             className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm"
                           >
-                            <option value="Montserrat">Montserrat</option>
-                            <option value="Anton">Anton</option>
-                            <option value="Archivo Black">Archivo Black</option>
-                            <option value="Bebas Neue">Bebas Neue</option>
-                            <option value="Oswald">Oswald</option>
-                            <option value="Teko">Teko</option>
-                            <option value="Impact">Impact (mapeado a Anton)</option>
-                            <option value="Arial Black">Arial Black (mapeado a Anton)</option>
-                            <option value="Arial">Arial</option>
-                            <option value="Verdana">Verdana</option>
+                            {captionFontOptions.map((font) => (
+                              <option key={font.value} value={font.value}>
+                                {font.label}
+                                {font.available === false ? ' (no disponible)' : ''}
+                              </option>
+                            ))}
                           </select>
                         </label>
                         <label className="text-xs text-zinc-600 dark:text-zinc-300">Color texto

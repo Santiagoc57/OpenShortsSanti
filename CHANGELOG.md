@@ -2,6 +2,40 @@
 
 ## 2026-02-23
 
+### Nuevo: catálogo de fuentes de subtítulos servido por backend
+- Qué cambiamos:
+  - En `subtitles.py` se agregó `get_caption_font_catalog()` con inventario real basado en `fc-list` + fuentes bundladas (`dashboard/public/fonts`).
+  - En `app.py` se agregó `GET /api/subtitle/fonts` para exponer ese catálogo al frontend.
+  - En `dashboard/src/App.jsx` y `dashboard/src/components/ClipStudioModal.jsx` los selectores de tipografía ahora consumen ese catálogo (con fallback local si falla la API).
+- Para qué sirve:
+  - Preview y export comparten el mismo inventario de fuentes realmente disponibles en el backend.
+  - Reduce fallbacks inesperados de tipografía al renderizar en Colab/local.
+
+### Corregido: motor único ASS/FFmpeg para subtítulos en preview y export
+- Qué cambiamos:
+  - En `app.py` se unificó la lógica de estilo/render en helpers comunes:
+    - `_coerce_caption_style(...)`
+    - `_render_subtitled_video_with_ass(...)`
+  - `POST /api/subtitle` y `POST /api/clip/fast-preview` ahora usan el mismo pipeline ASS + `burn_subtitles(...)`.
+  - Se eliminó duplicación de render entre ambos endpoints.
+- Para qué sirve:
+  - Paridad real entre lo que se ve en preview rápido y lo que sale en “Aplicar/Exportar”.
+  - Menos diferencias de estilo/subtítulo entre UI y archivo final.
+
+### Mejorado: tuning automático de cola y runtime Whisper (GPU/CPU)
+- Qué cambiamos:
+  - En `app.py` la concurrencia por defecto ya no es fija en 5:
+    - se autoajusta según host (`MAX_CONCURRENT_JOBS` sigue pudiendo forzarse por env).
+  - Se añadió detección de CUDA (`CUDA_AVAILABLE`) y ajustes automáticos para variables de Whisper:
+    - `WHISPER_DEVICE`
+    - `WHISPER_COMPUTE_TYPE`
+    - `WHISPER_CPU_THREADS`
+    - `WHISPER_NUM_WORKERS`
+  - `GET /api/status/__healthcheck__` ahora incluye métricas de cola/worker (`queue_size`, `processing_jobs`, `max_concurrent_jobs`, `cuda_available`).
+- Para qué sirve:
+  - Menos saturación en CPU-only y mejor estabilidad de latencia.
+  - Mejor arranque en entornos con GPU sin tocar manualmente tantas variables.
+
 ### Corregido: fondo del Home ya no se corta en la parte inferior
 - Qué cambiamos:
   - En `dashboard/src/App.jsx` movimos la capa decorativa del fondo del Home al contenedor raíz de la app.

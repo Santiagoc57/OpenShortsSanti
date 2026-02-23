@@ -36,9 +36,42 @@ OUTPUT_DIR = "output"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+def _detect_cuda_available() -> bool:
+    # Quick explicit override for constrained environments.
+    forced = str(os.environ.get("OPENSHORTS_FORCE_CUDA", "")).strip().lower()
+    if forced in {"1", "true", "yes", "y"}:
+        return True
+    if forced in {"0", "false", "no", "n"}:
+        return False
+    try:
+        import torch  # type: ignore
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+def _parse_int_or_default(value: Optional[str], default: int) -> int:
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return int(default)
+
+def _resolve_default_max_concurrent_jobs() -> int:
+    override = os.environ.get("MAX_CONCURRENT_JOBS")
+    if override is not None and str(override).strip() != "":
+        return max(1, min(16, _parse_int_or_default(override, 1)))
+
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    if _detect_cuda_available():
+        # GPU hosts can handle slightly higher queue parallelism.
+        return max(2, min(4, cpu_count // 4 or 2))
+    # CPU-only: keep low to avoid thrashing and unstable latency.
+    return 2 if cpu_count >= 12 else 1
+
+CUDA_AVAILABLE = _detect_cuda_available()
+
 # Configuration
-# Default to 1 if not set, but user can set higher for powerful servers
-MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
+# Auto-tuned unless MAX_CONCURRENT_JOBS is explicitly set.
+MAX_CONCURRENT_JOBS = _resolve_default_max_concurrent_jobs()
 MAX_FILE_SIZE_MB = 500  # 500 MB limit
 JOB_RETENTION_SECONDS = 3600  # 1 hour retention
 MAX_AUTO_RETRIES_DEFAULT = int(os.environ.get("MAX_AUTO_RETRIES", "1"))
@@ -134,6 +167,40 @@ def _safe_input_filename(value: Optional[str]) -> str:
     # In case it arrives double-encoded from chained transformations.
     filename = unquote(filename)
     return os.path.basename(filename)
+
+def _apply_whisper_runtime_tuning(env: Dict[str, str], whisper_backend: Optional[str]) -> None:
+    """
+    Apply conservative runtime defaults for transcription speed/stability.
+    Explicit user/env values always win.
+    """
+    backend = str(whisper_backend or env.get("WHISPER_BACKEND") or "faster").strip().lower()
+    env.setdefault("WHISPER_BACKEND", backend)
+
+    if backend == "openai":
+        env.setdefault("WHISPER_DEVICE", "cpu")
+        env.setdefault("WHISPER_COMPUTE_TYPE", "int8")
+        return
+
+    requested_device = str(env.get("WHISPER_DEVICE", "auto")).strip().lower()
+    if requested_device in {"", "auto"}:
+        env["WHISPER_DEVICE"] = "cuda" if CUDA_AVAILABLE else "cpu"
+    elif requested_device in {"gpu", "cuda"} and not CUDA_AVAILABLE:
+        env["WHISPER_DEVICE"] = "cpu"
+    elif requested_device in {"mps", "metal"}:
+        env["WHISPER_DEVICE"] = "cpu"
+
+    if "WHISPER_COMPUTE_TYPE" not in env:
+        env["WHISPER_COMPUTE_TYPE"] = "float16" if env.get("WHISPER_DEVICE") == "cuda" else "int8"
+
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    if "WHISPER_CPU_THREADS" not in env:
+        if env.get("WHISPER_DEVICE") == "cuda":
+            env["WHISPER_CPU_THREADS"] = str(max(2, min(6, cpu_count // 2 or 2)))
+        else:
+            env["WHISPER_CPU_THREADS"] = str(max(2, min(8, cpu_count // 2 or 2)))
+    if "WHISPER_NUM_WORKERS" not in env:
+        # Keep 1 by default; multi-worker on one host frequently hurts latency due to contention.
+        env["WHISPER_NUM_WORKERS"] = "1"
 
 def _resolve_subtitle_source_filename(output_dir: str, filename: str) -> str:
     """
@@ -4208,6 +4275,7 @@ async def process_endpoint(
     python_bin = sys.executable or shutil.which("python3") or "python3"
     cmd = [python_bin, "-u", "main.py"] 
     env = os.environ.copy()
+    _apply_whisper_runtime_tuning(env, whisper_backend)
     
     if llm_provider == 'gemini':
         env["GEMINI_API_KEY"] = x_gemini_key
@@ -4302,10 +4370,29 @@ async def process_endpoint(
 
 @app.get("/api/status/__healthcheck__")
 async def status_healthcheck():
+    processing_jobs = 0
+    queued_jobs = 0
+    retrying_jobs = 0
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        status = str(job.get("status", "")).lower()
+        if status == "processing":
+            processing_jobs += 1
+        elif status == "queued":
+            queued_jobs += 1
+        elif status == "retrying":
+            retrying_jobs += 1
     return {
         "ok": True,
         "timestamp": int(time.time()),
-        "jobs_in_memory": len(jobs)
+        "jobs_in_memory": len(jobs),
+        "queue_size": int(job_queue.qsize()),
+        "processing_jobs": processing_jobs,
+        "queued_jobs": queued_jobs,
+        "retrying_jobs": retrying_jobs,
+        "max_concurrent_jobs": int(MAX_CONCURRENT_JOBS),
+        "cuda_available": bool(CUDA_AVAILABLE),
     }
 
 @app.get("/api/status/{job_id}")
@@ -4419,7 +4506,14 @@ async def retry_job(job_id: str):
     }
 
 from editor import VideoEditor
-from subtitles import generate_srt, burn_subtitles, generate_karaoke_ass_from_srt, generate_styled_ass_from_srt, _sanitize_font_name
+from subtitles import (
+    generate_srt,
+    burn_subtitles,
+    generate_karaoke_ass_from_srt,
+    generate_styled_ass_from_srt,
+    _sanitize_font_name,
+    get_caption_font_catalog,
+)
 
 class EditRequest(BaseModel):
     job_id: str
@@ -4570,6 +4664,118 @@ class SubtitleRequest(BaseModel):
     srt_content: Optional[str] = None
     input_filename: Optional[str] = None
 
+def _coerce_caption_style(
+    *,
+    position: Optional[str] = "bottom",
+    font_size: Optional[int] = 40,
+    font_family: Optional[str] = "Anton",
+    font_color: Optional[str] = "#FFFFFF",
+    stroke_color: Optional[str] = "#000000",
+    stroke_width: Optional[int] = 3,
+    bold: Optional[bool] = True,
+    box_color: Optional[str] = "#000000",
+    box_opacity: Optional[int] = 0,
+    karaoke_mode: Optional[bool] = False,
+    offset_x: Optional[float] = 0.0,
+    offset_y: Optional[float] = 0.0,
+) -> Dict[str, Any]:
+    resolved_position = str(position or "bottom").strip().lower()
+    if resolved_position not in {"top", "middle", "bottom"}:
+        resolved_position = "bottom"
+    resolved_font_family = _sanitize_font_name(font_family)
+    return {
+        "position": resolved_position,
+        "font_size": int(max(12, min(84, _safe_float(font_size, 40.0)))),
+        "font_family": str(resolved_font_family or "Anton"),
+        "font_color": str(font_color or "#FFFFFF"),
+        "stroke_color": str(stroke_color or "#000000"),
+        "stroke_width": int(max(0, min(8, _safe_float(stroke_width, 3.0)))),
+        "bold": bool(bold) if bold is not None else True,
+        "box_color": str(box_color or "#000000"),
+        "box_opacity": int(max(0, min(100, _safe_float(box_opacity, 0.0)))),
+        "karaoke_mode": bool(karaoke_mode),
+        "offset_x": max(-100.0, min(100.0, _safe_float(offset_x, 0.0))),
+        "offset_y": max(-100.0, min(100.0, _safe_float(offset_y, 0.0))),
+    }
+
+async def _render_subtitled_video_with_ass(
+    *,
+    input_path: str,
+    output_path: str,
+    output_dir: str,
+    clip_index: int,
+    raw_srt_content: str,
+    style: Dict[str, Any],
+    ass_prefix: str = "subs",
+    empty_error_detail: str = "No se pudo generar subtítulos para este clip."
+) -> None:
+    subtitle_filename = f"{ass_prefix}_{clip_index}_{int(time.time())}_{uuid.uuid4().hex[:6]}.ass"
+    subtitle_path = os.path.join(output_dir, subtitle_filename)
+    try:
+        if bool(style.get("karaoke_mode")):
+            success = generate_karaoke_ass_from_srt(
+                raw_srt_content,
+                subtitle_path,
+                alignment=style["position"],
+                font_size=style["font_size"],
+                font_name=style["font_family"],
+                font_color=style["font_color"],
+                active_word_color="auto",
+                stroke_color=style["stroke_color"],
+                stroke_width=style["stroke_width"],
+                bold=style["bold"],
+                box_color=style["box_color"],
+                box_opacity=style["box_opacity"],
+                pop_scale=118,
+                offset_x=style["offset_x"],
+                offset_y=style["offset_y"],
+            )
+        else:
+            success = generate_styled_ass_from_srt(
+                raw_srt_content,
+                subtitle_path,
+                alignment=style["position"],
+                font_size=style["font_size"],
+                font_name=style["font_family"],
+                font_color=style["font_color"],
+                stroke_color=style["stroke_color"],
+                stroke_width=style["stroke_width"],
+                bold=style["bold"],
+                box_color=style["box_color"],
+                box_opacity=style["box_opacity"],
+                offset_x=style["offset_x"],
+                offset_y=style["offset_y"],
+            )
+        if not success:
+            raise HTTPException(status_code=400, detail=empty_error_detail)
+
+        def run_burn():
+            burn_subtitles(
+                input_path,
+                subtitle_path,
+                output_path,
+                alignment=style["position"],
+                fontsize=style["font_size"],
+                font_name=style["font_family"],
+                font_color=style["font_color"],
+                stroke_color=style["stroke_color"],
+                stroke_width=style["stroke_width"],
+                bold=style["bold"],
+                box_color=style["box_color"],
+                box_opacity=style["box_opacity"],
+            )
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, run_burn)
+        if not os.path.exists(output_path):
+            raise HTTPException(status_code=500, detail="No se pudo renderizar subtítulos.")
+    finally:
+        if os.path.exists(subtitle_path):
+            try:
+                os.remove(subtitle_path)
+            except Exception:
+                pass
+
 @app.post("/api/subtitle")
 async def add_subtitles(req: SubtitleRequest):
     job = _ensure_job_context(req.job_id)
@@ -4628,16 +4834,22 @@ async def add_subtitles(req: SubtitleRequest):
         # Just fail if not found.
         raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
         
-    caption_offset_x = max(-100.0, min(100.0, _safe_float(req.caption_offset_x, 0.0)))
-    caption_offset_y = max(-100.0, min(100.0, _safe_float(req.caption_offset_y, 0.0)))
-    resolved_font_family = _sanitize_font_name(req.font_family)
+    style = _coerce_caption_style(
+        position=req.position,
+        font_size=req.font_size,
+        font_family=req.font_family,
+        font_color=req.font_color,
+        stroke_color=req.stroke_color,
+        stroke_width=req.stroke_width,
+        bold=req.bold,
+        box_color=req.box_color,
+        box_opacity=req.box_opacity,
+        karaoke_mode=req.karaoke_mode,
+        offset_x=req.caption_offset_x,
+        offset_y=req.caption_offset_y,
+    )
 
     # Define outputs
-    subtitle_ext = "ass"
-    subtitle_filename = f"subs_{req.clip_index}_{int(time.time())}.{subtitle_ext}"
-    subtitle_path = os.path.join(output_dir, subtitle_filename)
-    
-    # Output video
     # We create a new file "subtitled_..."
     base_name = os.path.splitext(filename)[0]
     output_nonce = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
@@ -4671,65 +4883,20 @@ async def add_subtitles(req: SubtitleRequest):
                 if os.path.exists(temp_srt_path):
                     os.remove(temp_srt_path)
 
-        if req.karaoke_mode:
-            success = generate_karaoke_ass_from_srt(
-                raw_srt_content,
-                subtitle_path,
-                alignment=req.position,
-                font_size=req.font_size,
-                font_name=resolved_font_family,
-                font_color=req.font_color,
-                active_word_color="auto",
-                stroke_color=req.stroke_color,
-                stroke_width=req.stroke_width,
-                bold=req.bold,
-                box_color=req.box_color,
-                box_opacity=req.box_opacity,
-                pop_scale=118,
-                offset_x=caption_offset_x,
-                offset_y=caption_offset_y
-            )
-            if not success:
-                raise HTTPException(status_code=400, detail="No se pudo generar karaoke para este clip.")
-        else:
-            success = generate_styled_ass_from_srt(
-                raw_srt_content,
-                subtitle_path,
-                alignment=req.position,
-                font_size=req.font_size,
-                font_name=resolved_font_family,
-                font_color=req.font_color,
-                stroke_color=req.stroke_color,
-                stroke_width=req.stroke_width,
-                bold=req.bold,
-                box_color=req.box_color,
-                box_opacity=req.box_opacity,
-                offset_x=caption_offset_x,
-                offset_y=caption_offset_y
-            )
-            if not success:
-                raise HTTPException(status_code=400, detail="No se pudo generar subtítulos para este clip.")
-             
-        # 2. Burn Subtitles
-        # Run in thread pool
-        def run_burn():
-             burn_subtitles(
-                 input_path,
-                 subtitle_path,
-                 output_path,
-                 alignment=req.position,
-                 fontsize=req.font_size,
-                 font_name=resolved_font_family,
-                 font_color=req.font_color,
-                 stroke_color=req.stroke_color,
-                 stroke_width=req.stroke_width,
-                 bold=req.bold,
-                 box_color=req.box_color,
-                 box_opacity=req.box_opacity
-             )
-        
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, run_burn)
+        await _render_subtitled_video_with_ass(
+            input_path=input_path,
+            output_path=output_path,
+            output_dir=output_dir,
+            clip_index=req.clip_index,
+            raw_srt_content=raw_srt_content,
+            style=style,
+            ass_prefix="subs",
+            empty_error_detail=(
+                "No se pudo generar karaoke para este clip."
+                if bool(style.get("karaoke_mode"))
+                else "No se pudo generar subtítulos para este clip."
+            ),
+        )
         
         # 3. Update Result?
         # We return the new URL.
@@ -4737,18 +4904,18 @@ async def add_subtitles(req: SubtitleRequest):
         
         try:
             clips[req.clip_index]['video_url'] = new_video_url
-            clips[req.clip_index]['caption_position'] = req.position
-            clips[req.clip_index]['caption_offset_x'] = round(caption_offset_x, 3)
-            clips[req.clip_index]['caption_offset_y'] = round(caption_offset_y, 3)
-            clips[req.clip_index]['caption_font_size'] = int(req.font_size)
-            clips[req.clip_index]['caption_font_family'] = str(resolved_font_family or "Anton")
-            clips[req.clip_index]['caption_font_color'] = str(req.font_color or "#FFFFFF")
-            clips[req.clip_index]['caption_stroke_color'] = str(req.stroke_color or "#000000")
-            clips[req.clip_index]['caption_stroke_width'] = int(req.stroke_width)
-            clips[req.clip_index]['caption_bold'] = bool(req.bold)
-            clips[req.clip_index]['caption_box_color'] = str(req.box_color or "#000000")
-            clips[req.clip_index]['caption_box_opacity'] = int(req.box_opacity)
-            clips[req.clip_index]['caption_karaoke_mode'] = bool(req.karaoke_mode)
+            clips[req.clip_index]['caption_position'] = style["position"]
+            clips[req.clip_index]['caption_offset_x'] = round(style["offset_x"], 3)
+            clips[req.clip_index]['caption_offset_y'] = round(style["offset_y"], 3)
+            clips[req.clip_index]['caption_font_size'] = int(style["font_size"])
+            clips[req.clip_index]['caption_font_family'] = str(style["font_family"] or "Anton")
+            clips[req.clip_index]['caption_font_color'] = str(style["font_color"] or "#FFFFFF")
+            clips[req.clip_index]['caption_stroke_color'] = str(style["stroke_color"] or "#000000")
+            clips[req.clip_index]['caption_stroke_width'] = int(style["stroke_width"])
+            clips[req.clip_index]['caption_bold'] = bool(style["bold"])
+            clips[req.clip_index]['caption_box_color'] = str(style["box_color"] or "#000000")
+            clips[req.clip_index]['caption_box_opacity'] = int(style["box_opacity"])
+            clips[req.clip_index]['caption_karaoke_mode'] = bool(style["karaoke_mode"])
             with open(json_files[0], 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception:
@@ -4756,35 +4923,35 @@ async def add_subtitles(req: SubtitleRequest):
 
         if 'result' in job and 'clips' in job['result'] and req.clip_index < len(job['result']['clips']):
             job['result']['clips'][req.clip_index]['video_url'] = new_video_url
-            job['result']['clips'][req.clip_index]['caption_position'] = req.position
-            job['result']['clips'][req.clip_index]['caption_offset_x'] = round(caption_offset_x, 3)
-            job['result']['clips'][req.clip_index]['caption_offset_y'] = round(caption_offset_y, 3)
-            job['result']['clips'][req.clip_index]['caption_font_size'] = int(req.font_size)
-            job['result']['clips'][req.clip_index]['caption_font_family'] = str(resolved_font_family or "Anton")
-            job['result']['clips'][req.clip_index]['caption_font_color'] = str(req.font_color or "#FFFFFF")
-            job['result']['clips'][req.clip_index]['caption_stroke_color'] = str(req.stroke_color or "#000000")
-            job['result']['clips'][req.clip_index]['caption_stroke_width'] = int(req.stroke_width)
-            job['result']['clips'][req.clip_index]['caption_bold'] = bool(req.bold)
-            job['result']['clips'][req.clip_index]['caption_box_color'] = str(req.box_color or "#000000")
-            job['result']['clips'][req.clip_index]['caption_box_opacity'] = int(req.box_opacity)
-            job['result']['clips'][req.clip_index]['caption_karaoke_mode'] = bool(req.karaoke_mode)
+            job['result']['clips'][req.clip_index]['caption_position'] = style["position"]
+            job['result']['clips'][req.clip_index]['caption_offset_x'] = round(style["offset_x"], 3)
+            job['result']['clips'][req.clip_index]['caption_offset_y'] = round(style["offset_y"], 3)
+            job['result']['clips'][req.clip_index]['caption_font_size'] = int(style["font_size"])
+            job['result']['clips'][req.clip_index]['caption_font_family'] = str(style["font_family"] or "Anton")
+            job['result']['clips'][req.clip_index]['caption_font_color'] = str(style["font_color"] or "#FFFFFF")
+            job['result']['clips'][req.clip_index]['caption_stroke_color'] = str(style["stroke_color"] or "#000000")
+            job['result']['clips'][req.clip_index]['caption_stroke_width'] = int(style["stroke_width"])
+            job['result']['clips'][req.clip_index]['caption_bold'] = bool(style["bold"])
+            job['result']['clips'][req.clip_index]['caption_box_color'] = str(style["box_color"] or "#000000")
+            job['result']['clips'][req.clip_index]['caption_box_opacity'] = int(style["box_opacity"])
+            job['result']['clips'][req.clip_index]['caption_karaoke_mode'] = bool(style["karaoke_mode"])
             _persist_job_state(req.job_id)
 
         return {
             "success": True,
             "new_video_url": new_video_url,
-            "caption_position": req.position,
-            "caption_offset_x": round(caption_offset_x, 3),
-            "caption_offset_y": round(caption_offset_y, 3),
-            "caption_font_size": int(req.font_size),
-            "caption_font_family": str(resolved_font_family or "Anton"),
-            "caption_font_color": str(req.font_color or "#FFFFFF"),
-            "caption_stroke_color": str(req.stroke_color or "#000000"),
-            "caption_stroke_width": int(req.stroke_width),
-            "caption_bold": bool(req.bold),
-            "caption_box_color": str(req.box_color or "#000000"),
-            "caption_box_opacity": int(req.box_opacity),
-            "caption_karaoke_mode": bool(req.karaoke_mode)
+            "caption_position": style["position"],
+            "caption_offset_x": round(style["offset_x"], 3),
+            "caption_offset_y": round(style["offset_y"], 3),
+            "caption_font_size": int(style["font_size"]),
+            "caption_font_family": str(style["font_family"] or "Anton"),
+            "caption_font_color": str(style["font_color"] or "#FFFFFF"),
+            "caption_stroke_color": str(style["stroke_color"] or "#000000"),
+            "caption_stroke_width": int(style["stroke_width"]),
+            "caption_bold": bool(style["bold"]),
+            "caption_box_color": str(style["box_color"] or "#000000"),
+            "caption_box_opacity": int(style["box_opacity"]),
+            "caption_karaoke_mode": bool(style["karaoke_mode"])
         }
         
     except Exception as e:
@@ -4854,6 +5021,19 @@ async def preview_subtitles(req: SubtitlePreviewRequest):
         pass
 
     return {"srt": content}
+
+@app.get("/api/subtitle/fonts")
+async def list_subtitle_fonts(include_unavailable: bool = False):
+    try:
+        items = get_caption_font_catalog(include_unavailable=bool(include_unavailable))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"No se pudo listar fuentes: {exc}")
+    return {
+        "items": items,
+        "default": "Anton",
+        "backend_cuda": bool(CUDA_AVAILABLE),
+        "count": len(items),
+    }
 
 class FastPreviewRequest(BaseModel):
     job_id: str
@@ -5080,120 +5260,43 @@ async def generate_fast_preview(req: FastPreviewRequest):
             if not shifted_srt:
                 raise HTTPException(status_code=400, detail="No words found for this preview range.")
 
-            subtitle_filename = f"fast_preview_subs_{req.clip_index}_{int(time.time())}_{uuid.uuid4().hex[:6]}.ass"
-            subtitle_path = os.path.join(output_dir, subtitle_filename)
             subtitled_name = f"fast_preview_subtitled_clip_{req.clip_index+1}_{int(time.time())}_{uuid.uuid4().hex[:6]}.mp4"
             subtitled_path = os.path.join(output_dir, subtitled_name)
 
-            caption_position = str(
-                req.caption_position
-                or clip_data.get("caption_position")
-                or "bottom"
-            ).strip().lower()
-            if caption_position not in {"top", "middle", "bottom"}:
-                caption_position = "bottom"
+            style = _coerce_caption_style(
+                position=(req.caption_position if req.caption_position is not None else clip_data.get("caption_position")),
+                font_size=(req.caption_font_size if req.caption_font_size is not None else clip_data.get("caption_font_size")),
+                font_family=(req.caption_font_family if req.caption_font_family is not None else clip_data.get("caption_font_family")),
+                font_color=(req.caption_font_color if req.caption_font_color is not None else clip_data.get("caption_font_color")),
+                stroke_color=(req.caption_stroke_color if req.caption_stroke_color is not None else clip_data.get("caption_stroke_color")),
+                stroke_width=(req.caption_stroke_width if req.caption_stroke_width is not None else clip_data.get("caption_stroke_width")),
+                bold=(req.caption_bold if req.caption_bold is not None else clip_data.get("caption_bold", True)),
+                box_color=(req.caption_box_color if req.caption_box_color is not None else clip_data.get("caption_box_color")),
+                box_opacity=(req.caption_box_opacity if req.caption_box_opacity is not None else clip_data.get("caption_box_opacity")),
+                karaoke_mode=(req.caption_karaoke_mode if req.caption_karaoke_mode is not None else clip_data.get("caption_karaoke_mode", False)),
+                offset_x=(req.caption_offset_x if req.caption_offset_x is not None else clip_data.get("caption_offset_x")),
+                offset_y=(req.caption_offset_y if req.caption_offset_y is not None else clip_data.get("caption_offset_y")),
+            )
 
-            caption_font_size = int(max(12, min(84, _safe_float(
-                req.caption_font_size if req.caption_font_size is not None else clip_data.get("caption_font_size"),
-                40.0
-            ))))
-            caption_font_family = _sanitize_font_name(
-                req.caption_font_family if req.caption_font_family is not None else clip_data.get("caption_font_family")
+            await _render_subtitled_video_with_ass(
+                input_path=out_path,
+                output_path=subtitled_path,
+                output_dir=output_dir,
+                clip_index=req.clip_index,
+                raw_srt_content=shifted_srt,
+                style=style,
+                ass_prefix="fast_preview_subs",
+                empty_error_detail="No se pudo generar subtítulos para el preview rápido.",
             )
-            caption_font_color = str(req.caption_font_color or clip_data.get("caption_font_color") or "#FFFFFF")
-            caption_stroke_color = str(req.caption_stroke_color or clip_data.get("caption_stroke_color") or "#000000")
-            caption_stroke_width = int(max(0, min(8, _safe_float(
-                req.caption_stroke_width if req.caption_stroke_width is not None else clip_data.get("caption_stroke_width"),
-                3.0
-            ))))
-            caption_bold = bool(req.caption_bold if req.caption_bold is not None else clip_data.get("caption_bold", True))
-            caption_box_color = str(req.caption_box_color or clip_data.get("caption_box_color") or "#000000")
-            caption_box_opacity = int(max(0, min(100, _safe_float(
-                req.caption_box_opacity if req.caption_box_opacity is not None else clip_data.get("caption_box_opacity"),
-                0.0
-            ))))
-            caption_karaoke_mode = bool(
-                req.caption_karaoke_mode if req.caption_karaoke_mode is not None else clip_data.get("caption_karaoke_mode", False)
-            )
-            caption_offset_x = max(-100.0, min(100.0, _safe_float(
-                req.caption_offset_x if req.caption_offset_x is not None else clip_data.get("caption_offset_x"),
-                0.0
-            )))
-            caption_offset_y = max(-100.0, min(100.0, _safe_float(
-                req.caption_offset_y if req.caption_offset_y is not None else clip_data.get("caption_offset_y"),
-                0.0
-            )))
 
             try:
-                if caption_karaoke_mode:
-                    ok_ass = generate_karaoke_ass_from_srt(
-                        shifted_srt,
-                        subtitle_path,
-                        alignment=caption_position,
-                        font_size=caption_font_size,
-                        font_name=caption_font_family,
-                        font_color=caption_font_color,
-                        active_word_color="auto",
-                        stroke_color=caption_stroke_color,
-                        stroke_width=caption_stroke_width,
-                        bold=caption_bold,
-                        box_color=caption_box_color,
-                        box_opacity=caption_box_opacity,
-                        pop_scale=118,
-                        offset_x=caption_offset_x,
-                        offset_y=caption_offset_y
-                    )
-                else:
-                    ok_ass = generate_styled_ass_from_srt(
-                        shifted_srt,
-                        subtitle_path,
-                        alignment=caption_position,
-                        font_size=caption_font_size,
-                        font_name=caption_font_family,
-                        font_color=caption_font_color,
-                        stroke_color=caption_stroke_color,
-                        stroke_width=caption_stroke_width,
-                        bold=caption_bold,
-                        box_color=caption_box_color,
-                        box_opacity=caption_box_opacity,
-                        offset_x=caption_offset_x,
-                        offset_y=caption_offset_y
-                    )
-                if not ok_ass:
-                    raise HTTPException(status_code=400, detail="No se pudo generar subtítulos para el preview rápido.")
+                os.remove(out_path)
+            except Exception:
+                pass
 
-                burn_subtitles(
-                    out_path,
-                    subtitle_path,
-                    subtitled_path,
-                    alignment=caption_position,
-                    fontsize=caption_font_size,
-                    font_name=caption_font_family,
-                    font_color=caption_font_color,
-                    stroke_color=caption_stroke_color,
-                    stroke_width=caption_stroke_width,
-                    bold=caption_bold,
-                    box_color=caption_box_color,
-                    box_opacity=caption_box_opacity
-                )
-
-                if not os.path.exists(subtitled_path):
-                    raise HTTPException(status_code=500, detail="No se pudo renderizar subtítulos en preview rápido.")
-
-                try:
-                    os.remove(out_path)
-                except Exception:
-                    pass
-
-                final_out_path = subtitled_path
-                final_out_name = subtitled_name
-                captions_burned = True
-            finally:
-                if os.path.exists(subtitle_path):
-                    try:
-                        os.remove(subtitle_path)
-                    except Exception:
-                        pass
+            final_out_path = subtitled_path
+            final_out_name = subtitled_name
+            captions_burned = True
 
         final_w, final_h = _probe_video_dimensions(final_out_path)
         final_duration = _probe_media_duration_seconds(final_out_path)
