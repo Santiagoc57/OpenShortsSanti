@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, ChevronRight, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, Search, Sun, Moon, MoreHorizontal, Heart, Link2, Pencil, Scissors, RefreshCw, Pause, Play, Trash2, ArrowLeft } from 'lucide-react';
-import KeyInput from './components/KeyInput';
+import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, ChevronRight, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, Search, Heart, Link2, Pencil, Scissors, RefreshCw, Pause, Play, Trash2, ArrowLeft, House, LayoutGrid, List } from 'lucide-react';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ClipStudioModal from './components/ClipStudioModal';
@@ -218,6 +217,10 @@ function App() {
     const stored = localStorage.getItem('clipTagFilterPreset');
     return stored || 'all';
   };
+  const getInitialClipsViewMode = () => {
+    const stored = localStorage.getItem('clipsViewModePreset');
+    return ['list', 'gallery'].includes(stored) ? stored : 'list';
+  };
   const getInitialBatchTopCount = () => {
     const stored = Number(localStorage.getItem('batchTopCountPreset'));
     if (!Number.isFinite(stored)) return 3;
@@ -244,11 +247,6 @@ function App() {
   const getInitialClipSearchModePreset = () => {
     const stored = localStorage.getItem('clipSearchModePreset');
     return ['exact', 'balanced', 'broad'].includes(stored) ? stored : 'balanced';
-  };
-  const getInitialTheme = () => {
-    const stored = localStorage.getItem('uiTheme');
-    if (stored === 'light' || stored === 'dark') return stored;
-    return 'light';
   };
   const getInitialBrandKit = () => {
     try {
@@ -289,6 +287,7 @@ function App() {
   const [clipSort, setClipSort] = useState(getInitialClipSort); // top, balanced, safe
   const [clipFilter, setClipFilter] = useState(getInitialClipFilter); // all, top, medium, low
   const [clipTagFilter, setClipTagFilter] = useState(getInitialTagFilter); // all | tag
+  const [clipsViewMode, setClipsViewMode] = useState(getInitialClipsViewMode); // list | gallery
   const [batchTopCount, setBatchTopCount] = useState(getInitialBatchTopCount);
   const [batchStartDelayMinutes, setBatchStartDelayMinutes] = useState(getInitialBatchStartDelay);
   const [batchIntervalMinutes, setBatchIntervalMinutes] = useState(getInitialBatchInterval);
@@ -330,7 +329,6 @@ function App() {
   const [isRetryingJob, setIsRetryingJob] = useState(false);
   const [processingMedia, setProcessingMedia] = useState(null);
   const [activeTab, setActiveTab] = useState('home'); // home, projects, settings
-  const [theme, setTheme] = useState(getInitialTheme); // dark | light
   const [brandKit, setBrandKit] = useState(getInitialBrandKit);
   const [apiBaseUrlInput, setApiBaseUrlInput] = useState(() => getApiBaseUrl() || '');
   const [apiBaseUrlActive, setApiBaseUrlActive] = useState(() => getApiBaseUrl() || '');
@@ -352,7 +350,7 @@ function App() {
   const [pendingReturnClipIndex, setPendingReturnClipIndex] = useState(null);
   const [focusedClipIndex, setFocusedClipIndex] = useState(null);
   const [projectFilter, setProjectFilter] = useState('all');
-  const [projectMenuJobId, setProjectMenuJobId] = useState(null);
+  const [homePrefillFile, setHomePrefillFile] = useState(null);
   const [projectTitleEditJobId, setProjectTitleEditJobId] = useState(null);
   const [projectTitleDraft, setProjectTitleDraft] = useState('');
   const pollingPauseBeforeStudioRef = useRef(false);
@@ -500,14 +498,10 @@ function App() {
   }, [uploadPostKey]);
 
   useEffect(() => {
-    localStorage.setItem('uiTheme', theme);
     const root = document.documentElement;
-    if (theme === 'light') {
-      root.classList.add('theme-light');
-      return;
-    }
-    root.classList.remove('theme-light');
-  }, [theme]);
+    root.classList.add('theme-light');
+    localStorage.setItem('uiTheme', 'light');
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(BRAND_KIT_STORAGE_KEY, JSON.stringify(normalizeBrandKit(brandKit)));
@@ -590,6 +584,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem('clipTagFilterPreset', clipTagFilter);
   }, [clipTagFilter]);
+
+  useEffect(() => {
+    localStorage.setItem('clipsViewModePreset', clipsViewMode);
+  }, [clipsViewMode]);
 
   useEffect(() => {
     localStorage.setItem('batchTopCountPreset', String(batchTopCount));
@@ -1769,7 +1767,6 @@ function App() {
       setProjectTitleEditJobId(null);
       setProjectTitleDraft('');
     }
-    setProjectMenuJobId(null);
   };
 
   const removeAllProjects = async () => {
@@ -1795,7 +1792,6 @@ function App() {
 
     setProjects([]);
     localStorage.removeItem(PROJECTS_STORAGE_KEY);
-    setProjectMenuJobId(null);
     setProjectTitleEditJobId(null);
     setProjectTitleDraft('');
     setProjectFilter('all');
@@ -1813,11 +1809,27 @@ function App() {
     }
   };
 
+  const handleDropToNewProject = (file) => {
+    if (!file) return;
+    const type = String(file.type || '').toLowerCase();
+    const name = String(file.name || '').toLowerCase();
+    const looksLikeMedia = type.startsWith('video/')
+      || type.startsWith('audio/')
+      || /\.(mp4|mov|m4a|mp3|wav|mkv|webm)$/i.test(name);
+    if (!looksLikeMedia) {
+      window.alert('Archivo no compatible. Usa video/audio (MP4, MOV, MP3, WAV, M4A, MKV, WEBM).');
+      return;
+    }
+    setHomePrefillFile({ file, id: Date.now() });
+    setActiveTab('home');
+    setProjectsViewMode('list');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const beginEditProjectTitle = (project) => {
     if (!project?.job_id) return;
     setProjectTitleEditJobId(project.job_id);
     setProjectTitleDraft(String(project.title || '').trim());
-    setProjectMenuJobId(null);
   };
 
   const cancelEditProjectTitle = () => {
@@ -1973,8 +1985,6 @@ function App() {
       setProcessUiPhase('error');
       setStatus('error');
       setLogs((prev) => [...prev, `No se pudo abrir el proyecto: ${e.message}`]);
-    } finally {
-      setProjectMenuJobId(null);
     }
   };
 
@@ -2012,59 +2022,63 @@ function App() {
   // --- UI Components ---
 
   const TopBar = () => (
-    <header className="sticky top-0 z-30 border-b border-slate-200/80 dark:border-slate-700/60 bg-white/90 dark:bg-slate-900/80 backdrop-blur-md">
+    <header className="sticky top-0 z-30 border-b border-slate-200 dark:border-slate-700/60 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md">
       <div className="max-w-[1500px] mx-auto px-4 sm:px-6">
-        <div className="h-16 grid grid-cols-[auto_1fr_auto] items-center gap-3">
+        <div className="h-[68px] grid grid-cols-[auto_1fr_auto] items-center gap-3">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-9 h-9 rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 bg-white">
-              <img src="/logo-openshorts.png" alt="OpenShorts" className="w-full h-full object-cover" />
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-sky-400 via-violet-500 to-fuchsia-500 p-[1px] shadow-sm">
+              <div className="w-full h-full rounded-[11px] overflow-hidden bg-white dark:bg-slate-900 border border-slate-200/70 dark:border-slate-700/80">
+                <img src="/logo-openshorts.png" alt="OpenShorts" className="w-full h-full object-cover" />
+              </div>
             </div>
             <span className="font-bold text-slate-900 dark:text-white tracking-tight">OpenShorts</span>
           </div>
 
-          <div className="hidden md:flex items-center justify-center gap-2">
-            <button
-              onClick={() => {
-                setActiveTab('home');
-                setProjectsViewMode('list');
-              }}
-              className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${activeTab === 'home'
-                ? 'bg-primary/10 border-primary/30 text-primary'
-                : 'bg-transparent border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-500'
-                }`}
-            >
-              <span className="inline-flex items-center gap-1.5">
-                <LayoutDashboard size={14} />
-                Home
-              </span>
-            </button>
-            <button
-              onClick={() => {
-                setActiveTab('projects');
-                setProjectsViewMode('list');
-              }}
-              className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${activeTab === 'projects'
-                ? 'bg-primary/10 border-primary/30 text-primary'
-                : 'bg-transparent border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-500'
-                }`}
-            >
-              <span className="inline-flex items-center gap-1.5">
-                <History size={14} />
-                Proyectos
-              </span>
-            </button>
-            <button
-              onClick={() => setActiveTab('settings')}
-              className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${activeTab === 'settings'
-                ? 'bg-primary/10 border-primary/30 text-primary'
-                : 'bg-transparent border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-500'
-                }`}
-            >
-              <span className="inline-flex items-center gap-1.5">
-                <Settings size={14} />
-                Configuración
-              </span>
-            </button>
+          <div className="hidden md:flex items-center justify-center">
+            <div className="inline-flex items-center gap-1 p-1 rounded-full border border-slate-200 dark:border-slate-700 bg-slate-100/90 dark:bg-slate-800/85">
+              <button
+                onClick={() => {
+                  setActiveTab('home');
+                  setProjectsViewMode('list');
+                }}
+                className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${activeTab === 'home'
+                  ? 'bg-primary/15 text-primary shadow-sm'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                  }`}
+              >
+                <span className="inline-flex items-center gap-1.5">
+                  <House size={14} />
+                  Home
+                </span>
+              </button>
+              <button
+                onClick={() => {
+                  setActiveTab('projects');
+                  setProjectsViewMode('list');
+                }}
+                className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${activeTab === 'projects'
+                  ? 'bg-primary/15 text-primary shadow-sm'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                  }`}
+              >
+                <span className="inline-flex items-center gap-1.5">
+                  <History size={14} />
+                  Proyectos
+                </span>
+              </button>
+              <button
+                onClick={() => setActiveTab('settings')}
+                className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${activeTab === 'settings'
+                  ? 'bg-primary/15 text-primary shadow-sm'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                  }`}
+              >
+                <span className="inline-flex items-center gap-1.5">
+                  <Settings size={14} />
+                  Configuración
+                </span>
+              </button>
+            </div>
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
@@ -2122,14 +2136,6 @@ function App() {
                 Falta API Key
               </span>
             )}
-            <button
-              onClick={() => setTheme((prev) => prev === 'dark' ? 'light' : 'dark')}
-              className="inline-flex items-center gap-2 text-xs bg-slate-100 dark:bg-white/10 border border-slate-200 dark:border-white/20 px-3 py-1.5 rounded-lg text-slate-700 dark:text-zinc-200 hover:bg-slate-200 dark:hover:bg-white/15 transition-colors"
-              title={theme === 'dark' ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}
-            >
-              {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}
-              <span className="hidden sm:inline">{theme === 'dark' ? 'Claro' : 'Oscuro'}</span>
-            </button>
           </div>
         </div>
       </div>
@@ -2137,280 +2143,359 @@ function App() {
   );
 
   return (
-    <div className="min-h-screen bg-background selection:bg-primary/20">
+    <div className="relative min-h-screen bg-background selection:bg-primary/20">
+      {activeTab === 'home' && (
+        <div className="pointer-events-none absolute inset-0 -z-10 overflow-hidden" aria-hidden>
+          <div className="absolute -top-28 left-1/2 -translate-x-1/2 w-[560px] h-[340px] rounded-full bg-violet-300/35 dark:bg-violet-700/20 blur-[120px]" />
+          <div className="absolute -bottom-28 left-[24%] w-[360px] h-[240px] rounded-full bg-violet-200/45 dark:bg-violet-700/15 blur-[120px]" />
+          <div className="absolute -bottom-20 right-[22%] w-[380px] h-[250px] rounded-full bg-sky-200/45 dark:bg-sky-700/15 blur-[120px]" />
+        </div>
+      )}
       <TopBar />
 
       <main className="max-w-[1500px] mx-auto w-full px-4 sm:px-6 py-6 relative">
 
         {/* Main Workspace */}
-        <div className="flex-1 overflow-hidden relative">
+        <div className="flex-1 overflow-x-hidden relative">
 
           {/* View: Settings */}
           {activeTab === 'settings' && (
-            <div className="animate-[fadeIn_0.3s_ease-out] max-w-3xl mx-auto pb-10">
-              <div className="flex items-center justify-between mb-8">
-                <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Configuración</h1>
-                <div className="px-3 py-1 bg-emerald-100 dark:bg-green-500/10 border border-emerald-200 dark:border-green-500/20 rounded-full text-[10px] text-emerald-700 dark:text-green-400 font-medium flex items-center gap-2">
-                  <Shield size={12} /> Privacidad: las llaves viven en tu navegador (se envían al backend solo para procesar)
+            <div className="animate-[fadeIn_0.3s_ease-out] max-w-5xl mx-auto pb-12">
+              <div className="text-center mb-8 md:mb-10">
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 border border-violet-200 dark:border-violet-700/40 text-xs font-medium mb-4">
+                  <span className="w-1.5 h-1.5 rounded-full bg-violet-500 animate-pulse" />
+                  Panel de Control
                 </div>
-              </div>
-              <KeyInput
-                onKeySet={setApiKey}
-                savedKey={apiKey}
-              />
-
-              <div className="glass-panel p-6 mt-8">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold">Backend remoto (Colab / ngrok)</h2>
-                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Recomendado</span>
-                </div>
-                <p className="text-xs text-zinc-500 mb-4 leading-relaxed">
-                  Pega aquí tu URL pública de Colab/ngrok para que el frontend mande todas las peticiones a ese backend.
-                  Así no tienes que cambiar scripts ni tocar variables cada vez.
+                <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-slate-900 dark:text-white">
+                  Configuración del <span className="text-primary">Sistema</span>
+                </h1>
+                <p className="mt-3 text-slate-500 dark:text-slate-400 max-w-3xl mx-auto">
+                  Gestiona tus claves de API, conexión remota y tu kit visual de subtítulos.
                 </p>
-                <div className="space-y-3">
-                  <label className="block text-sm text-zinc-400">URL API remota</label>
-                  <input
-                    type="url"
-                    value={apiBaseUrlInput}
-                    onChange={(e) => setApiBaseUrlInput(e.target.value)}
-                    className="input-field"
-                    placeholder="https://62cb-34-168-226-133.ngrok-free.app"
-                  />
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={handleSaveApiBaseUrl}
-                      className="btn-primary py-2 px-4 text-sm"
-                    >
-                      Guardar URL
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleTestApiBaseUrl}
-                      disabled={isTestingApiBaseUrl}
-                      className="py-2 px-4 text-sm rounded-lg border border-white/15 text-zinc-300 hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {isTestingApiBaseUrl ? 'Probando...' : 'Probar conexión'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleResetApiBaseUrl}
-                      className="py-2 px-4 text-sm rounded-lg border border-white/15 text-zinc-300 hover:bg-white/5"
-                    >
-                      Volver a local
-                    </button>
-                  </div>
-                  <p className="text-[11px] text-zinc-500">
-                    {apiBaseUrlActive
-                      ? `Activa ahora: ${apiBaseUrlActive}`
-                      : 'Activa ahora: local/proxy'}
-                  </p>
-                  {apiBaseUrlMessage && (
-                    <p className={`text-[11px] ${apiBaseUrlMessageType === 'success'
-                      ? 'text-emerald-400'
-                      : apiBaseUrlMessageType === 'error'
-                        ? 'text-rose-400'
-                        : 'text-zinc-500'
-                      }`}>
-                      {apiBaseUrlMessage}
-                    </p>
-                  )}
-                </div>
               </div>
 
-              <div className="glass-panel p-6 mt-8">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold">Integración social</h2>
-                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Opcional</span>
-                </div>
-                <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
-                  Publica automáticamente tus clips en TikTok, Instagram Reels y YouTube Shorts con <strong>Upload-Post</strong>.
-                  Incluye un <strong>plan gratuito</strong> (sin tarjeta de crédito).
-                  Si prefieres, puedes omitir esta parte y descargar/subir tus videos manualmente.
-                </p>
-                <div className="space-y-4">
-                  <label className="block text-sm text-zinc-400">API Key de Upload-Post</label>
-                  <div className="flex gap-2">
-                    <input
-                      type="password"
-                      value={uploadPostKey}
-                      onChange={(e) => setUploadPostKey(e.target.value)}
-                      className="input-field"
-                      placeholder="ey..."
-                    />
-                    <button onClick={fetchUserProfiles} className="btn-primary py-2 px-4 text-sm">
-                      Conectar
-                    </button>
-                  </div>
-                  <div className="text-xs text-zinc-500 leading-relaxed">
-                    <p>Conecta tu cuenta de Upload-Post para publicar con un clic.</p>
-                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
-                      <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                        <span className="text-zinc-400 font-medium">1. Login</span>
-                        <span className="text-[10px] text-zinc-600">Registra tu cuenta</span>
-                      </a>
-                      <a href="https://app.upload-post.com/manage-users" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                        <span className="text-zinc-400 font-medium">2. Perfiles</span>
-                        <span className="text-[10px] text-zinc-600">Crear y conectar</span>
-                      </a>
-                      <a href="https://app.upload-post.com/api-keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                        <span className="text-zinc-400 font-medium">3. API Key</span>
-                        <span className="text-[10px] text-zinc-600">Generar llave</span>
-                      </a>
-                    </div>
-                    <p className="mt-3 text-zinc-600 italic">
-                      Las llaves se guardan solo en tu navegador. Se envían al backend únicamente para procesar tu solicitud y no se almacenan del lado del servidor.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="glass-panel p-6 mt-8">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold">Kit de marca (Subtítulos)</h2>
-                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">V1</span>
-                </div>
-                <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
-                  Define tu estilo de subtítulos por defecto una sola vez. Cada clip abrirá el modal de subtítulos con este preset cargado.
-                </p>
-
-                <div className="space-y-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs text-zinc-400 mb-1">Nombre del preset</label>
-                      <input
-                        type="text"
-                        value={brandKit.name}
-                        onChange={(e) => handleBrandKitFieldChange('name', e.target.value)}
-                        className="input-field"
-                        placeholder="Mi marca"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-zinc-400 mb-1">Posición</label>
-                      <select
-                        value={brandKit.subtitle_position}
-                        onChange={(e) => handleBrandKitFieldChange('subtitle_position', e.target.value)}
-                        className="input-field"
-                      >
-                        <option value="top">Arriba</option>
-                        <option value="middle">Centro</option>
-                        <option value="bottom">Abajo</option>
-                      </select>
-                    </div>
+              <div className="space-y-6">
+                <section className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden shadow-sm">
+                  <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/50">
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                      <Settings size={18} className="text-primary" />
+                      Conectividad e Integraciones
+                    </h2>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs text-zinc-400 mb-1">Familia tipográfica</label>
-                      <select
-                        value={brandKit.subtitle_font_family}
-                        onChange={(e) => handleBrandKitFieldChange('subtitle_font_family', e.target.value)}
-                        className="input-field"
-                      >
-                        <option value="Montserrat">Montserrat</option>
-                        <option value="Anton">Anton (recomendado export)</option>
-                        <option value="Archivo Black">Archivo Black</option>
-                        <option value="Bebas Neue">Bebas Neue</option>
-                        <option value="Oswald">Oswald</option>
-                        <option value="Teko">Teko</option>
-                        <option value="Impact">Impact (mapeado a Anton en export)</option>
-                        <option value="Arial Black">Arial Black (mapeado a Anton en export)</option>
-                        <option value="Arial">Arial</option>
-                        <option value="Verdana">Verdana</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs text-zinc-400 mb-1">Tamaño de fuente</label>
-                      <input
-                        type="number"
-                        min="12"
-                        max="84"
-                        value={brandKit.subtitle_font_size}
-                        onChange={(e) => handleBrandKitFieldChange('subtitle_font_size', Number(e.target.value || 40))}
-                        className="input-field"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div>
-                      <label className="block text-xs text-zinc-400 mb-1">Color de texto</label>
-                      <input
-                        type="color"
-                        value={brandKit.subtitle_font_color}
-                        onChange={(e) => handleBrandKitFieldChange('subtitle_font_color', e.target.value)}
-                        className="w-full h-10 rounded-lg border border-white/10 bg-black/30 p-1"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-zinc-400 mb-1">Color del contorno</label>
-                      <input
-                        type="color"
-                        value={brandKit.subtitle_stroke_color}
-                        onChange={(e) => handleBrandKitFieldChange('subtitle_stroke_color', e.target.value)}
-                        className="w-full h-10 rounded-lg border border-white/10 bg-black/30 p-1"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-zinc-400 mb-1">Color de caja</label>
-                      <input
-                        type="color"
-                        value={brandKit.subtitle_box_color}
-                        onChange={(e) => handleBrandKitFieldChange('subtitle_box_color', e.target.value)}
-                        className="w-full h-10 rounded-lg border border-white/10 bg-black/30 p-1"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div>
-                      <label className="block text-xs text-zinc-400 mb-1">Grosor del contorno</label>
-                      <input
-                        type="number"
-                        min="0"
-                        max="8"
-                        value={brandKit.subtitle_stroke_width}
-                        onChange={(e) => handleBrandKitFieldChange('subtitle_stroke_width', Number(e.target.value || 0))}
-                        className="input-field"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-zinc-400 mb-1">Opacidad de caja</label>
-                      <input
-                        type="number"
-                        min="0"
-                        max="100"
-                        value={brandKit.subtitle_box_opacity}
-                        onChange={(e) => handleBrandKitFieldChange('subtitle_box_opacity', Number(e.target.value || 0))}
-                        className="input-field"
-                      />
-                    </div>
-                    <div className="flex items-end">
-                      <label className="inline-flex items-center gap-2 text-sm text-zinc-300">
+                  <div className="p-6 space-y-8">
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="text-sm font-medium text-slate-800 dark:text-slate-200">API de Gemini</label>
+                        <span className={`text-xs px-2 py-0.5 rounded-full border ${String(apiKey || '').trim()
+                          ? 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-800'
+                          : 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800'
+                          }`}>
+                          {String(apiKey || '').trim() ? 'Activa' : 'Sin clave'}
+                        </span>
+                      </div>
+                      <div className="relative">
+                        <Shield size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                         <input
-                          type="checkbox"
-                          checked={brandKit.subtitle_bold}
-                          onChange={(e) => handleBrandKitFieldChange('subtitle_bold', e.target.checked)}
-                          className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
+                          type="password"
+                          value={apiKey}
+                          onChange={(e) => setApiKey(e.target.value)}
+                          className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-primary/40 focus:border-primary"
+                          placeholder="Ingresa tu clave API de Gemini"
                         />
-                        Texto en negrita
-                      </label>
+                      </div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Se guarda localmente en tu navegador y se envía al backend solo al procesar.
+                      </p>
+                    </div>
+
+                    <div className="space-y-3 pt-4 border-t border-slate-200 dark:border-slate-700">
+                      <label className="text-sm font-medium text-slate-800 dark:text-slate-200">Backend remoto (Colab / ngrok)</label>
+                      <div className="flex flex-col sm:flex-row gap-3">
+                        <div className="relative flex-1">
+                          <Link2 size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                          <input
+                            type="url"
+                            value={apiBaseUrlInput}
+                            onChange={(e) => setApiBaseUrlInput(e.target.value)}
+                            className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-primary/40 focus:border-primary"
+                            placeholder="https://xxxx.ngrok-free.app"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleTestApiBaseUrl}
+                          disabled={isTestingApiBaseUrl}
+                          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50"
+                        >
+                          <RefreshCw size={14} className={isTestingApiBaseUrl ? 'animate-spin' : ''} />
+                          {isTestingApiBaseUrl ? 'Probando...' : 'Probar conexión'}
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button type="button" onClick={handleSaveApiBaseUrl} className="btn-primary py-2 px-4 text-sm">
+                          Guardar URL
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleResetApiBaseUrl}
+                          className="py-2 px-4 text-sm rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                        >
+                          Volver a local
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        {apiBaseUrlActive ? `Activa ahora: ${apiBaseUrlActive}` : 'Activa ahora: local/proxy'}
+                      </p>
+                      {apiBaseUrlMessage && (
+                        <p className={`text-[11px] ${apiBaseUrlMessageType === 'success'
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : apiBaseUrlMessageType === 'error'
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-slate-500 dark:text-slate-400'
+                          }`}>
+                          {apiBaseUrlMessage}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="space-y-3 pt-4 border-t border-slate-200 dark:border-slate-700">
+                      <label className="text-sm font-medium text-slate-800 dark:text-slate-200">Integración Social (Upload-Post)</label>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                          type="password"
+                          value={uploadPostKey}
+                          onChange={(e) => setUploadPostKey(e.target.value)}
+                          className="flex-1 py-2.5 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-primary/40 focus:border-primary"
+                          placeholder="API key Upload-Post"
+                        />
+                        <button onClick={fetchUserProfiles} className="btn-primary py-2.5 px-4 text-sm">
+                          Conectar
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Youtube size={14} className="text-red-500" />
+                            <span className="text-sm">YouTube Shorts</span>
+                          </div>
+                          <span className="text-xs text-slate-500 dark:text-slate-400">{uploadUserId || 'Sin conectar'}</span>
+                        </div>
+                        <div className="p-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/70 flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <TikTokIcon size={14} className="text-slate-700 dark:text-slate-200" />
+                            <span className="text-sm">TikTok</span>
+                          </div>
+                          <span className="text-xs text-slate-500 dark:text-slate-400">Disponible vía Upload-Post</span>
+                        </div>
+                      </div>
+                      {userProfiles.length > 0 && (
+                        <div className="pt-1">
+                          <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Perfil activo</label>
+                          <select
+                            value={uploadUserId}
+                            onChange={(e) => setUploadUserId(e.target.value)}
+                            className="w-full sm:w-auto min-w-[260px] py-2 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm"
+                          >
+                            {userProfiles.map((profile) => (
+                              <option key={profile.username} value={profile.username}>
+                                {profile.username}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
                     </div>
                   </div>
+                </section>
 
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-[11px] text-zinc-500">
-                      Guardado automáticamente en el navegador como <span className="font-mono">{`"${brandKit.name || 'Predeterminado'}"`}</span>
+                <section className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden shadow-sm">
+                  <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/50 flex items-center justify-between">
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                      <Sparkles size={18} className="text-primary" />
+                      Kit de Marca
+                    </h2>
+                    <span className="text-xs font-medium px-2 py-1 rounded-md bg-primary/10 text-primary">Vista previa</span>
+                  </div>
+                  <div className="p-6 grid md:grid-cols-2 gap-8">
+                    <div className="space-y-5">
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Nombre del preset</label>
+                        <input
+                          type="text"
+                          value={brandKit.name}
+                          onChange={(e) => handleBrandKitFieldChange('name', e.target.value)}
+                          className="w-full py-2.5 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm"
+                          placeholder="Mi marca"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Posición</label>
+                          <select
+                            value={brandKit.subtitle_position}
+                            onChange={(e) => handleBrandKitFieldChange('subtitle_position', e.target.value)}
+                            className="w-full py-2.5 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm"
+                          >
+                            <option value="top">Arriba</option>
+                            <option value="middle">Centro</option>
+                            <option value="bottom">Abajo</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Tipografía</label>
+                          <select
+                            value={brandKit.subtitle_font_family}
+                            onChange={(e) => handleBrandKitFieldChange('subtitle_font_family', e.target.value)}
+                            className="w-full py-2.5 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm"
+                          >
+                            <option value="Montserrat">Montserrat</option>
+                            <option value="Anton">Anton</option>
+                            <option value="Archivo Black">Archivo Black</option>
+                            <option value="Bebas Neue">Bebas Neue</option>
+                            <option value="Oswald">Oswald</option>
+                            <option value="Teko">Teko</option>
+                            <option value="Impact">Impact (mapeado)</option>
+                            <option value="Arial Black">Arial Black (mapeado)</option>
+                            <option value="Arial">Arial</option>
+                            <option value="Verdana">Verdana</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between mb-1">
+                          <label className="text-xs font-medium text-slate-500 dark:text-slate-400">Tamaño</label>
+                          <span className="text-xs text-slate-500 dark:text-slate-400">{brandKit.subtitle_font_size}px</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="12"
+                          max="84"
+                          value={brandKit.subtitle_font_size}
+                          onChange={(e) => handleBrandKitFieldChange('subtitle_font_size', Number(e.target.value || 40))}
+                          className="w-full accent-primary"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Texto</label>
+                          <input
+                            type="color"
+                            value={brandKit.subtitle_font_color}
+                            onChange={(e) => handleBrandKitFieldChange('subtitle_font_color', e.target.value)}
+                            className="w-full h-10 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-1"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Contorno</label>
+                          <input
+                            type="color"
+                            value={brandKit.subtitle_stroke_color}
+                            onChange={(e) => handleBrandKitFieldChange('subtitle_stroke_color', e.target.value)}
+                            className="w-full h-10 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-1"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Caja</label>
+                          <input
+                            type="color"
+                            value={brandKit.subtitle_box_color}
+                            onChange={(e) => handleBrandKitFieldChange('subtitle_box_color', e.target.value)}
+                            className="w-full h-10 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-1"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Trazo</label>
+                          <input
+                            type="number"
+                            min="0"
+                            max="8"
+                            value={brandKit.subtitle_stroke_width}
+                            onChange={(e) => handleBrandKitFieldChange('subtitle_stroke_width', Number(e.target.value || 0))}
+                            className="w-full py-2 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Caja (%)</label>
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            value={brandKit.subtitle_box_opacity}
+                            onChange={(e) => handleBrandKitFieldChange('subtitle_box_opacity', Number(e.target.value || 0))}
+                            className="w-full py-2 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm"
+                          />
+                        </div>
+                        <div className="flex items-end pb-1">
+                          <label className="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
+                            <input
+                              type="checkbox"
+                              checked={brandKit.subtitle_bold}
+                              onChange={(e) => handleBrandKitFieldChange('subtitle_bold', e.target.checked)}
+                              className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-primary focus:ring-primary"
+                            />
+                            Negrita
+                          </label>
+                        </div>
+                      </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleBrandKitReset}
-                      className="text-xs bg-white/10 border border-white/20 px-3 py-1.5 rounded-lg text-zinc-300 hover:bg-white/15"
-                    >
-                      Restablecer valores
-                    </button>
+
+                    <div className="relative rounded-xl overflow-hidden aspect-[9/16] md:aspect-video bg-slate-900 flex items-center justify-center">
+                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,#334155_0%,#0f172a_45%,#020617_100%)] opacity-95" />
+                      <div className="absolute inset-x-6 inset-y-8 border-2 border-dashed border-white/20 rounded-lg pointer-events-none">
+                        <span className="absolute top-2 left-2 text-[10px] text-white/60 uppercase tracking-wider">Zona segura</span>
+                      </div>
+                      <div className="relative z-10 text-center px-6 py-2 rounded-md max-w-[90%]" style={{ backgroundColor: `${brandKit.subtitle_box_color}${Math.round((brandKit.subtitle_box_opacity / 100) * 255).toString(16).padStart(2, '0')}` }}>
+                        <span
+                          className="inline-block"
+                          style={{
+                            fontFamily: brandKit.subtitle_font_family,
+                            fontSize: `${Math.max(18, Math.min(52, Number(brandKit.subtitle_font_size) || 40))}px`,
+                            fontWeight: brandKit.subtitle_bold ? 800 : 600,
+                            color: brandKit.subtitle_font_color,
+                            lineHeight: 1.02,
+                            textTransform: 'uppercase',
+                            textShadow: `0 2px 0 ${brandKit.subtitle_stroke_color}, 0 -2px 0 ${brandKit.subtitle_stroke_color}, 2px 0 0 ${brandKit.subtitle_stroke_color}, -2px 0 0 ${brandKit.subtitle_stroke_color}`
+                          }}
+                        >
+                          Esto es increíble
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <div className="sticky bottom-4 z-40">
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white/95 dark:bg-slate-900/95 backdrop-blur p-4 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                    <div className="text-sm text-slate-500 dark:text-slate-400">
+                      Los cambios se aplican automáticamente y se usarán en el siguiente clip generado.
+                    </div>
+                    <div className="flex items-center gap-2 self-end sm:self-auto">
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('home')}
+                        className="px-4 py-2 text-sm font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleSaveApiBaseUrl();
+                          runConnectivityCheck();
+                        }}
+                        className="inline-flex items-center gap-2 px-5 py-2 rounded-lg bg-primary hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
+                      >
+                        <Check size={14} />
+                        Guardar cambios
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -2419,28 +2504,26 @@ function App() {
 
           {/* View: Home / Projects */}
           {(activeTab === 'home' || (activeTab === 'projects' && projectsViewMode === 'list')) && (
-            <div className="animate-[fadeIn_0.3s_ease-out] py-4 md:py-10">
+            <div className="animate-[fadeIn_0.3s_ease-out] py-6 md:py-12">
               {activeTab === 'home' && (
                 <>
-                  <div className="max-w-4xl mx-auto text-center mb-8 md:mb-10">
-                    <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 text-primary text-xs font-semibold border border-primary/20 mb-4">
-                      <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-                      Motor de clips IA activo
-                    </span>
-                    <h1 className={theme === 'light'
-                      ? 'text-4xl md:text-5xl font-extrabold text-slate-900 leading-tight'
-                      : 'text-4xl md:text-5xl font-extrabold bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent leading-tight'
-                    }>
-                      Convierte videos largos en
-                      <span className="block text-transparent bg-clip-text bg-gradient-to-r from-primary to-indigo-400">clips virales en segundos</span>
-                    </h1>
-                  </div>
+                  <div className="relative max-w-6xl mx-auto min-h-[calc(100vh-220px)] -translate-y-[6%] md:-translate-y-[10%] flex flex-col items-center justify-center">
+                    <div className="max-w-4xl mx-auto text-center mb-8 md:mb-10">
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-violet-100/90 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 text-[11px] font-medium border border-violet-200 dark:border-violet-700/40 mb-4">
+                        <span className="w-1.5 h-1.5 rounded-full bg-violet-500 animate-pulse" />
+                        Motor de clips IA activo
+                      </span>
+                      <h1 className="text-4xl md:text-5xl lg:text-6xl font-extrabold text-slate-900 leading-[1.12] tracking-tight">
+                        Convierte videos largos en
+                        <span className="block pb-1 text-transparent bg-clip-text bg-gradient-to-r from-violet-600 to-indigo-500 dark:from-violet-400 dark:to-blue-400">clips virales en segundos</span>
+                      </h1>
+                    </div>
 
-                  <div className="max-w-6xl mx-auto">
                     <MediaInput
                       onProcess={handleProcess}
                       isProcessing={status === 'processing'}
                       apiKey={apiKey}
+                      prefillFile={homePrefillFile}
                     />
                   </div>
                   {status !== 'idle' && (
@@ -2678,62 +2761,6 @@ function App() {
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setProjectMenuJobId((prev) => prev === project.job_id ? null : project.job_id);
-                                  }}
-                                  className="p-2 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                                  title="Opciones"
-                                >
-                                  <MoreHorizontal size={16} />
-                                </button>
-                                {projectMenuJobId === project.job_id && (
-                                  <div className="absolute right-2 top-11 z-10 min-w-[160px] rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-xl p-1">
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        openSavedProject(project);
-                                      }}
-                                      className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
-                                    >
-                                      Abrir proyecto
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        toggleProjectFavorite(project.job_id);
-                                        setProjectMenuJobId(null);
-                                      }}
-                                      className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
-                                    >
-                                      {project.favorite ? 'Quitar favorito' : 'Marcar favorito'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        beginEditProjectTitle(project);
-                                      }}
-                                      className="w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
-                                    >
-                                      Editar título
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        removeProject(project.job_id);
-                                      }}
-                                      className="w-full text-left px-3 py-2 text-sm text-red-600 dark:text-red-300 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20"
-                                    >
-                                      Eliminar de la lista
-                                    </button>
-                                  </div>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
                                     if (window.confirm('¿Eliminar este proyecto de la lista?')) {
                                       removeProject(project.job_id);
                                     }
@@ -2771,6 +2798,15 @@ function App() {
                           setProjectsViewMode('list');
                           window.scrollTo({ top: 0, behavior: 'smooth' });
                         }}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'copy';
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const dropped = e.dataTransfer?.files?.[0];
+                          handleDropToNewProject(dropped);
+                        }}
                         className="mt-6 w-full rounded-3xl border-2 border-dashed border-slate-300 dark:border-slate-700 p-8 text-center bg-white/60 dark:bg-slate-900/40 hover:bg-white dark:hover:bg-slate-900/70 transition-colors"
                       >
                         <div className="w-14 h-14 bg-violet-100 dark:bg-violet-900/20 rounded-full flex items-center justify-center mx-auto mb-3">
@@ -2781,7 +2817,18 @@ function App() {
                       </button>
                     </>
                   ) : (
-                    <div className="rounded-3xl border-2 border-dashed border-slate-300 dark:border-slate-700 p-10 text-center bg-white/60 dark:bg-slate-900/40">
+                    <div
+                      className="rounded-3xl border-2 border-dashed border-slate-300 dark:border-slate-700 p-10 text-center bg-white/60 dark:bg-slate-900/40"
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'copy';
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const dropped = e.dataTransfer?.files?.[0];
+                        handleDropToNewProject(dropped);
+                      }}
+                    >
                       <div className="w-16 h-16 bg-violet-100 dark:bg-violet-900/20 rounded-full flex items-center justify-center mx-auto mb-4">
                         <PlusCircle size={28} className="text-primary" />
                       </div>
@@ -2814,15 +2861,15 @@ function App() {
 
           {/* View: Processing / Results (Split View) */}
           {activeTab === 'projects' && projectsViewMode === 'detail' && !studioContext && (status === 'processing' || status === 'complete' || status === 'error') && (
-            <div className="min-h-[620px] flex flex-col gap-4 animate-[fadeIn_0.3s_ease-out]">
-              <div className="w-full border border-slate-200 dark:border-white/10 bg-white/90 dark:bg-black/20 rounded-2xl p-4 shadow-sm">
+            <div className="min-h-[620px] flex flex-col gap-5 animate-[fadeIn_0.3s_ease-out]">
+              <div className="w-full border border-slate-200/90 dark:border-white/10 bg-white/95 dark:bg-black/20 rounded-2xl p-4 shadow-[0_8px_26px_rgba(15,23,42,0.08)]">
                 <div className="flex flex-col gap-4">
-                  <div className="flex items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-center gap-2 min-w-0">
                       <button
                         type="button"
                         onClick={() => setProjectsViewMode('list')}
-                        className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-xs"
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 bg-slate-50/80 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-xs"
                         title="Volver a lista de proyectos"
                       >
                         <ArrowLeft size={13} />
@@ -2833,12 +2880,12 @@ function App() {
                         Procesamiento del proyecto
                       </h2>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
                         onClick={handleRetryJob}
                         disabled={!jobId || status === 'processing' || isRetryingJob}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-[11px] disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50/80 dark:bg-slate-800/50 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-[11px] disabled:opacity-50 disabled:cursor-not-allowed"
                         title="Reprocesar proyecto"
                       >
                         <RefreshCw size={12} className={isRetryingJob ? 'animate-spin' : ''} />
@@ -2853,7 +2900,7 @@ function App() {
                           }
                         }}
                         disabled={!jobId}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-red-300 dark:border-red-700 text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-[11px] disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-red-200 dark:border-red-700 text-red-600 dark:text-red-300 bg-red-50/40 dark:bg-red-900/10 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-[11px] disabled:opacity-50 disabled:cursor-not-allowed"
                         title="Eliminar proyecto"
                       >
                         <Trash2 size={12} />
@@ -2869,13 +2916,13 @@ function App() {
                           });
                         }}
                         disabled={status !== 'processing'}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-[11px] disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50/80 dark:bg-slate-800/50 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-[11px] disabled:opacity-50 disabled:cursor-not-allowed"
                         title={isPollingPaused ? 'Reanudar actualización automática' : 'Pausar actualización automática'}
                       >
                         {isPollingPaused ? <Play size={12} /> : <Pause size={12} />}
                         {isPollingPaused ? 'Reanudar' : 'Pausar'}
                       </button>
-                      <span className={`text-[11px] px-2.5 py-1 rounded-full border font-semibold ${status === 'processing'
+                      <span className={`text-[11px] px-2.5 py-1 rounded-full border font-semibold uppercase tracking-wide ${status === 'processing'
                         ? 'bg-primary/10 border-primary/20 text-primary'
                         : status === 'complete'
                           ? 'bg-emerald-100 dark:bg-green-500/10 border-emerald-200 dark:border-green-500/20 text-emerald-700 dark:text-green-400'
@@ -2900,10 +2947,10 @@ function App() {
                     </div>
                   </div>
 
-                  <div className="rounded-lg border border-slate-200 dark:border-white/10 overflow-hidden">
+                  <div className="rounded-xl border border-slate-200 dark:border-white/10 overflow-hidden">
                     <button
                       onClick={() => setLogsVisible(!logsVisible)}
-                      className="w-full px-3 py-2.5 text-left flex items-center justify-between bg-slate-50 dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 transition-colors"
+                      className="w-full px-3 py-2.5 text-left flex items-center justify-between bg-slate-50/80 dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 transition-colors"
                     >
                       <span className="text-xs font-mono text-slate-600 dark:text-zinc-300 flex items-center gap-2">
                         <Terminal size={12} /> Logs del sistema (opcional)
@@ -2929,22 +2976,54 @@ function App() {
 
               <div className="flex flex-col gap-4">
                 {/* Results Grid */}
-                <div className="w-full flex flex-col border border-slate-200 dark:border-white/10 bg-white/85 dark:bg-background rounded-2xl p-5 transition-all duration-700 ease-in-out shadow-sm">
+                <div className="w-full flex flex-col border border-slate-200/90 dark:border-white/10 bg-white/95 dark:bg-background rounded-2xl p-5 transition-all duration-700 ease-in-out shadow-[0_8px_26px_rgba(15,23,42,0.08)]">
                   <div className="mb-5 shrink-0">
                     <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-zinc-500 mb-1">
                       <span>Proyecto</span>
                       <ChevronRight size={12} />
                       <span className="truncate">{processingProjectName}</span>
                     </div>
-                    <h2 className="text-lg font-semibold flex items-center gap-2 text-slate-900 dark:text-white">
-                      <Sparkles className="text-yellow-400" size={20} />
-                      {showTrailerFocusLayout ? 'Super trailer' : 'Clips generados'}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-lg font-semibold flex items-center gap-2 text-slate-900 dark:text-white">
+                        <Sparkles className="text-yellow-400" size={20} />
+                        {showTrailerFocusLayout ? 'Super trailer' : 'Clips generados'}
+                      </h2>
                       {!showTrailerFocusLayout && sortedClips.length > 0 && (
-                        <span className="text-xs bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-white px-2 py-0.5 rounded-full ml-auto border border-slate-200 dark:border-transparent">
-                          {visibleClips.length}/{sortedClips.length} Clips
-                        </span>
+                        <div className="ml-auto flex items-center gap-2">
+                          <span className="text-xs bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-white px-2 py-0.5 rounded-full border border-slate-200 dark:border-transparent">
+                            {visibleClips.length}/{sortedClips.length} Clips
+                          </span>
+                          <div className="inline-flex items-center rounded-lg border border-slate-200 dark:border-white/15 bg-white dark:bg-white/5 p-1">
+                            <button
+                              type="button"
+                              onClick={() => setClipsViewMode('list')}
+                              className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                                clipsViewMode === 'list'
+                                  ? 'bg-primary/15 text-primary'
+                                  : 'text-slate-500 dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-white/10'
+                              }`}
+                              title="Vista lista"
+                            >
+                              <List size={12} />
+                              Lista
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setClipsViewMode('gallery')}
+                              className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                                clipsViewMode === 'gallery'
+                                  ? 'bg-primary/15 text-primary'
+                                  : 'text-slate-500 dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-white/10'
+                              }`}
+                              title="Vista galería"
+                            >
+                              <LayoutGrid size={12} />
+                              Galería
+                            </button>
+                          </div>
+                        </div>
                       )}
-                    </h2>
+                    </div>
                     <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
                       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 text-slate-700 dark:text-zinc-300">
                         <FileVideo size={12} />
@@ -2969,51 +3048,52 @@ function App() {
                   </div>
 
                   {!showTrailerFocusLayout && sortedClips.length > 0 && (
-                    <div className="mb-4 shrink-0 flex flex-wrap items-center gap-2">
-                      <span className="text-xs text-slate-500 dark:text-zinc-500">Orden:</span>
+                    <div className="mb-4 shrink-0 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50/80 dark:bg-white/[0.02] p-3.5 space-y-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Orden:</span>
                       <select
                         value={clipSort}
                         onChange={(e) => setClipSort(e.target.value)}
-                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                       >
                         <option value="top">Mayor puntaje</option>
                         <option value="balanced">Línea de tiempo</option>
                         <option value="safe">Más seguros</option>
                       </select>
-                      <span className="text-xs text-slate-500 dark:text-zinc-500 ml-1">Filtro:</span>
+                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500 ml-1">Filtro:</span>
                       <select
                         value={clipFilter}
                         onChange={(e) => setClipFilter(e.target.value)}
-                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                       >
                         <option value="all">Todos</option>
                         <option value="top">Alto (80+)</option>
                         <option value="medium">Medio (65-79)</option>
                         <option value="low">Bajo (&lt;65)</option>
                       </select>
-                      <span className="text-xs text-slate-500 dark:text-zinc-500">Etiqueta:</span>
+                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Etiqueta:</span>
                       <select
                         value={clipTagFilter}
                         onChange={(e) => setClipTagFilter(e.target.value)}
-                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                       >
                         <option value="all">Todas</option>
                         {availableTags.map((tag) => (
                           <option key={tag} value={tag}>{tag}</option>
                         ))}
                       </select>
-                      <span className="text-xs text-slate-500 dark:text-zinc-500">Estrategia:</span>
+                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Estrategia:</span>
                       <select
                         value={batchStrategy}
                         onChange={(e) => applyBatchStrategy(e.target.value)}
-                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                       >
                         <option value="growth">Crecimiento</option>
                         <option value="balanced">Balanceada</option>
                         <option value="conservative">Conservadora</option>
                         <option value="custom">Personalizada</option>
                       </select>
-                      <span className="text-xs text-slate-500 dark:text-zinc-500 ml-1">N clips:</span>
+                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500 ml-1">N clips:</span>
                       <input
                         type="number"
                         min="1"
@@ -3023,16 +3103,16 @@ function App() {
                           setBatchStrategy('custom');
                           setBatchTopCount(Math.max(1, Math.min(10, Number(e.target.value || 1))));
                         }}
-                        className="w-16 text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                        className="w-16 text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                       />
-                      <span className="text-xs text-slate-500 dark:text-zinc-500">Inicia en:</span>
+                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Inicia en:</span>
                       <select
                         value={batchStartDelayMinutes}
                         onChange={(e) => {
                           setBatchStrategy('custom');
                           setBatchStartDelayMinutes(Number(e.target.value));
                         }}
-                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                       >
                         <option value={0}>ahora</option>
                         <option value={5}>5m</option>
@@ -3040,14 +3120,14 @@ function App() {
                         <option value={30}>30m</option>
                         <option value={60}>60m</option>
                       </select>
-                      <span className="text-xs text-slate-500 dark:text-zinc-500">Cada:</span>
+                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Cada:</span>
                       <select
                         value={batchIntervalMinutes}
                         onChange={(e) => {
                           setBatchStrategy('custom');
                           setBatchIntervalMinutes(Number(e.target.value));
                         }}
-                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                       >
                         <option value={15}>15m</option>
                         <option value={30}>30m</option>
@@ -3055,14 +3135,14 @@ function App() {
                         <option value={120}>120m</option>
                         <option value={240}>240m</option>
                       </select>
-                      <span className="text-xs text-slate-500 dark:text-zinc-500">Alcance:</span>
+                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Alcance:</span>
                       <select
                         value={batchScope}
                         onChange={(e) => {
                           setBatchStrategy('custom');
                           setBatchScope(e.target.value);
                         }}
-                        className="text-xs bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1 text-slate-700 dark:text-zinc-200"
+                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                       >
                         <option value="visible">Visible</option>
                         <option value="global">Global</option>
@@ -3070,7 +3150,7 @@ function App() {
                       <button
                         onClick={handleQueueTopClips}
                         disabled={isBatchScheduling || (batchScope === 'global' ? sortedClips.length === 0 : visibleClips.length === 0)}
-                        className="ml-1 text-xs bg-violet-100 dark:bg-primary/20 border border-violet-300 dark:border-primary/40 text-violet-700 dark:text-primary rounded-md px-2 py-1 hover:bg-violet-200 dark:hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="ml-1 text-xs bg-violet-100 dark:bg-primary/20 border border-violet-300 dark:border-primary/40 text-violet-700 dark:text-primary rounded-md px-2 py-1.5 hover:bg-violet-200 dark:hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
                         title="Programa lote usando N clips e intervalo actual"
                       >
                         {isBatchScheduling ? 'Encolando...' : `Encolar ${Math.max(1, Math.min(10, Number(batchTopCount) || 1))}`}
@@ -3078,7 +3158,7 @@ function App() {
                       <button
                         onClick={handleExportPack}
                         disabled={isExportingPack || !jobId}
-                        className="text-xs bg-emerald-100 dark:bg-emerald-500/20 border border-emerald-300 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 rounded-md px-2 py-1 hover:bg-emerald-200 dark:hover:bg-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="text-xs bg-emerald-100 dark:bg-emerald-500/20 border border-emerald-300 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 rounded-md px-2 py-1.5 hover:bg-emerald-200 dark:hover:bg-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
                         title="Exportar paquete para agencia (zip)"
                       >
                         {isExportingPack ? 'Exportando...' : 'Exportar paquete'}
@@ -3086,22 +3166,23 @@ function App() {
                       <button
                         onClick={handleGenerateTrailer}
                         disabled={isGeneratingTrailer || !jobId || status !== 'complete'}
-                        className="text-xs bg-amber-100 dark:bg-amber-500/20 border border-amber-300 dark:border-amber-500/40 text-amber-700 dark:text-amber-300 rounded-md px-2 py-1 hover:bg-amber-200 dark:hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="text-xs bg-amber-100 dark:bg-amber-500/20 border border-amber-300 dark:border-amber-500/40 text-amber-700 dark:text-amber-300 rounded-md px-2 py-1.5 hover:bg-amber-200 dark:hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
                         title="Genera un Super Trailer (Súper Resumen) con fragmentos explosivos y transiciones"
                       >
                         {isGeneratingTrailer ? 'Generando trailer...' : 'Generar Super Trailer ⚡'}
                       </button>
+                      </div>
                     </div>
                   )}
 
                   {!showTrailerFocusLayout && sortedClips.length > 0 && (
-                    <div className="mb-4 rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                    <div className="mb-4 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-3.5 shadow-sm">
                       <div className="flex items-center gap-2">
-                        <Search size={14} className="text-zinc-400" />
+                        <Search size={14} className="text-slate-400" />
                         <select
                           value={clipSearchModePreset}
                           onChange={(e) => setClipSearchModePreset(e.target.value)}
-                          className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200 shrink-0"
+                          className="text-xs bg-slate-50 dark:bg-black/30 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200 shrink-0"
                           title="Modo de búsqueda: Exacta prioriza precisión, Amplia prioriza cobertura."
                         >
                           <option value="exact">Exacta</option>
@@ -3116,12 +3197,12 @@ function App() {
                             if (e.key === 'Enter') handleClipSearch();
                           }}
                           placeholder="Clip Anything: ej. 'cuando habla de deuda' o 'momento polémico'"
-                          className="flex-1 text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                          className="flex-1 text-xs bg-slate-50 dark:bg-black/30 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                         />
                         <button
                           onClick={handleClipSearch}
                           disabled={isSearchingClips || !clipSearchQuery.trim()}
-                          className="text-xs bg-white/10 border border-white/20 rounded-md px-2 py-1.5 text-zinc-200 hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="text-xs bg-slate-100 dark:bg-white/10 border border-slate-200 dark:border-white/20 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200 hover:bg-slate-200 dark:hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {isSearchingClips ? 'Buscando...' : 'Buscar'}
                         </button>
@@ -3130,7 +3211,7 @@ function App() {
                         <select
                           value={clipSearchChapterFilter}
                           onChange={(e) => setClipSearchChapterFilter(e.target.value)}
-                          className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                          className="text-xs bg-slate-50 dark:bg-black/30 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                           title="Limita búsqueda a un capítulo detectado automáticamente"
                         >
                           <option value="-1">Todos los capítulos</option>
@@ -3147,7 +3228,7 @@ function App() {
                           value={clipSearchStartTime}
                           onChange={(e) => setClipSearchStartTime(e.target.value)}
                           placeholder="Desde seg (opcional)"
-                          className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                          className="text-xs bg-slate-50 dark:bg-black/30 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                         />
                         <input
                           type="number"
@@ -3156,12 +3237,12 @@ function App() {
                           value={clipSearchEndTime}
                           onChange={(e) => setClipSearchEndTime(e.target.value)}
                           placeholder="Hasta seg (opcional)"
-                          className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                          className="text-xs bg-slate-50 dark:bg-black/30 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                         />
                         <select
                           value={clipSearchSpeakerFilter}
                           onChange={(e) => setClipSearchSpeakerFilter(e.target.value)}
-                          className="text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                          className="text-xs bg-slate-50 dark:bg-black/30 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                           title="Filtra por hablante si hay diarización"
                         >
                           <option value="all">Todos los hablantes</option>
@@ -3213,14 +3294,14 @@ function App() {
                       )}
 
                       {clipSearchResults.length > 0 && (
-                        <div className="mt-2 max-h-36 overflow-y-auto border border-white/10 rounded bg-black/20 divide-y divide-white/5">
+                        <div className="mt-2 max-h-36 overflow-y-auto border border-slate-200 dark:border-white/10 rounded bg-slate-50 dark:bg-black/20 divide-y divide-slate-200 dark:divide-white/5">
                           {clipSearchResults.map((m, i) => (
                             <div key={`${m.start}-${m.end}-${i}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
                               <div className="min-w-0">
-                                <div className="text-zinc-200 truncate">{m.snippet || `Coincidencia ${i + 1}`}</div>
-                                <div className="text-zinc-500">{`${m.start}s - ${m.end}s | híbrido ${m.match_score} | sem ${m.semantic_score ?? '-'} | clave ${m.keyword_score ?? '-'} | viral ${m.virality_boost ?? '-'}`}</div>
+                                <div className="text-slate-700 dark:text-zinc-200 truncate">{m.snippet || `Coincidencia ${i + 1}`}</div>
+                                <div className="text-slate-500 dark:text-zinc-500">{`${m.start}s - ${m.end}s | híbrido ${m.match_score} | sem ${m.semantic_score ?? '-'} | clave ${m.keyword_score ?? '-'} | viral ${m.virality_boost ?? '-'}`}</div>
                                 {Array.isArray(m.speakers) && m.speakers.length > 0 && (
-                                  <div className="text-zinc-500 truncate">{`hablante: ${m.speakers.join(', ')}`}</div>
+                                  <div className="text-slate-500 dark:text-zinc-500 truncate">{`hablante: ${m.speakers.join(', ')}`}</div>
                                 )}
                               </div>
                               <button
@@ -3235,16 +3316,16 @@ function App() {
                       )}
 
                       {clipSearchChapters.length > 0 && (
-                        <div className="mt-2 border border-white/10 rounded bg-black/20">
-                          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400 border-b border-white/10">
+                        <div className="mt-2 border border-slate-200 dark:border-white/10 rounded bg-slate-50 dark:bg-black/20">
+                          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-slate-500 dark:text-zinc-400 border-b border-slate-200 dark:border-white/10">
                             Capítulos automáticos
                           </div>
-                          <div className="max-h-36 overflow-y-auto divide-y divide-white/5">
+                          <div className="max-h-36 overflow-y-auto divide-y divide-slate-200 dark:divide-white/5">
                             {clipSearchChapters.map((chapter) => (
                               <div key={`chapter-${chapter.chapter_index}-${chapter.start}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
                                 <div className="min-w-0">
-                                  <div className="text-zinc-200 truncate">{chapter.title || `Capítulo ${chapter.chapter_index + 1}`}</div>
-                                  <div className="text-zinc-500 truncate">{`${chapter.start}s - ${chapter.end}s${Array.isArray(chapter.keywords) && chapter.keywords.length > 0 ? ` | ${chapter.keywords.join(', ')}` : ''}`}</div>
+                                  <div className="text-slate-700 dark:text-zinc-200 truncate">{chapter.title || `Capítulo ${chapter.chapter_index + 1}`}</div>
+                                  <div className="text-slate-500 dark:text-zinc-500 truncate">{`${chapter.start}s - ${chapter.end}s${Array.isArray(chapter.keywords) && chapter.keywords.length > 0 ? ` | ${chapter.keywords.join(', ')}` : ''}`}</div>
                                 </div>
                                 <div className="shrink-0 flex items-center gap-1.5">
                                   <button
@@ -3259,7 +3340,7 @@ function App() {
                                   </button>
                                   <button
                                     onClick={() => handleClipPlay(chapter.start)}
-                                    className="text-[11px] bg-white/10 border border-white/20 text-zinc-200 rounded px-2 py-1 hover:bg-white/15"
+                                    className="text-[11px] bg-white border border-slate-200 dark:border-white/20 text-slate-700 dark:text-zinc-200 rounded px-2 py-1 hover:bg-slate-50 dark:hover:bg-white/15"
                                   >
                                     Reproducir
                                   </button>
@@ -3271,16 +3352,16 @@ function App() {
                       )}
 
                       {clipHybridShortlist.length > 0 && (
-                        <div className="mt-2 border border-white/10 rounded bg-black/20">
-                          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400 border-b border-white/10">
+                        <div className="mt-2 border border-slate-200 dark:border-white/10 rounded bg-slate-50 dark:bg-black/20">
+                          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-slate-500 dark:text-zinc-400 border-b border-slate-200 dark:border-white/10">
                             Lista corta híbrida (Semántica + puntaje de viralidad)
                           </div>
-                          <div className="max-h-36 overflow-y-auto divide-y divide-white/5">
+                          <div className="max-h-36 overflow-y-auto divide-y divide-slate-200 dark:divide-white/5">
                             {clipHybridShortlist.map((item, i) => (
                               <div key={`shortlist-${item.clip_index}-${i}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
                                 <div className="min-w-0">
-                                  <div className="text-zinc-200 truncate">{item.title || `Clip ${item.clip_index + 1}`}</div>
-                                  <div className="text-zinc-500 truncate">{`${item.start}s - ${item.end}s | híbrido ${item.hybrid_score} | viralidad ${item.virality_score}`}</div>
+                                  <div className="text-slate-700 dark:text-zinc-200 truncate">{item.title || `Clip ${item.clip_index + 1}`}</div>
+                                  <div className="text-slate-500 dark:text-zinc-500 truncate">{`${item.start}s - ${item.end}s | híbrido ${item.hybrid_score} | viralidad ${item.virality_score}`}</div>
                                 </div>
                                 <button
                                   onClick={() => handleClipPlay(item.start)}
@@ -3297,11 +3378,11 @@ function App() {
                   )}
 
                   {!showTrailerFocusLayout && status === 'complete' && jobId && (
-                    <div className="mb-4 rounded-lg border border-white/10 bg-white/[0.02] p-3">
+                    <div className="mb-4 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-3.5 shadow-sm">
                       <div className="flex items-center gap-2 mb-2">
-                        <History size={14} className="text-zinc-400" />
-                        <span className="text-xs text-zinc-300 font-medium">Sincronía de transcript</span>
-                        <span className="text-[10px] text-zinc-500">{`${visibleTranscriptSegments.length}/${transcriptTotal || transcriptSegments.length} segmentos`}</span>
+                        <History size={14} className="text-slate-400 dark:text-zinc-400" />
+                        <span className="text-xs text-slate-700 dark:text-zinc-300 font-medium">Sincronía de transcript</span>
+                        <span className="text-[10px] text-slate-500 dark:text-zinc-500">{`${visibleTranscriptSegments.length}/${transcriptTotal || transcriptSegments.length} segmentos`}</span>
                         {transcriptHasSpeakers && (
                           <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border bg-violet-500/15 border-violet-500/30 text-violet-300">
                             etiquetas de speaker
@@ -3310,7 +3391,7 @@ function App() {
                         <button
                           onClick={() => loadTranscriptSegments(jobId)}
                           disabled={isLoadingTranscript}
-                          className="ml-auto text-[11px] bg-white/10 border border-white/20 rounded px-2 py-1 text-zinc-200 hover:bg-white/15 disabled:opacity-50"
+                          className="ml-auto text-[11px] bg-slate-100 dark:bg-white/10 border border-slate-200 dark:border-white/20 rounded px-2 py-1 text-slate-700 dark:text-zinc-200 hover:bg-slate-200 dark:hover:bg-white/15 disabled:opacity-50"
                         >
                           {isLoadingTranscript ? 'Cargando...' : 'Recargar'}
                         </button>
@@ -3321,22 +3402,22 @@ function App() {
                           value={transcriptFilter}
                           onChange={(e) => setTranscriptFilter(e.target.value)}
                           placeholder="Filtrar transcript..."
-                          className="flex-1 text-xs bg-black/30 border border-white/10 rounded-md px-2 py-1.5 text-zinc-200"
+                          className="flex-1 text-xs bg-slate-50 dark:bg-black/30 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                         />
                       </div>
                       {transcriptError && (
                         <p className="mt-2 text-[11px] text-red-300">{transcriptError}</p>
                       )}
                       {!transcriptError && visibleTranscriptSegments.length > 0 && (
-                        <div className="mt-2 max-h-56 overflow-y-auto border border-white/10 rounded bg-black/20 divide-y divide-white/5">
+                        <div className="mt-2 max-h-56 overflow-y-auto border border-slate-200 dark:border-white/10 rounded bg-slate-50 dark:bg-black/20 divide-y divide-slate-200 dark:divide-white/5">
                           {visibleTranscriptSegments.map((seg) => (
                             <div key={`seg-${seg.segment_index}-${seg.start}`} className="px-2 py-1.5 text-[11px] flex items-start justify-between gap-2">
                               <div className="min-w-0">
-                                <div className="text-zinc-500">
+                                <div className="text-slate-500 dark:text-zinc-500">
                                   {`${formatTimelineTime(seg.start)} - ${formatTimelineTime(seg.end)}`}
                                   {seg.speaker ? ` | ${seg.speaker}` : ''}
                                 </div>
-                                <div className="text-zinc-200 line-clamp-2">{seg.text}</div>
+                                <div className="text-slate-700 dark:text-zinc-200 line-clamp-2">{seg.text}</div>
                               </div>
                               <button
                                 onClick={() => handleTranscriptSegmentPlay(seg.start)}
@@ -3349,44 +3430,44 @@ function App() {
                         </div>
                       )}
                       {!transcriptError && !isLoadingTranscript && visibleTranscriptSegments.length === 0 && (
-                        <p className="mt-2 text-[11px] text-zinc-500">No se encontraron segmentos para este filtro.</p>
+                        <p className="mt-2 text-[11px] text-slate-500 dark:text-zinc-500">No se encontraron segmentos para este filtro.</p>
                       )}
                     </div>
                   )}
 
                   {batchScheduleReport && (
                     <div className={`mb-4 text-xs rounded-lg border px-3 py-2 ${batchScheduleReport.failures.length === 0
-                      ? 'bg-green-500/10 border-green-500/30 text-green-300'
-                      : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                      ? 'bg-green-50 dark:bg-green-500/10 border-green-200 dark:border-green-500/30 text-green-700 dark:text-green-300'
+                      : 'bg-amber-50 dark:bg-amber-500/10 border-amber-200 dark:border-amber-500/30 text-amber-700 dark:text-amber-200'
                       }`}>
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p>{`Lote programado: ${batchScheduleReport.success}/${batchScheduleReport.total} en cola.`}</p>
                         <button
                           onClick={handleBatchReportCsvDownload}
-                          className="text-[11px] bg-white/10 border border-white/20 rounded px-2 py-1 hover:bg-white/15"
+                          className="text-[11px] bg-white dark:bg-white/10 border border-slate-200 dark:border-white/20 rounded px-2 py-1 hover:bg-slate-50 dark:hover:bg-white/15"
                         >
                           Exportar CSV del lote
                         </button>
                       </div>
-                      <p className="mt-1 text-[11px] text-zinc-300">
+                      <p className="mt-1 text-[11px] text-slate-700 dark:text-zinc-300">
                         {`Estrategia: ${strategyLabel(batchScheduleReport.strategy || 'custom')} | Alcance: ${scopeLabel(batchScheduleReport.scope || 'visible')} | N clips: ${batchScheduleReport.top_count ?? '-'} | Cada: ${batchScheduleReport.interval_minutes ?? '-'}m`}
                       </p>
                       {batchScheduleReport.failures.length > 0 && (
-                        <p className="mt-1 text-[11px] text-amber-300">
+                        <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
                           {batchScheduleReport.failures[0]}
                         </p>
                       )}
                       {Array.isArray(batchScheduleReport.timeline) && batchScheduleReport.timeline.length > 0 && (
-                        <div className="mt-3 max-h-36 overflow-y-auto border border-white/10 rounded bg-black/20">
-                          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-zinc-400 border-b border-white/10">
+                        <div className="mt-3 max-h-36 overflow-y-auto border border-slate-200 dark:border-white/10 rounded bg-slate-50 dark:bg-black/20">
+                          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-slate-500 dark:text-zinc-400 border-b border-slate-200 dark:border-white/10">
                             Calendario de cola
                           </div>
-                          <div className="divide-y divide-white/5">
+                          <div className="divide-y divide-slate-200 dark:divide-white/5">
                             {batchScheduleReport.timeline.map((item, idx) => (
                               <div key={`${item.clip_index}-${item.scheduled_at}-${idx}`} className="px-2 py-1.5 text-[11px] flex items-center justify-between gap-2">
                                 <div className="min-w-0">
-                                  <div className="text-zinc-200 truncate">{item.clip_title}</div>
-                                  <div className="text-zinc-500">{new Date(item.scheduled_at).toLocaleString()}</div>
+                                  <div className="text-slate-700 dark:text-zinc-200 truncate">{item.clip_title}</div>
+                                  <div className="text-slate-500 dark:text-zinc-500">{new Date(item.scheduled_at).toLocaleString()}</div>
                                 </div>
                                 <span className={`shrink-0 px-1.5 py-0.5 rounded border ${item.status === 'scheduled'
                                   ? 'bg-green-500/15 border-green-500/30 text-green-300'
@@ -3403,8 +3484,8 @@ function App() {
                   )}
                   {packExportReport && (
                     <div className={`mb-4 text-xs rounded-lg border px-3 py-2 ${packExportReport.success === false
-                      ? 'bg-red-500/10 border-red-500/30 text-red-300'
-                      : 'bg-blue-500/10 border-blue-500/30 text-blue-300'
+                      ? 'bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/30 text-red-700 dark:text-red-300'
+                      : 'bg-blue-50 dark:bg-blue-500/10 border-blue-200 dark:border-blue-500/30 text-blue-700 dark:text-blue-300'
                       }`}>
                       {packExportReport.success === false
                         ? <p>{`Error exportando paquete: ${packExportReport.error}`}</p>
@@ -3412,9 +3493,9 @@ function App() {
                     </div>
                   )}
                   {!showTrailerFocusLayout && results?.latest_trailer_url && (
-                    <div className="mb-4 rounded-lg border border-amber-500/35 bg-amber-500/10 p-3">
+                    <div className="mb-4 rounded-lg border border-amber-300 dark:border-amber-500/35 bg-amber-50 dark:bg-amber-500/10 p-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <p className="text-xs text-amber-200 flex items-center gap-2">
+                        <p className="text-xs text-amber-700 dark:text-amber-200 flex items-center gap-2">
                           <span className="text-lg">⚡</span>
                           Super Trailer listo (Súper Resumen Fast-Paced)
                         </p>
@@ -3423,14 +3504,14 @@ function App() {
                             href={getApiUrl(results.latest_trailer_url)}
                             target="_blank"
                             rel="noreferrer"
-                            className="text-[11px] bg-amber-500/20 border border-amber-400/40 text-amber-200 rounded px-2 py-1 hover:bg-amber-500/30"
+                            className="text-[11px] bg-amber-100 dark:bg-amber-500/20 border border-amber-300 dark:border-amber-400/40 text-amber-700 dark:text-amber-200 rounded px-2 py-1 hover:bg-amber-200 dark:hover:bg-amber-500/30"
                           >
                             Abrir Trailer
                           </a>
                           <a
                             href={getApiUrl(results.latest_trailer_url)}
                             download
-                            className="text-[11px] bg-white/10 border border-white/20 text-zinc-100 rounded px-2 py-1 hover:bg-white/15"
+                            className="text-[11px] bg-white border border-slate-200 dark:border-white/20 text-slate-700 dark:text-zinc-100 rounded px-2 py-1 hover:bg-slate-50 dark:hover:bg-white/15"
                           >
                             Descargar
                           </a>
@@ -3626,7 +3707,11 @@ function App() {
                       </div>
                     ) : (
                       visibleClips.length > 0 ? (
-                        <div className="grid grid-cols-1 gap-4 pb-10">
+                        <div className={`grid pb-10 ${
+                          clipsViewMode === 'gallery'
+                            ? 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5'
+                            : 'grid-cols-1 gap-4'
+                        }`}>
                           {visibleClips.map((clip, i) => {
                             const clipRefIndex = Number(clip?.clip_index);
                             const focusMatch = Number.isFinite(clipRefIndex) && clipRefIndex === focusedClipIndex;
@@ -3636,12 +3721,13 @@ function App() {
                                 ref={(node) => setClipCardRef(clipRefIndex, node)}
                                 tabIndex={-1}
                                 data-clip-index={Number.isFinite(clipRefIndex) ? clipRefIndex : undefined}
-                                className={`rounded-2xl outline-none transition-shadow ${focusMatch ? 'ring-2 ring-primary/50 shadow-[0_0_0_4px_rgba(124,58,237,0.14)]' : ''}`}
+                                className={`rounded-2xl outline-none transition-shadow ${clipsViewMode === 'gallery' ? 'h-full' : ''} ${focusMatch ? 'ring-2 ring-primary/50 shadow-[0_0_0_4px_rgba(124,58,237,0.14)]' : ''}`}
                               >
                                 <ResultCard
                                   clip={clip}
                                   displayIndex={i}
                                   clipIndex={clip.clip_index}
+                                  viewMode={clipsViewMode}
                                   jobId={jobId}
                                   uploadPostKey={uploadPostKey}
                                   uploadUserId={uploadUserId}

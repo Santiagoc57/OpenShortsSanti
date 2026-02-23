@@ -60,12 +60,15 @@
 }
 
 .theme-light body {
-  background: radial-gradient(circle at top right, #ede9fe 0%, #f8fafc 42%, #f1f5f9 100%);
+  background:
+    radial-gradient(44% 34% at 50% 10%, rgba(167, 139, 250, 0.24) 0%, rgba(167, 139, 250, 0) 72%),
+    radial-gradient(36% 30% at 82% 88%, rgba(96, 165, 250, 0.22) 0%, rgba(96, 165, 250, 0) 74%),
+    linear-gradient(180deg, #f6f8fc 0%, #eef2f7 100%);
   color: #0f172a;
 }
 
 .theme-light .bg-background {
-  background-color: #f4f8fd !important;
+  background-color: transparent !important;
 }
 
 .theme-light .bg-background\/50 {
@@ -224,11 +227,11 @@
 }
 
 .input-field {
-  @apply w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm placeholder:text-zinc-500;
+  @apply w-full bg-white/5 border border-white/10 rounded-full px-5 py-3 outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm placeholder:text-zinc-500;
 }
 
 .btn-primary {
-  @apply bg-gradient-to-r from-primary to-indigo-500 hover:from-primary hover:to-indigo-600 text-white px-6 py-3 rounded-xl font-medium transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-primary/20;
+  @apply bg-gradient-to-r from-primary to-indigo-500 hover:from-primary hover:to-indigo-600 text-white px-6 py-3 rounded-full font-medium transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-primary/20;
 }
 
 /* Custom Scrollbar */
@@ -252,15 +255,33 @@
 
 /* Custom Animations */
 @keyframes scan {
-  0% { top: 0%; opacity: 0; }
-  10% { opacity: 1; }
-  90% { opacity: 1; }
-  100% { top: 100%; opacity: 0; }
+  0% {
+    top: 0%;
+    opacity: 0;
+  }
+
+  10% {
+    opacity: 1;
+  }
+
+  90% {
+    opacity: 1;
+  }
+
+  100% {
+    top: 100%;
+    opacity: 0;
+  }
 }
 
 @keyframes scan-overlay {
-  0% { top: -20%; }
-  100% { top: 100%; }
+  0% {
+    top: -20%;
+  }
+
+  100% {
+    top: 100%;
+  }
 }
 
 @keyframes subtitleWordIn {
@@ -268,8 +289,45 @@
     opacity: 0;
     transform: translateY(6px) scale(0.9);
   }
+
   100% {
     opacity: 1;
     transform: translateY(0) scale(1.16);
   }
+}
+
+@keyframes mesh-gradient {
+  0% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.animate-mesh {
+  background: linear-gradient(-45deg, #6d28d922, #4f46e522, #7c3aed22, #3b82f622);
+  background-size: 400% 400%;
+  animation: mesh-gradient 15s ease infinite;
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-modal-in {
+  animation: modal-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }

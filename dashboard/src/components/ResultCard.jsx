@@ -26,7 +26,7 @@ const buildTranscriptExcerpt = (segments, clipStart, clipEnd, maxChars = 420) =>
     return excerpt;
 };
 
-export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobId, uploadPostKey, uploadUserId, geminiApiKey, onPlay, onPause, onOpenStudio, onSocialPosted, onClipPatched }) {
+export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, viewMode = 'list', jobId, uploadPostKey, uploadUserId, geminiApiKey, onPlay, onPause, onOpenStudio, onSocialPosted, onClipPatched }) {
     const [showModal, setShowModal] = useState(false);
     const [showStudioModal, setShowStudioModal] = useState(false);
     const [showRecutModal, setShowRecutModal] = useState(false);
@@ -41,6 +41,7 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
     const blobUrlRef = useRef(null);
     const clipAspectRatio = clip?.aspect_ratio === '16:9' ? '16:9' : '9:16';
     const isLandscape = clipAspectRatio === '16:9';
+    const isGalleryView = viewMode === 'gallery';
 
     const [platforms, setPlatforms] = useState({
         tiktok: true,
@@ -67,10 +68,10 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
     const clipConfidence = Number.isFinite(rawConfidence) ? Math.max(0, Math.min(1, rawConfidence)) : clipScore / 100;
     const topicTags = Array.isArray(clip?.topic_tags) ? clip.topic_tags.filter((t) => typeof t === 'string' && t.trim() !== '') : [];
     const scoreBadgeClass = clipScore >= 80
-        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+        ? 'bg-emerald-100 border-emerald-300 text-emerald-700 dark:bg-emerald-500/15 dark:border-emerald-500/40 dark:text-emerald-300'
         : clipScore >= 65
-            ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
-            : 'bg-zinc-500/15 border-zinc-500/30 text-zinc-300';
+            ? 'bg-amber-100 border-amber-300 text-amber-700 dark:bg-amber-500/15 dark:border-amber-500/40 dark:text-amber-300'
+            : 'bg-slate-100 border-slate-300 text-slate-700 dark:bg-zinc-500/15 dark:border-zinc-500/30 dark:text-zinc-300';
     const [postResult, setPostResult] = useState(null);
 
     const [isEditing, setIsEditing] = useState(false);
@@ -180,7 +181,7 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
             cleanupBlobUrl();
             setPlaybackVideoUrl('');
             setVideoLoadError(null);
-            return () => {};
+            return () => { };
         }
 
         const isNgrokSource = /ngrok/i.test(sourceUrl);
@@ -188,7 +189,7 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
             cleanupBlobUrl();
             setPlaybackVideoUrl(sourceUrl);
             setVideoLoadError(null);
-            return () => {};
+            return () => { };
         }
 
         let cancelled = false;
@@ -285,7 +286,7 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
         ? transcriptDisplay
         : activeTextTab === 'virality'
             ? viralityText
-        : activeTextTab === 'hashtags'
+            : activeTextTab === 'hashtags'
                 ? hashtagsText
                 : socialText;
 
@@ -549,48 +550,48 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
         setIsEditing(true);
         setEditError(null);
         try {
-             // Use passed prop or fallback
-             const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
-             
-             if (!apiKey) {
-                 throw new Error("Falta la API Key de Gemini. Configúrala en Configuración.");
-             }
+            // Use passed prop or fallback
+            const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
 
-             const res = await apiFetch('/api/edit', {
+            if (!apiKey) {
+                throw new Error("Falta la API Key de Gemini. Configúrala en Configuración.");
+            }
+
+            const res = await apiFetch('/api/edit', {
                 method: 'POST',
-                headers: { 
+                headers: {
                     'Content-Type': 'application/json',
-                    'X-Gemini-Key': apiKey 
+                    'X-Gemini-Key': apiKey
                 },
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: clipIndex,
                     input_filename: currentVideoUrl.split('/').pop()
                 })
-             });
+            });
 
-             if (!res.ok) {
-                 const errText = await res.text();
-                 try {
-                     const jsonErr = JSON.parse(errText);
-                     throw new Error(jsonErr.detail || errText);
-                 } catch (e) {
-                     throw new Error(errText);
-                 }
-             }
+            if (!res.ok) {
+                const errText = await res.text();
+                try {
+                    const jsonErr = JSON.parse(errText);
+                    throw new Error(jsonErr.detail || errText);
+                } catch (e) {
+                    throw new Error(errText);
+                }
+            }
 
-             const data = await res.json();
-             if (data.new_video_url) {
-                 const nextUrl = getApiUrl(data.new_video_url);
-                 setCurrentVideoUrl(nextUrl);
-                 setBaseVideoUrl(nextUrl);
-                 setSubtitledVideoUrl(null);
-                 setSubtitlesEnabled(false);
-                 // Reload video
-                 if (videoRef.current) {
-                     videoRef.current.load();
-                 }
-             }
+            const data = await res.json();
+            if (data.new_video_url) {
+                const nextUrl = getApiUrl(data.new_video_url);
+                setCurrentVideoUrl(nextUrl);
+                setBaseVideoUrl(nextUrl);
+                setSubtitledVideoUrl(null);
+                setSubtitlesEnabled(false);
+                // Reload video
+                if (videoRef.current) {
+                    videoRef.current.load();
+                }
+            }
 
         } catch (e) {
             setEditError(e.message);
@@ -716,11 +717,12 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
 
     return (
         <div
-            className="bg-surface border border-white/10 rounded-2xl overflow-hidden flex flex-col md:flex-row group hover:border-primary/30 hover:shadow-xl transition-all animate-[fadeIn_0.5s_ease-out]"
+            className={`bg-white border border-slate-200 rounded-2xl overflow-hidden flex group hover:border-primary/30 hover:shadow-[0_12px_28px_rgba(15,23,42,0.12)] transition-all animate-[fadeIn_0.5s_ease-out] ${isGalleryView ? 'flex-col h-full' : 'flex-col md:flex-row'
+                }`}
             style={{ animationDelay: `${displayIndex * 0.08}s` }}
         >
             <div
-                className="w-full md:w-[220px] lg:w-[240px] bg-black relative shrink-0"
+                className={`w-full bg-black relative shrink-0 ${isGalleryView ? '' : 'md:w-[220px] lg:w-[240px]'}`}
                 style={{ aspectRatio: isLandscape ? '16 / 9' : '9 / 16' }}
             >
                 <video
@@ -768,20 +770,20 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                 )}
             </div>
 
-            <div className="flex-1 p-4 md:p-5 flex flex-col min-w-0 bg-[#121214]">
+            <div className={`flex-1 p-4 md:p-5 flex flex-col min-w-0 bg-white ${isGalleryView ? 'h-full' : ''}`}>
                 <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                        <h3 className="text-lg font-bold text-white leading-tight line-clamp-2 break-words" title={effectiveTitle}>
+                        <h3 className="text-lg font-bold text-slate-900 leading-tight line-clamp-2 break-words" title={effectiveTitle}>
                             {effectiveTitle || "Clip viral generado"}
                         </h3>
-                        <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-zinc-400">
+                        <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500">
                             <span className={`px-2 py-1 rounded-md border ${scoreBadgeClass}`}>
                                 Puntaje {clipScore}/100
                             </span>
-                            <span className="px-2 py-1 rounded-md border border-white/10 bg-white/5">
+                            <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50">
                                 Confianza {Math.round(clipConfidence * 100)}%
                             </span>
-                            <span className="px-2 py-1 rounded-md border border-white/10 bg-white/5">
+                            <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50">
                                 {formatTime(Number(clip.start || 0))} - {formatTime(Number(clip.end || 0))}
                             </span>
                         </div>
@@ -791,59 +793,55 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                             type="button"
                             onClick={handleRegenerateTitle}
                             disabled={isRegeneratingTitle || !jobId}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-white/15 bg-white/5 px-2 py-1 text-[11px] text-zinc-300 hover:bg-white/10 disabled:opacity-60 disabled:cursor-not-allowed"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100 disabled:opacity-60 disabled:cursor-not-allowed"
                             title="Regenerar título"
                         >
                             {isRegeneratingTitle ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
                             {isRegeneratingTitle ? 'Generando...' : 'Regenerar'}
                         </button>
-                        <div className="text-right px-3 py-2 rounded-lg border border-white/10 bg-white/5">
-                            <div className="text-3xl leading-none font-bold text-white">{viralityTen}</div>
-                            <div className="text-[10px] uppercase tracking-wider text-zinc-400 mt-1">Virality</div>
+                        <div className="text-right px-3 py-2 rounded-lg border border-slate-200 bg-slate-50">
+                            <div className="text-3xl leading-none font-black text-slate-900">{viralityTen}</div>
+                            <div className="text-[10px] uppercase tracking-wider text-slate-500 mt-1">Virality</div>
                         </div>
                     </div>
                 </div>
 
-                <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
+                <div className={`mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 ${isGalleryView ? 'min-h-[160px]' : ''}`}>
                     <div className="flex items-center justify-between gap-3 mb-3">
-                        <div className="flex items-center gap-5 md:gap-6 border-b border-white/10 w-full">
+                        <div className="flex items-center gap-5 md:gap-6 border-b border-slate-200 w-full">
                             <button
                                 onClick={() => setActiveTextTab('social')}
-                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${
-                                    activeTextTab === 'social'
-                                        ? 'text-primary border-primary'
-                                        : 'text-zinc-500 border-transparent hover:text-zinc-300'
-                                }`}
+                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${activeTextTab === 'social'
+                                    ? 'text-primary border-primary'
+                                    : 'text-slate-500 border-transparent hover:text-slate-700'
+                                    }`}
                             >
                                 Social
                             </button>
                             <button
                                 onClick={() => setActiveTextTab('transcript')}
-                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${
-                                    activeTextTab === 'transcript'
-                                        ? 'text-primary border-primary'
-                                        : 'text-zinc-500 border-transparent hover:text-zinc-300'
-                                }`}
+                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${activeTextTab === 'transcript'
+                                    ? 'text-primary border-primary'
+                                    : 'text-slate-500 border-transparent hover:text-slate-700'
+                                    }`}
                             >
                                 Transcripción
                             </button>
                             <button
                                 onClick={() => setActiveTextTab('hashtags')}
-                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${
-                                    activeTextTab === 'hashtags'
-                                        ? 'text-primary border-primary'
-                                        : 'text-zinc-500 border-transparent hover:text-zinc-300'
-                                }`}
+                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${activeTextTab === 'hashtags'
+                                    ? 'text-primary border-primary'
+                                    : 'text-slate-500 border-transparent hover:text-slate-700'
+                                    }`}
                             >
                                 Etiquetas
                             </button>
                             <button
                                 onClick={() => setActiveTextTab('virality')}
-                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${
-                                    activeTextTab === 'virality'
-                                        ? 'text-primary border-primary'
-                                        : 'text-zinc-500 border-transparent hover:text-zinc-300'
-                                }`}
+                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${activeTextTab === 'virality'
+                                    ? 'text-primary border-primary'
+                                    : 'text-slate-500 border-transparent hover:text-slate-700'
+                                    }`}
                             >
                                 Puntaje viral
                             </button>
@@ -853,7 +851,7 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                                 <button
                                     onClick={handleRegenerateSocial}
                                     disabled={isRegeneratingSocial || !jobId}
-                                    className="text-zinc-400 hover:text-zinc-200 p-1 rounded border border-white/10 bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    className="text-slate-400 hover:text-slate-700 p-1 rounded border border-slate-200 bg-white disabled:opacity-60 disabled:cursor-not-allowed"
                                     title="Regenerar texto social"
                                 >
                                     {isRegeneratingSocial ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
@@ -861,7 +859,7 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                             )}
                             <button
                                 onClick={handleCopyActiveText}
-                                className="text-zinc-400 hover:text-zinc-200 p-1 rounded border border-white/10 bg-white/5"
+                                className="text-slate-400 hover:text-slate-700 p-1 rounded border border-slate-200 bg-white"
                                 title="Copiar texto"
                             >
                                 <Copy size={13} />
@@ -870,11 +868,11 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                     </div>
                     {activeTextTab === 'virality' ? (
                         <div className="space-y-3">
-                            <p className="text-sm text-zinc-300 leading-relaxed break-words">{viralityText}</p>
+                            <p className="text-sm text-slate-700 leading-relaxed break-words">{viralityText}</p>
                         </div>
                     ) : activeTextTab === 'hashtags' ? (
                         <div className="space-y-3">
-                            <p className="text-xs text-zinc-400">Hashtags sugeridos para publicar este clip:</p>
+                            <p className="text-xs text-slate-500">Hashtags sugeridos para publicar este clip:</p>
                             {topicTags.length > 0 ? (
                                 <div className="flex flex-wrap gap-2">
                                     {topicTags.map((tag) => (
@@ -884,18 +882,18 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                                     ))}
                                 </div>
                             ) : (
-                                <p className="text-sm text-zinc-300">Sin hashtags sugeridos.</p>
+                                <p className="text-sm text-slate-700">Sin hashtags sugeridos.</p>
                             )}
                         </div>
                     ) : (
-                        <p className={`text-sm text-zinc-300 leading-relaxed break-words ${activeTextTab === 'transcript' ? 'font-mono text-xs' : ''}`}>
+                        <p className={`text-sm text-slate-700 leading-relaxed break-words ${activeTextTab === 'transcript' ? 'font-mono text-xs' : ''}`}>
                             {activePanelText}
                         </p>
                     )}
                 </div>
 
                 {subtitledVideoUrl && (
-                    <div className="mt-3 flex items-center gap-2 text-[11px] text-zinc-400">
+                    <div className="mt-3 flex items-center gap-2 text-[11px] text-slate-500">
                         <span>Subtítulos:</span>
                         <button
                             onClick={() => {
@@ -906,11 +904,10 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                                     videoRef.current.load();
                                 }
                             }}
-                            className={`px-2 py-1 rounded-full border transition-colors ${
-                                subtitlesEnabled
-                                    ? 'bg-yellow-500/20 border-yellow-500/40 text-yellow-300'
-                                    : 'bg-white/5 border-white/10 text-zinc-400'
-                            }`}
+                            className={`px-2 py-1 rounded-full border transition-colors ${subtitlesEnabled
+                                ? 'bg-yellow-500/20 border-yellow-500/40 text-yellow-300'
+                                : 'bg-slate-50 border-slate-200 text-slate-500'
+                                }`}
                         >
                             {subtitlesEnabled ? 'ON' : 'OFF'}
                         </button>
@@ -924,16 +921,8 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                     </div>
                 )}
 
-                <div className="mt-4 pt-4 border-t border-white/10 flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                        <button
-                            onClick={handleAutoEdit}
-                            disabled={isEditing}
-                            className="p-2.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200 disabled:opacity-60"
-                            title={isEditing ? 'Editando...' : 'Edición automática IA'}
-                        >
-                            {isEditing ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
-                        </button>
+                {isGalleryView ? (
+                    <div className="mt-4 pt-4 border-t border-slate-200 space-y-2.5">
                         <button
                             onClick={() => {
                                 if (onOpenStudio) {
@@ -942,29 +931,83 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                                 }
                                 setShowStudioModal(true);
                             }}
-                            className="py-2 px-3 rounded-lg border border-violet-300 bg-violet-100 text-violet-700 hover:bg-violet-200 dark:border-violet-400/40 dark:bg-violet-500/15 dark:hover:bg-violet-500/25 dark:text-violet-200 transition-colors inline-flex items-center gap-2 shadow-sm"
+                            className="w-full py-2.5 px-3 rounded-full border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-colors inline-flex items-center justify-center gap-2"
                             title="Editar clip"
                         >
                             <Pencil size={14} />
-                            <span className="text-sm font-medium">Editar</span>
+                            <span className="text-sm font-medium">Editar clip</span>
                         </button>
+                        <div className="grid grid-cols-2 gap-2">
+                            <button
+                                onClick={handleDownload}
+                                className="py-2.5 px-3 bg-[#f97316] hover:bg-[#fb923c] rounded-full transition-all active:scale-[0.98] inline-flex items-center justify-center gap-2 !text-white"
+                            >
+                                <Download size={14} className="!text-white" />
+                                <span className="text-sm font-semibold !text-white">Descargar</span>
+                            </button>
+                            <button
+                                onClick={() => setShowModal(true)}
+                                className="py-2.5 px-3 bg-[#10b981] hover:bg-[#34d399] rounded-full transition-colors inline-flex items-center justify-center gap-2 !text-white"
+                            >
+                                <Share2 size={14} className="!text-white" />
+                                <span className="text-sm font-semibold !text-white">Publicar</span>
+                            </button>
+                        </div>
+                        <div className="flex items-center justify-end">
+                            <button
+                                onClick={handleAutoEdit}
+                                disabled={isEditing}
+                                className="p-2 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 disabled:opacity-60 inline-flex items-center gap-1.5 text-xs font-medium"
+                                title={isEditing ? 'Editando...' : 'Edición automática IA'}
+                            >
+                                {isEditing ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
+                                {isEditing ? 'Aplicando...' : 'Mejorar IA'}
+                            </button>
+                        </div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2 ml-auto">
-                        <button
-                            onClick={handleDownload}
-                            className="py-2.5 px-5 bg-gradient-to-r from-emerald-600 to-green-500 hover:from-emerald-500 hover:to-green-400 rounded-lg transition-all active:scale-[0.98] inline-flex items-center gap-2 shadow-lg shadow-emerald-900/35 !text-white"
-                        >
-                            <Download size={15} className="text-white" />
-                            <span className="text-sm font-semibold text-white">Descargar</span>
-                        </button>
+                ) : (
+                    <div className="mt-4 pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={handleAutoEdit}
+                                disabled={isEditing}
+                                className="p-2.5 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 disabled:opacity-60"
+                                title={isEditing ? 'Editando...' : 'Edición automática IA'}
+                            >
+                                {isEditing ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
+                            </button>
+                            <button
+                                onClick={() => {
+                                    if (onOpenStudio) {
+                                        onOpenStudio({ clip, clipIndex, currentVideoUrl });
+                                        return;
+                                    }
+                                    setShowStudioModal(true);
+                                }}
+                                className="py-2 px-3 rounded-full border border-violet-300 bg-violet-100 text-violet-700 hover:bg-violet-200 dark:border-violet-400/40 dark:bg-violet-500/15 dark:hover:bg-violet-500/25 dark:text-violet-200 transition-colors inline-flex items-center gap-2"
+                                title="Editar clip"
+                            >
+                                <Pencil size={14} />
+                                <span className="text-sm font-medium">Editar</span>
+                            </button>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 ml-auto">
+                            <button
+                                onClick={handleDownload}
+                                className="py-2.5 px-5 bg-[#f97316] hover:bg-[#fb923c] rounded-full transition-all active:scale-[0.98] inline-flex items-center gap-2 !text-white"
+                            >
+                                <Download size={15} className="!text-white" />
+                                <span className="text-sm font-semibold !text-white">Descargar</span>
+                            </button>
+                        </div>
                     </div>
-                </div>
+                )}
             </div>
 
             {/* Post Modal */}
             {showModal && (
                 <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-                    <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-md shadow-2xl relative max-h-[90vh] overflow-y-auto custom-scrollbar">
+                    <div className="bg-[#121214] border border-white/10 p-6 rounded-3xl w-full max-w-md shadow-2xl relative max-h-[90vh] overflow-y-auto custom-scrollbar">
                         <button
                             onClick={() => setShowModal(false)}
                             className="absolute top-4 right-4 text-zinc-500 hover:text-white"
@@ -975,7 +1018,7 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                         <h3 className="text-lg font-bold text-white mb-4">Publicar / Programar</h3>
 
                         {!uploadPostKey && (
-                            <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200 text-xs rounded-lg flex items-start gap-2">
+                            <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200 text-xs rounded-full flex items-start gap-2">
                                 <AlertCircle size={14} className="mt-0.5 shrink-0" />
                                 <div>Configura primero la API Key en Configuración.</div>
                             </div>
@@ -985,22 +1028,22 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                             {/* Title & Description */}
                             <div>
                                 <label className="block text-xs font-bold text-zinc-400 mb-1">Título del video</label>
-                                <input 
-                                    type="text" 
+                                <input
+                                    type="text"
                                     value={postTitle}
                                     onChange={(e) => setPostTitle(e.target.value)}
-                                    className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600"
+                                    className="w-full bg-black/40 border border-white/10 rounded-full py-2 px-4 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600"
                                     placeholder="Escribe un título llamativo..."
                                 />
                             </div>
 
                             <div>
                                 <label className="block text-xs font-bold text-zinc-400 mb-1">Texto / Descripción</label>
-                                <textarea 
+                                <textarea
                                     value={postDescription}
                                     onChange={(e) => setPostDescription(e.target.value)}
                                     rows={4}
-                                    className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-none"
+                                    className="w-full bg-black/40 border border-white/10 rounded-3xl p-3 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-none"
                                     placeholder="Escribe un texto para tu publicación..."
                                 />
                             </div>
@@ -1016,13 +1059,13 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, jobI
                                         <div className="w-9 h-5 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-600"></div>
                                     </label>
                                 </div>
-                                
+
                                 {isScheduling && (
                                     <div className="mt-3 animate-[fadeIn_0.2s_ease-out]">
                                         <label className="block text-xs text-zinc-400 mb-1">Selecciona fecha y hora</label>
                                         <div className="relative">
-                                            <input 
-                                                type="datetime-local" 
+                                            <input
+                                                type="datetime-local"
                                                 value={scheduleDate}
                                                 onChange={(e) => setScheduleDate(e.target.value)}
                                                 className="w-full bg-black/40 border border-white/10 rounded-lg p-2 pl-9 text-sm text-white focus:outline-none focus:border-purple-500/50 [color-scheme:dark]"

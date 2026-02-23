@@ -1,6 +1,49 @@
 # Registro de Cambios
 
+## 2026-02-23
+
+### Corregido: fondo del Home ya no se corta en la parte inferior
+- Qué cambiamos:
+  - En `dashboard/src/App.jsx` movimos la capa decorativa del fondo del Home al contenedor raíz de la app.
+  - El fondo ambiental ahora se renderiza como `absolute inset-0` en el root (solo cuando `activeTab === 'home'`) en lugar de estar anidado dentro del bloque central.
+  - Se eliminó la capa previa que estaba dentro de la sección Home.
+- Para qué sirve:
+  - Evita el “corte” visual del degradado cuando cambia el layout/altura.
+  - Hace que el glow de fondo se mantenga continuo en toda la pantalla del Home.
+
 ## 2026-02-21
+
+### Nuevo: selector de vista en Proyectos (Lista / Galería) para clips virales
+- Qué cambiamos:
+  - En `dashboard/src/App.jsx` se agregó estado persistente `clipsViewMode` (`list` | `gallery`) con `localStorage` (`clipsViewModePreset`).
+  - En la cabecera de `Clips generados` se agregó un switch visual `Lista / Galería`.
+  - En el render de resultados, la grilla ahora cambia dinámicamente:
+    - `list`: layout vertical tradicional.
+    - `gallery`: tarjetas en 1/2/3 columnas.
+  - En `dashboard/src/components/ResultCard.jsx` se añadió prop `viewMode` para adaptar el card:
+    - layout de tarjeta para galería,
+    - acciones compactas estilo card (`Editar clip`, `Descargar`, `Publicar`),
+    - mantiene lógica existente (regenerar, copiar, editar, descargar, modal de publicar).
+- Para qué sirve:
+  - Permite que el usuario elija cómo visualizar los clips generados según preferencia.
+  - Mantiene el flujo actual pero añade una vista alternativa tipo “galería”.
+
+### Ajustado: rediseño visual de la pestaña Proyectos (Procesamiento + clips virales)
+- Qué cambiamos:
+  - En `dashboard/src/App.jsx` se renovó la estética del bloque de `Procesamiento del proyecto`:
+    - card principal más limpia (bordes suaves, sombra ligera),
+    - botones de acción (`Recargar`, `Eliminar`, `Pausar/Reanudar`) con estilo consistente tipo toolbar.
+  - En `dashboard/src/App.jsx` se rediseñó el bloque de resultados:
+    - cabecera de `Clips generados` más clara,
+    - barra de filtros/acciones en contenedor visual unificado (orden, filtro, etiqueta, estrategia, cola, exportar paquete, super trailer),
+    - paneles de búsqueda semántica y transcript con look claro y mejor contraste.
+  - En `dashboard/src/components/ResultCard.jsx` se migró la tarjeta de clip viral a estilo claro:
+    - fondo blanco, bordes suaves y jerarquía visual de score/metadata,
+    - tabs de `Social / Transcripción / Etiquetas / Puntaje viral` con mejor legibilidad,
+    - acciones `Regenerar`, `Editar`, `Descargar` y controles secundarios con contraste consistente.
+- Para qué sirve:
+  - Acerca la UI al estilo visual de referencia manteniendo la lógica actual intacta.
+  - Mejora legibilidad y consistencia visual en toda la vista de proyectos.
 
 ### Corregido: “Regenerar” ahora rota variantes pre-generadas (sin depender siempre de Gemini en vivo)
 - Qué cambiamos:

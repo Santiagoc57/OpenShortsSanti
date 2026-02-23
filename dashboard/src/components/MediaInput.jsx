@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Youtube, Upload, FileVideo, X, CheckCircle2, Settings2, Clapperboard, Zap } from 'lucide-react';
+import { Youtube, Upload, FileVideo, X, CheckCircle2, Settings2, Clapperboard, Zap, Bot, SlidersHorizontal, Smartphone, Monitor } from 'lucide-react';
 
 const MEDIA_INPUT_STORAGE_KEY = 'mediaInputPresetV2';
 
@@ -304,7 +304,8 @@ function loadStoredMediaInputConfig() {
 export default function MediaInput({
     onProcess,
     isProcessing,
-    apiKey = ''
+    apiKey = '',
+    prefillFile = null
 }) {
     const [initialConfig] = useState(() => loadStoredMediaInputConfig());
     const [mode, setMode] = useState('file'); // 'url' | 'file'
@@ -326,6 +327,7 @@ export default function MediaInput({
     const [generationMode, setGenerationMode] = useState(initialConfig?.generationMode ?? 'clips');
     const [llmModel, setLlmModel] = useState(initialConfig?.llmModel ?? 'gemini-2.5-flash-lite');
     const [showConfigModal, setShowConfigModal] = useState(false);
+    const [configTab, setConfigTab] = useState('general');
     const whisperModelOptions = MODEL_OPTIONS_BY_BACKEND[whisperBackend] || MODEL_OPTIONS_BY_BACKEND.openai;
 
     useEffect(() => {
@@ -387,6 +389,24 @@ export default function MediaInput({
             setWhisperModel(normalizedModel);
         }
     }, [whisperBackend, whisperModel]);
+
+    useEffect(() => {
+        if (showConfigModal) setConfigTab('general');
+    }, [showConfigModal]);
+
+    useEffect(() => {
+        const injectedFile = prefillFile?.file;
+        if (!injectedFile) return;
+        const type = String(injectedFile.type || '').toLowerCase();
+        const name = String(injectedFile.name || '').toLowerCase();
+        const looksLikeMedia = type.startsWith('video/')
+            || type.startsWith('audio/')
+            || /\.(mp4|mov|m4a|mp3|wav|mkv|webm)$/i.test(name);
+        if (!looksLikeMedia) return;
+        setMode('file');
+        setFile(injectedFile);
+        setShowConfigModal(true);
+    }, [prefillFile]);
 
     const applyTemplate = (templateId) => {
         const preset = TEMPLATE_PRESETS.find((p) => p.id === templateId);
@@ -469,26 +489,26 @@ export default function MediaInput({
 
     return (
         <>
-            <div className="bg-white/90 dark:bg-surface border border-slate-200 dark:border-white/10 rounded-2xl p-6 shadow-sm animate-[fadeIn_0.6s_ease-out]">
-                <div className="flex gap-4 mb-6 border-b border-slate-200 dark:border-white/5 pb-4">
+            <div className="w-full max-w-3xl mx-auto bg-white/95 dark:bg-surface border border-slate-100 dark:border-white/10 rounded-2xl p-4 md:p-5 shadow-[0_18px_50px_rgba(139,92,246,0.14)] dark:shadow-none animate-[fadeIn_0.6s_ease-out]">
+                <div className="flex gap-6 px-2 mb-5 border-b border-slate-200 dark:border-white/10">
                     <button
                         onClick={() => setMode('url')}
-                        className={`flex items-center gap-2 pb-2 px-2 transition-all ${mode === 'url'
-                            ? 'text-primary border-b-2 border-primary -mb-[17px]'
-                            : 'text-zinc-500 hover:text-slate-900 dark:hover:text-white'
+                        className={`flex items-center gap-1.5 pb-3 px-0.5 text-sm font-medium transition-all border-b-2 ${mode === 'url'
+                            ? 'text-primary border-primary'
+                            : 'text-slate-500 dark:text-zinc-400 border-transparent hover:text-slate-900 dark:hover:text-white hover:border-slate-300 dark:hover:border-slate-600'
                             }`}
                     >
-                        <Youtube size={18} />
+                        <Youtube size={14} />
                         URL de YouTube
                     </button>
                     <button
                         onClick={() => setMode('file')}
-                        className={`flex items-center gap-2 pb-2 px-2 transition-all ${mode === 'file'
-                            ? 'text-primary border-b-2 border-primary -mb-[17px]'
-                            : 'text-zinc-500 hover:text-slate-900 dark:hover:text-white'
+                        className={`flex items-center gap-1.5 pb-3 px-0.5 text-sm font-medium transition-all border-b-2 ${mode === 'file'
+                            ? 'text-primary border-primary'
+                            : 'text-slate-500 dark:text-zinc-400 border-transparent hover:text-slate-900 dark:hover:text-white hover:border-slate-300 dark:hover:border-slate-600'
                             }`}
                     >
-                        <Upload size={18} />
+                        <Upload size={14} />
                         Subir archivo
                     </button>
                 </div>
@@ -505,7 +525,7 @@ export default function MediaInput({
                     </div>
                 ) : (
                     <div
-                        className={`border-2 border-dashed rounded-xl p-8 text-center transition-all ${file ? 'border-primary/50 bg-primary/5' : 'border-slate-300 dark:border-zinc-700 hover:border-primary/40 bg-slate-50/70 dark:bg-white/5'}`}
+                        className={`border-2 border-dashed rounded-xl p-10 md:p-12 text-center transition-all ${file ? 'border-primary/50 bg-primary/5' : 'border-violet-200 dark:border-zinc-700 hover:border-primary/40 bg-slate-50/60 dark:bg-white/5'}`}
                         onDragOver={(e) => e.preventDefault()}
                         onDrop={handleDrop}
                     >
@@ -522,7 +542,7 @@ export default function MediaInput({
                                 </button>
                             </div>
                         ) : (
-                            <label className="cursor-pointer block">
+                            <label className="cursor-pointer block group">
                                 <input
                                     type="file"
                                     accept="video/*,audio/*"
@@ -536,9 +556,11 @@ export default function MediaInput({
                                     }}
                                     className="hidden"
                                 />
-                                <Upload className="mx-auto mb-3 text-zinc-500" size={24} />
-                                <p className="text-zinc-600 dark:text-zinc-400">Haz clic para subir o arrastra y suelta</p>
-                                <p className="text-xs text-zinc-500 dark:text-zinc-600 mt-1">MP4, MOV, MP3, WAV, M4A hasta 500MB</p>
+                                <div className="mx-auto mb-4 w-10 h-10 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm flex items-center justify-center text-primary group-hover:scale-105 transition-transform">
+                                    <Upload size={18} />
+                                </div>
+                                <p className="text-slate-800 dark:text-slate-200 font-medium">Haz clic para subir o arrastra y suelta</p>
+                                <p className="text-xs text-slate-500 dark:text-zinc-500 mt-1">MP4, MOV, MP3, WAV, M4A hasta 500MB</p>
                             </label>
                         )}
                     </div>
@@ -548,7 +570,7 @@ export default function MediaInput({
                     type="button"
                     disabled={isProcessing || !canConfigure}
                     onClick={() => setShowConfigModal(true)}
-                    className="w-full btn-primary mt-6 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="w-full mt-5 rounded-full bg-gradient-to-r from-[#ba9df8] via-[#aa8cf5] to-[#946ff1] hover:brightness-95 !text-white font-medium py-3.5 px-6 shadow-[0_10px_24px_rgba(139,92,246,0.35)] transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                     <Settings2 size={16} />
                     {mode === 'file' ? 'Configurar y generar' : 'Continuar a configuración'}
@@ -556,376 +578,461 @@ export default function MediaInput({
             </div>
 
             {showConfigModal && (
-                <div className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-sm overflow-y-auto p-4 md:p-6">
-                    <div className="mx-auto my-4 md:my-8 w-full max-w-5xl rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 p-5 md:p-8 shadow-2xl">
-                        <div className="mb-8 flex items-start justify-between gap-4">
-                            <div>
-                                <h3 className="text-2xl md:text-3xl font-bold text-slate-900 dark:text-white">Configura tu video antes de generar</h3>
-                                <p className="text-sm text-slate-500 dark:text-slate-400 mt-2">
-                                    Fuente: <span className="font-semibold text-slate-900 dark:text-white">{mode === 'file' ? (file?.name || 'Archivo local') : 'URL de YouTube'}</span>
-                                </p>
-                            </div>
-                            <button
-                                type="button"
-                                onClick={() => setShowConfigModal(false)}
-                                className="p-2 rounded-full text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-200/80 dark:hover:bg-slate-800 transition-colors"
-                            >
-                                <X size={20} />
-                            </button>
-                        </div>
+                <div className="fixed inset-0 z-[110] p-4 md:p-6 overflow-y-auto flex items-center justify-center">
+                    {/* Animated Mesh Gradient Overlay */}
+                    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-md animate-mesh" />
 
-                        <div className="space-y-8">
-                            <div className={modalCardClass}>
-                                <div className="flex items-center justify-between gap-2 mb-4">
-                                    <div>
-                                        <h4 className="text-base font-bold text-slate-900 dark:text-white">¿Qué quieres generar?</h4>
-                                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Selecciona el modo de generación. Después iremos sumando nuevas habilidades.</p>
-                                    </div>
-                                    <span className="px-3 py-1 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 text-[10px] font-bold tracking-wider uppercase rounded-full">Modo</span>
+                    {/* Modal Container with Entrance Animation */}
+                    <div className="relative w-full max-w-4xl rounded-3xl border border-white/20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-2xl shadow-[0_32px_120px_rgba(0,0,0,0.5)] overflow-hidden flex flex-col max-h-[90vh] animate-modal-in">
+                        <div className="px-6 md:px-8 py-6 border-b border-white/10 bg-white/40 dark:bg-slate-800/40 backdrop-blur-md">
+                            <div className="flex items-start justify-between gap-4">
+                                <div>
+                                    <h3 className="text-2xl font-bold text-slate-900 dark:text-white">Configura tu video</h3>
+                                    <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Define los parámetros antes de generar el contenido</p>
                                 </div>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    <button
-                                        type="button"
-                                        onClick={() => setGenerationMode('clips')}
-                                        className={`rounded-xl border p-4 text-left transition-all ${generationMode === 'clips'
-                                            ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
-                                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700'
-                                            }`}
-                                    >
-                                        <div className="flex items-center gap-2">
-                                            <Clapperboard size={16} className={generationMode === 'clips' ? 'text-primary' : 'text-slate-500'} />
-                                            <span className={`font-semibold ${generationMode === 'clips' ? 'text-primary' : 'text-slate-800 dark:text-slate-200'}`}>Clips virales</span>
-                                        </div>
-                                        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Detecta y renderiza varios clips listos para Shorts/Reels.</p>
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setGenerationMode('trailer')}
-                                        className={`rounded-xl border p-4 text-left transition-all ${generationMode === 'trailer'
-                                            ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
-                                            : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700'
-                                            }`}
-                                    >
-                                        <div className="flex items-center gap-2">
-                                            <Zap size={16} className={generationMode === 'trailer' ? 'text-primary' : 'text-slate-500'} />
-                                            <span className={`font-semibold ${generationMode === 'trailer' ? 'text-primary' : 'text-slate-800 dark:text-slate-200'}`}>Super Trailer</span>
-                                        </div>
-                                        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Modo dedicado para generar solo el montaje resumen rápido.</p>
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div className="space-y-2">
-                                    <label className={modalLabelClass}>Formato de salida</label>
-                                    <select
-                                        value={aspectRatio}
-                                        onChange={(e) => setAspectRatio(e.target.value)}
-                                        className={modalInputClass}
-                                    >
-                                        <option value="9:16">9:16 (Vertical Shorts/Reels/TikTok)</option>
-                                        <option value="16:9">16:9 (Horizontal YouTube/Presentación)</option>
-                                    </select>
-                                </div>
-                                <div className="space-y-2">
-                                    <label className={modalLabelClass}>Duración objetivo del clip</label>
-                                    <select
-                                        value={clipLengthTarget}
-                                        onChange={(e) => setClipLengthTarget(e.target.value)}
-                                        className={modalInputClass}
-                                    >
-                                        <option value="balanced">30-45s (equilibrado)</option>
-                                        <option value="short">&lt;30s (hook rápido)</option>
-                                        <option value="long">45-60s (contexto)</option>
-                                    </select>
-                                    <p className="text-[10px] text-zinc-500 mt-1">
-                                        Duración preferida de los clips resultantes.
-                                    </p>
-                                </div>
-                                <div className="space-y-2">
-                                    <label className={modalLabelClass}>Modelo (Gemini)</label>
-                                    <select
-                                        value={llmModel}
-                                        onChange={(e) => setLlmModel(e.target.value)}
-                                        className={modalInputClass}
-                                    >
-                                        {LLM_MODEL_OPTIONS.gemini.map(opt => (
-                                            <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                        ))}
-                                    </select>
-                                    <p className="text-[10px] text-zinc-500 mt-1">
-                                        Recomendado: gemini-2.5-flash-lite para velocidad y precisión.
-                                    </p>
-                                </div>
-                            </div>
-
-                            <div className={modalCardClass}>
-                                <div className="flex items-center justify-between gap-2 mb-4">
-                                    <div>
-                                        <h4 className="text-base font-bold text-slate-900 dark:text-white">Tipo de contenido</h4>
-                                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Preajuste rápido para adaptar el motor al formato del video.</p>
-                                    </div>
-                                    <span className="px-3 py-1 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 text-[10px] font-bold tracking-wider uppercase rounded-full">Perfil</span>
-                                </div>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                                    {CONTENT_PRESETS.map((preset) => {
-                                        const selected = selectedContentPreset === preset.id;
-                                        return (
-                                            <button
-                                                key={preset.id}
-                                                type="button"
-                                                onClick={() => applyContentPreset(preset.id)}
-                                                className={`relative rounded-xl p-3 text-left transition-all ${selected
-                                                    ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
-                                                    : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700 hover:shadow-md'
-                                                    }`}
-                                            >
-                                                <h5 className={`font-bold text-sm ${selected ? 'text-primary' : 'text-slate-800 dark:text-slate-200'}`}>{preset.name}</h5>
-                                                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{preset.subtitle}</p>
-                                                {selected && (
-                                                    <div className="absolute top-3 right-3 text-primary">
-                                                        <CheckCircle2 size={16} />
-                                                    </div>
-                                                )}
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-
-                            <div className={modalCardClass}>
-                                <div className="flex items-center justify-between gap-2 mb-5">
-                                    <div>
-                                        <h4 className="text-base font-bold text-slate-900 dark:text-white">Plantillas rápidas</h4>
-                                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Un clic para cargar configuración completa del proyecto.</p>
-                                    </div>
-                                    <span className="px-3 py-1 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 text-[10px] font-bold tracking-wider uppercase rounded-full">Preajuste</span>
-                                </div>
-                                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
-                                    {TEMPLATE_PRESETS.map((preset) => {
-                                        const selected = selectedTemplate === preset.id;
-                                        return (
-                                            <button
-                                                key={preset.id}
-                                                type="button"
-                                                onClick={() => applyTemplate(preset.id)}
-                                                className="group text-left"
-                                            >
-                                                <div className={`relative aspect-[9/16] rounded-xl overflow-hidden transition-all ${selected
-                                                    ? 'border-[3px] border-primary shadow-lg ring-4 ring-primary/10'
-                                                    : 'border border-slate-200 dark:border-slate-700 group-hover:border-primary group-hover:shadow-lg'
-                                                    }`}>
-                                                    <div className={`absolute inset-0 bg-gradient-to-br ${preset.gradient} opacity-90`} />
-                                                    <div className="absolute top-2 left-2 bg-black/50 backdrop-blur text-white text-[10px] font-bold px-1.5 py-0.5 rounded">1.00</div>
-                                                    <div className="absolute bottom-6 left-2 right-2">
-                                                        <div className="bg-black/70 backdrop-blur-sm text-white text-[10px] p-1.5 text-center rounded-lg">Aquí va tu subtítulo</div>
-                                                    </div>
-                                                    {selected && (
-                                                        <div className="absolute top-2 right-2 bg-primary text-white rounded-full w-5 h-5 flex items-center justify-center shadow-md">
-                                                            <CheckCircle2 size={14} />
-                                                        </div>
-                                                    )}
-                                                </div>
-                                                <div className="mt-2 px-1">
-                                                    <h5 className={`font-bold text-sm ${selected ? 'text-primary' : 'text-slate-900 dark:text-white group-hover:text-primary'}`}>{preset.name}</h5>
-                                                    <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight truncate">{preset.subtitle}</p>
-                                                </div>
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div className="space-y-2">
-                                    <label className={modalLabelClass}>Idioma del video</label>
-                                    <select
-                                        value={language}
-                                        onChange={(e) => setLanguage(e.target.value)}
-                                        className={modalInputClass}
-                                    >
-                                        <option value="es">Español</option>
-                                        <option value="en">Inglés</option>
-                                        <option value="fr">Francés</option>
-                                        <option value="de">Alemán</option>
-                                        <option value="it">Italiano</option>
-                                        <option value="pt">Portugués</option>
-                                        <option value="auto">Detectar automáticamente</option>
-                                    </select>
-                                </div>
-                                <div className="space-y-2">
-                                    <label className={modalLabelClass}>Número de clips</label>
-                                    <input
-                                        type="number"
-                                        min="1"
-                                        max="15"
-                                        value={clipCount}
-                                        onChange={(e) => setClipCount(Number(e.target.value || 1))}
-                                        disabled={generationMode === 'trailer'}
-                                        className={modalInputClass}
-                                    />
-                                    {generationMode === 'trailer' && (
-                                        <p className="text-[10px] text-amber-600 dark:text-amber-400">En modo Super Trailer este valor no se usa.</p>
-                                    )}
-                                </div>
-                                {generationMode === 'trailer' && (
-                                    <div className="space-y-2">
-                                        <label className={modalLabelClass}>Segmentos destacados (Super Trailer)</label>
-                                        <input
-                                            type="number"
-                                            min="2"
-                                            max="12"
-                                            value={trailerFragmentsTarget}
-                                            onChange={(e) => {
-                                                const nextValue = Number(e.target.value || 6);
-                                                setTrailerFragmentsTarget(Math.max(2, Math.min(12, Math.round(nextValue))));
-                                            }}
-                                            className={modalInputClass}
-                                        />
-                                        <p className="text-[10px] text-zinc-500 mt-1">
-                                            Cantidad de momentos que quieres en el montaje del trailer.
-                                        </p>
-                                    </div>
-                                )}
-                            </div>
-
-                            <div className={modalCardClass}>
-                                <div className="flex items-center justify-between gap-2 mb-4">
-                                    <div>
-                                        <h4 className="text-base font-bold text-slate-900 dark:text-white">Whisper opciones</h4>
-                                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Preajustes para velocidad y precisión de transcripción.</p>
-                                    </div>
-                                    <span className="px-3 py-1 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 text-[10px] font-bold tracking-wider uppercase rounded-full">Preajuste</span>
-                                </div>
-
-                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
-                                    {WHISPER_OPTION_PRESETS.map((preset) => {
-                                        const selected = selectedWhisperOption === preset.id;
-                                        return (
-                                            <button
-                                                key={preset.id}
-                                                type="button"
-                                                onClick={() => applyWhisperOptionPreset(preset.id)}
-                                                className={`rounded-xl p-3 text-left transition-all ${selected
-                                                    ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
-                                                    : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700 hover:shadow-md'
-                                                    }`}
-                                            >
-                                                <p className={`text-sm font-bold ${selected ? 'text-primary' : 'text-slate-800 dark:text-slate-200'}`}>{preset.name}</p>
-                                                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">{preset.subtitle}</p>
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                                {selectedWhisperOption === 'custom' && (
-                                    <p className="mb-4 text-[11px] text-slate-500 dark:text-slate-400">Modo personalizado activo (ajustes manuales).</p>
-                                )}
-
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <div className="space-y-2">
-                                        <label className={modalLabelClass}>Whisper backend</label>
-                                        <select
-                                            value={whisperBackend}
-                                            onChange={(e) => {
-                                                const nextBackend = e.target.value;
-                                                setWhisperBackend(nextBackend);
-                                                setWhisperModel(normalizeWhisperModelForBackend(nextBackend, whisperModel));
-                                                setSelectedWhisperOption('custom');
-                                            }}
-                                            className={modalInputClass}
-                                        >
-                                            <option value="faster">faster-whisper (predeterminado)</option>
-                                            <option value="openai">openai-whisper (compatibilidad)</option>
-                                        </select>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <label className={modalLabelClass}>Modelo Whisper</label>
-                                        <select
-                                            value={whisperModel}
-                                            onChange={(e) => {
-                                                setWhisperModel(e.target.value);
-                                                setSelectedWhisperOption('custom');
-                                            }}
-                                            className={modalInputClass}
-                                        >
-                                            {whisperModelOptions.map((modelOpt) => (
-                                                <option key={modelOpt.value} value={modelOpt.value}>
-                                                    {modelOpt.label}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <label className={modalLabelClass}>Subtítulos precisos (marcas por palabra)</label>
-                                        <select
-                                            value={wordTimestamps ? 'yes' : 'no'}
-                                            onChange={(e) => {
-                                                setWordTimestamps(e.target.value === 'yes');
-                                                setSelectedWhisperOption('custom');
-                                            }}
-                                            className={modalInputClass}
-                                        >
-                                            <option value="yes">Sí (más lento)</option>
-                                            <option value="no">No (más rápido)</option>
-                                        </select>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <label className={modalLabelClass}>FFmpeg preset</label>
-                                        <select
-                                            value={ffmpegPreset}
-                                            onChange={(e) => {
-                                                setFfmpegPreset(e.target.value);
-                                                setSelectedWhisperOption('custom');
-                                            }}
-                                            className={modalInputClass}
-                                        >
-                                            <option value="ultrafast">ultrafast (más rápido)</option>
-                                            <option value="fast">fast</option>
-                                            <option value="medium">medium (mejor calidad)</option>
-                                        </select>
-                                    </div>
-                                </div>
-
-                                <div className="mt-5 space-y-2">
-                                    <label className={modalLabelClass}>Calidad de video (CRF)</label>
-                                    <input
-                                        type="number"
-                                        min="18"
-                                        max="30"
-                                        value={ffmpegCrf}
-                                        onChange={(e) => {
-                                            setFfmpegCrf(Number(e.target.value || 23));
-                                            setSelectedWhisperOption('custom');
-                                        }}
-                                        className={modalInputClass}
-                                    />
-                                </div>
-                            </div>
-
-                            <div className="flex flex-col-reverse sm:flex-row justify-end items-center gap-3 pt-2 pb-1">
                                 <button
                                     type="button"
                                     onClick={() => setShowConfigModal(false)}
-                                    className="w-full sm:w-auto px-8 py-3 rounded-xl border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-white font-medium hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                    className="p-2 rounded-full text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-200/80 dark:hover:bg-slate-700 transition-colors"
+                                    title="Cerrar"
                                 >
-                                    Cancelar
+                                    <X size={18} />
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="px-6 md:px-8 border-b border-white/10 bg-white/20 dark:bg-slate-900/20">
+                            <div className="flex items-center gap-1 overflow-x-auto">
+                                <button
+                                    type="button"
+                                    onClick={() => setConfigTab('general')}
+                                    className={`inline-flex items-center gap-2 whitespace-nowrap px-4 py-3 text-sm font-semibold border-b-2 transition-colors ${configTab === 'general'
+                                        ? 'border-primary text-primary bg-primary/5'
+                                        : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                                        }`}
+                                >
+                                    <Settings2 size={15} />
+                                    General
                                 </button>
                                 <button
                                     type="button"
-                                    onClick={handleGenerate}
-                                    disabled={isProcessing || !canConfigure}
-                                    className="w-full sm:w-auto btn-primary flex items-center justify-center gap-2 px-10 py-3 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    onClick={() => setConfigTab('content')}
+                                    className={`inline-flex items-center gap-2 whitespace-nowrap px-4 py-3 text-sm font-semibold border-b-2 transition-colors ${configTab === 'content'
+                                        ? 'border-primary text-primary bg-primary/5'
+                                        : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                                        }`}
                                 >
-                                    {isProcessing ? (
-                                        <>
-                                            <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                            Procesando video...
-                                        </>
-                                    ) : (
-                                        <>{generationMode === 'trailer' ? 'Generar Super Trailer' : 'Generar clips virales'}</>
-                                    )}
+                                    <Bot size={15} />
+                                    Contenido e IA
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setConfigTab('advanced')}
+                                    className={`inline-flex items-center gap-2 whitespace-nowrap px-4 py-3 text-sm font-semibold border-b-2 transition-colors ${configTab === 'advanced'
+                                        ? 'border-primary text-primary bg-primary/5'
+                                        : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                                        }`}
+                                >
+                                    <SlidersHorizontal size={15} />
+                                    Avanzado
                                 </button>
                             </div>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto custom-scrollbar px-6 md:px-8 py-6 space-y-6">
+                            {configTab === 'general' && (
+                                <div className="space-y-6">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => setGenerationMode('clips')}
+                                            className={`relative rounded-xl border p-4 text-left transition-all ${generationMode === 'clips'
+                                                ? 'border-primary bg-primary/10 ring-1 ring-primary/20'
+                                                : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/60'
+                                                }`}
+                                        >
+                                            <div className="flex items-start gap-3">
+                                                <div className={`w-9 h-9 rounded-full flex items-center justify-center ${generationMode === 'clips' ? 'bg-primary/15 text-primary' : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300'}`}>
+                                                    <Clapperboard size={16} />
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <h4 className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                                                        Clips Virales
+                                                    </h4>
+                                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Detecta y extrae automáticamente los momentos más atractivos para TikTok/Reels.</p>
+                                                </div>
+                                            </div>
+                                            {generationMode === 'clips' && (
+                                                <div className="absolute top-3 right-3 text-primary">
+                                                    <CheckCircle2 size={16} />
+                                                </div>
+                                            )}
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => setGenerationMode('trailer')}
+                                            className={`relative rounded-xl border p-4 text-left transition-all ${generationMode === 'trailer'
+                                                ? 'border-primary bg-primary/10 ring-1 ring-primary/20'
+                                                : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/60'
+                                                }`}
+                                        >
+                                            <div className="flex items-start gap-3">
+                                                <div className={`w-9 h-9 rounded-full flex items-center justify-center ${generationMode === 'trailer' ? 'bg-primary/15 text-primary' : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300'}`}>
+                                                    <Zap size={16} />
+                                                </div>
+                                                <div>
+                                                    <h4 className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                                                        Super Trailer
+                                                    </h4>
+                                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Condensa todo el video en un trailer dinámico de alta retención.</p>
+                                                </div>
+                                            </div>
+                                        </button>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div>
+                                            <label className={`${modalLabelClass} mb-3`}>Formato de salida</label>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setAspectRatio('9:16')}
+                                                    className={`inline-flex items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors ${aspectRatio === '9:16'
+                                                        ? 'border-primary bg-primary/10 text-primary'
+                                                        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800'
+                                                        }`}
+                                                >
+                                                    <Smartphone size={15} />
+                                                    9:16 Vertical
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setAspectRatio('16:9')}
+                                                    className={`inline-flex items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors ${aspectRatio === '16:9'
+                                                        ? 'border-primary bg-primary/10 text-primary'
+                                                        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800'
+                                                        }`}
+                                                >
+                                                    <Monitor size={15} />
+                                                    16:9 Horizontal
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div>
+                                            <label className={`${modalLabelClass} mb-3`}>Duración objetivo</label>
+                                            <div className="flex rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 p-1">
+                                                {[
+                                                    { key: 'short', label: 'Corto' },
+                                                    { key: 'balanced', label: 'Equilibrado' },
+                                                    { key: 'long', label: 'Largo' }
+                                                ].map((item) => (
+                                                    <button
+                                                        key={item.key}
+                                                        type="button"
+                                                        onClick={() => setClipLengthTarget(item.key)}
+                                                        className={`flex-1 px-2 py-1.5 text-sm rounded-md transition-colors ${clipLengthTarget === item.key
+                                                            ? 'bg-white dark:bg-slate-700 text-primary shadow-sm border border-slate-200 dark:border-slate-600 font-semibold'
+                                                            : 'text-slate-500 dark:text-slate-400'
+                                                            }`}
+                                                    >
+                                                        {item.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                            <p className="text-[11px] text-slate-500 mt-2">Generará clips entre 30 y 60 segundos.</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div className="space-y-2">
+                                            <label className={modalLabelClass}>Número de clips</label>
+                                            <input
+                                                type="number"
+                                                min="1"
+                                                max="15"
+                                                value={clipCount}
+                                                onChange={(e) => setClipCount(Number(e.target.value || 1))}
+                                                disabled={generationMode === 'trailer'}
+                                                className={modalInputClass}
+                                            />
+                                            {generationMode === 'trailer' && (
+                                                <p className="text-[11px] text-amber-600 dark:text-amber-400">En Super Trailer no se usa este valor.</p>
+                                            )}
+                                        </div>
+                                        <div className="space-y-2">
+                                            <label className={modalLabelClass}>Segmentos destacados (Super Trailer)</label>
+                                            <input
+                                                type="number"
+                                                min="2"
+                                                max="12"
+                                                value={trailerFragmentsTarget}
+                                                onChange={(e) => {
+                                                    const nextValue = Number(e.target.value || 6);
+                                                    setTrailerFragmentsTarget(Math.max(2, Math.min(12, Math.round(nextValue))));
+                                                }}
+                                                disabled={generationMode !== 'trailer'}
+                                                className={modalInputClass}
+                                            />
+                                            <p className="text-[11px] text-slate-500">Cantidad de momentos incluidos en el trailer.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {configTab === 'content' && (
+                                <div className="space-y-6">
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div className="space-y-2">
+                                            <label className={modalLabelClass}>Modelo (Gemini)</label>
+                                            <select
+                                                value={llmModel}
+                                                onChange={(e) => setLlmModel(e.target.value)}
+                                                className={modalInputClass}
+                                            >
+                                                {LLM_MODEL_OPTIONS.gemini.map((opt) => (
+                                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <div className="space-y-2">
+                                            <label className={modalLabelClass}>Idioma del video</label>
+                                            <select
+                                                value={language}
+                                                onChange={(e) => setLanguage(e.target.value)}
+                                                className={modalInputClass}
+                                            >
+                                                <option value="es">Español</option>
+                                                <option value="en">Inglés</option>
+                                                <option value="fr">Francés</option>
+                                                <option value="de">Alemán</option>
+                                                <option value="it">Italiano</option>
+                                                <option value="pt">Portugués</option>
+                                                <option value="auto">Detectar automáticamente</option>
+                                            </select>
+                                        </div>
+                                    </div>
+
+                                    <div className={modalCardClass}>
+                                        <div className="flex items-center justify-between gap-2 mb-4">
+                                            <div>
+                                                <h4 className="text-base font-bold text-slate-900 dark:text-white">Tipo de contenido</h4>
+                                                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Preajuste para adaptar el motor al formato del video.</p>
+                                            </div>
+                                            <span className="px-3 py-1 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 text-[10px] font-bold tracking-wider uppercase rounded-full">Perfil</span>
+                                        </div>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                            {CONTENT_PRESETS.map((preset) => {
+                                                const selected = selectedContentPreset === preset.id;
+                                                return (
+                                                    <button
+                                                        key={preset.id}
+                                                        type="button"
+                                                        onClick={() => applyContentPreset(preset.id)}
+                                                        className={`relative rounded-xl p-3 text-left transition-all ${selected
+                                                            ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
+                                                            : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700 hover:shadow-md'
+                                                            }`}
+                                                    >
+                                                        <h5 className={`font-bold text-sm ${selected ? 'text-primary' : 'text-slate-800 dark:text-slate-200'}`}>{preset.name}</h5>
+                                                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{preset.subtitle}</p>
+                                                        {selected && (
+                                                            <div className="absolute top-3 right-3 text-primary">
+                                                                <CheckCircle2 size={16} />
+                                                            </div>
+                                                        )}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+
+                                    <div className={modalCardClass}>
+                                        <div className="flex items-center justify-between gap-2 mb-4">
+                                            <div>
+                                                <h4 className="text-base font-bold text-slate-900 dark:text-white">Plantillas rápidas</h4>
+                                                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Carga una configuración completa con un clic.</p>
+                                            </div>
+                                        </div>
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                                            {TEMPLATE_PRESETS.map((preset) => {
+                                                const selected = selectedTemplate === preset.id;
+                                                return (
+                                                    <button
+                                                        key={preset.id}
+                                                        type="button"
+                                                        onClick={() => applyTemplate(preset.id)}
+                                                        className="group text-left"
+                                                    >
+                                                        <div className={`relative aspect-[9/16] rounded-xl overflow-hidden transition-all ${selected
+                                                            ? 'border-[3px] border-primary shadow-lg ring-4 ring-primary/10'
+                                                            : 'border border-slate-200 dark:border-slate-700 group-hover:border-primary group-hover:shadow-lg'
+                                                            }`}>
+                                                            <div className={`absolute inset-0 bg-gradient-to-br ${preset.gradient} opacity-90`} />
+                                                            <div className="absolute top-2 left-2 bg-black/50 backdrop-blur text-white text-[10px] font-bold px-1.5 py-0.5 rounded">1.00</div>
+                                                            <div className="absolute bottom-6 left-2 right-2">
+                                                                <div className="bg-black/70 backdrop-blur-sm text-white text-[10px] p-1.5 text-center rounded-lg">Aquí va tu subtítulo</div>
+                                                            </div>
+                                                            {selected && (
+                                                                <div className="absolute top-2 right-2 bg-primary text-white rounded-full w-5 h-5 flex items-center justify-center shadow-md">
+                                                                    <CheckCircle2 size={14} />
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        <div className="mt-2 px-1">
+                                                            <h5 className={`font-bold text-sm ${selected ? 'text-primary' : 'text-slate-900 dark:text-white group-hover:text-primary'}`}>{preset.name}</h5>
+                                                            <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight truncate">{preset.subtitle}</p>
+                                                        </div>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {configTab === 'advanced' && (
+                                <div className="space-y-6">
+                                    <div className={modalCardClass}>
+                                        <div className="flex items-center justify-between gap-2 mb-4">
+                                            <div>
+                                                <h4 className="text-base font-bold text-slate-900 dark:text-white">Whisper opciones</h4>
+                                                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Preajustes para velocidad y precisión de transcripción.</p>
+                                            </div>
+                                            <span className="px-3 py-1 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 text-[10px] font-bold tracking-wider uppercase rounded-full">Preajuste</span>
+                                        </div>
+
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
+                                            {WHISPER_OPTION_PRESETS.map((preset) => {
+                                                const selected = selectedWhisperOption === preset.id;
+                                                return (
+                                                    <button
+                                                        key={preset.id}
+                                                        type="button"
+                                                        onClick={() => applyWhisperOptionPreset(preset.id)}
+                                                        className={`rounded-xl p-3 text-left transition-all ${selected
+                                                            ? 'border-2 border-primary bg-violet-50 dark:bg-violet-900/10 shadow-sm'
+                                                            : 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-violet-300 dark:hover:border-violet-700 hover:shadow-md'
+                                                            }`}
+                                                    >
+                                                        <p className={`text-sm font-bold ${selected ? 'text-primary' : 'text-slate-800 dark:text-slate-200'}`}>{preset.name}</p>
+                                                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">{preset.subtitle}</p>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+
+                                        {selectedWhisperOption === 'custom' && (
+                                            <p className="mb-4 text-[11px] text-slate-500 dark:text-slate-400">Modo personalizado activo.</p>
+                                        )}
+
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                            <div className="space-y-2">
+                                                <label className={modalLabelClass}>Whisper backend</label>
+                                                <select
+                                                    value={whisperBackend}
+                                                    onChange={(e) => {
+                                                        const nextBackend = e.target.value;
+                                                        setWhisperBackend(nextBackend);
+                                                        setWhisperModel(normalizeWhisperModelForBackend(nextBackend, whisperModel));
+                                                        setSelectedWhisperOption('custom');
+                                                    }}
+                                                    className={modalInputClass}
+                                                >
+                                                    <option value="faster">faster-whisper (predeterminado)</option>
+                                                    <option value="openai">openai-whisper (compatibilidad)</option>
+                                                </select>
+                                            </div>
+                                            <div className="space-y-2">
+                                                <label className={modalLabelClass}>Modelo Whisper</label>
+                                                <select
+                                                    value={whisperModel}
+                                                    onChange={(e) => {
+                                                        setWhisperModel(e.target.value);
+                                                        setSelectedWhisperOption('custom');
+                                                    }}
+                                                    className={modalInputClass}
+                                                >
+                                                    {whisperModelOptions.map((modelOpt) => (
+                                                        <option key={modelOpt.value} value={modelOpt.value}>
+                                                            {modelOpt.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                            <div className="space-y-2">
+                                                <label className={modalLabelClass}>Subtítulos precisos (marcas por palabra)</label>
+                                                <select
+                                                    value={wordTimestamps ? 'yes' : 'no'}
+                                                    onChange={(e) => {
+                                                        setWordTimestamps(e.target.value === 'yes');
+                                                        setSelectedWhisperOption('custom');
+                                                    }}
+                                                    className={modalInputClass}
+                                                >
+                                                    <option value="yes">Sí (más lento)</option>
+                                                    <option value="no">No (más rápido)</option>
+                                                </select>
+                                            </div>
+                                            <div className="space-y-2">
+                                                <label className={modalLabelClass}>FFmpeg preset</label>
+                                                <select
+                                                    value={ffmpegPreset}
+                                                    onChange={(e) => {
+                                                        setFfmpegPreset(e.target.value);
+                                                        setSelectedWhisperOption('custom');
+                                                    }}
+                                                    className={modalInputClass}
+                                                >
+                                                    <option value="ultrafast">ultrafast (más rápido)</option>
+                                                    <option value="fast">fast</option>
+                                                    <option value="medium">medium (mejor calidad)</option>
+                                                </select>
+                                            </div>
+                                            <div className="space-y-2 md:col-span-2">
+                                                <label className={modalLabelClass}>Calidad de video (CRF)</label>
+                                                <input
+                                                    type="number"
+                                                    min="18"
+                                                    max="30"
+                                                    value={ffmpegCrf}
+                                                    onChange={(e) => {
+                                                        setFfmpegCrf(Number(e.target.value || 23));
+                                                        setSelectedWhisperOption('custom');
+                                                    }}
+                                                    className={modalInputClass}
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="px-6 md:px-8 py-4 border-t border-slate-200 dark:border-slate-700 bg-white/90 dark:bg-slate-800/70 backdrop-blur-sm flex flex-col-reverse sm:flex-row justify-end items-center gap-3">
+                            <button
+                                type="button"
+                                onClick={() => setShowConfigModal(false)}
+                                className="w-full sm:w-auto px-6 py-2.5 rounded-full border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-white font-medium hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                            >
+                                Cancelar
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleGenerate}
+                                disabled={isProcessing || !canConfigure}
+                                className="w-full sm:w-auto btn-primary flex items-center justify-center gap-2 px-8 py-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {isProcessing ? (
+                                    <>
+                                        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                                        Procesando video...
+                                    </>
+                                ) : (
+                                    <>{generationMode === 'trailer' ? 'Generar Super Trailer' : 'Generar clips'}</>
+                                )}
+                            </button>
                         </div>
                     </div>
                 </div>

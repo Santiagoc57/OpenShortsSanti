@@ -479,9 +479,11 @@ def _probe_video_dimensions(media_path: str) -> Tuple[int, int]:
             err_out = proc_fb.stderr or ""
             # Look for "Video: ..., 1280x720 ..."
             import re
-            match = re.search(r"Video:.*?\s(\d+)x(\d+)", err_out)
+            match = re.search(r"Video:.*?[\s,](\d+)x(\d+)[\s,]", err_out)
             if match:
-                return int(match.group(1)), int(match.group(2))
+                w, h = int(match.group(1)), int(match.group(2))
+                if w > 0 and h > 0:
+                    return w, h
         except Exception:
             pass
     return 0, 0
