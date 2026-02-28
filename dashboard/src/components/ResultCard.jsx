@@ -1,15 +1,47 @@
-import React, { useState, useEffect } from 'react';
-import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock, Languages } from 'lucide-react';
-import { getApiUrl } from '../config';
-import SubtitleModal from './SubtitleModal';
-import HookModal from './HookModal';
-import TranslateModal from './TranslateModal';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Calendar, Clock, Scissors, Play, Pause, Pencil, RefreshCw } from 'lucide-react';
+import { getApiUrl, apiFetch } from '../config';
+import ClipStudioModal from './ClipStudioModal';
+import { regenerateTitleWithGemini, buildFallbackTitleLocal } from '../geminiTitle';
 
-export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, onPlay, onPause }) {
+const transcriptSegmentsCache = new Map();
+
+const buildTranscriptExcerpt = (segments, clipStart, clipEnd, maxChars = 420) => {
+    if (!Array.isArray(segments) || segments.length === 0) return '';
+    const start = Number(clipStart || 0);
+    const end = Number(clipEnd || start);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return '';
+
+    const matched = segments.filter((seg) => {
+        const ss = Number(seg?.start || 0);
+        const se = Number(seg?.end || ss);
+        const text = String(seg?.text || '').trim();
+        return text && se > start && ss < end;
+    });
+    if (matched.length === 0) return '';
+
+    const excerpt = matched.map((seg) => String(seg.text || '').trim()).join(' ').replace(/\s+/g, ' ').trim();
+    if (!excerpt) return '';
+    if (excerpt.length > maxChars) return `${excerpt.slice(0, maxChars - 3).trim()}...`;
+    return excerpt;
+};
+
+export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, viewMode = 'list', jobId, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, onPlay, onPause, onOpenStudio, onSocialPosted, onClipPatched }) {
     const [showModal, setShowModal] = useState(false);
-    const [showSubtitleModal, setShowSubtitleModal] = useState(false);
+    const [showStudioModal, setShowStudioModal] = useState(false);
+    const [showRecutModal, setShowRecutModal] = useState(false);
     const videoRef = React.useRef(null);
+    const editVideoRef = useRef(null);
     const [currentVideoUrl, setCurrentVideoUrl] = useState(getApiUrl(clip.video_url));
+    const [baseVideoUrl, setBaseVideoUrl] = useState(getApiUrl(clip.video_url));
+    const [subtitledVideoUrl, setSubtitledVideoUrl] = useState(null);
+    const [subtitlesEnabled, setSubtitlesEnabled] = useState(false);
+    const [playbackVideoUrl, setPlaybackVideoUrl] = useState(getApiUrl(clip.video_url));
+    const [videoLoadError, setVideoLoadError] = useState(null);
+    const blobUrlRef = useRef(null);
+    const clipAspectRatio = clip?.aspect_ratio === '16:9' ? '16:9' : '9:16';
+    const isLandscape = clipAspectRatio === '16:9';
+    const isGalleryView = viewMode === 'gallery';
 
     const [platforms, setPlatforms] = useState({
         tiktok: true,
@@ -22,26 +54,497 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [scheduleDate, setScheduleDate] = useState("");
 
     const [posting, setPosting] = useState(false);
+
+    const formatTime = (seconds) => {
+        if (typeof seconds !== 'number' || Number.isNaN(seconds)) return '0:00';
+        const total = Math.max(0, Math.floor(seconds));
+        const mins = Math.floor(total / 60);
+        const secs = total % 60;
+        return `${mins}:${String(secs).padStart(2, '0')}`;
+    };
+    const rawScore = Number(clip?.virality_score);
+    const clipScore = Number.isFinite(rawScore) ? Math.max(0, Math.min(100, Math.round(rawScore))) : 0;
+    const rawConfidence = Number(clip?.selection_confidence);
+    const clipConfidence = Number.isFinite(rawConfidence) ? Math.max(0, Math.min(1, rawConfidence)) : clipScore / 100;
+    const topicTags = Array.isArray(clip?.topic_tags) ? clip.topic_tags.filter((t) => typeof t === 'string' && t.trim() !== '') : [];
+    const scoreBadgeClass = clipScore >= 80
+        ? 'bg-emerald-100 border-emerald-300 text-emerald-700 dark:bg-emerald-500/15 dark:border-emerald-500/40 dark:text-emerald-300'
+        : clipScore >= 65
+            ? 'bg-amber-100 border-amber-300 text-amber-700 dark:bg-amber-500/15 dark:border-amber-500/40 dark:text-amber-300'
+            : 'bg-slate-100 border-slate-300 text-slate-700 dark:bg-zinc-500/15 dark:border-zinc-500/30 dark:text-zinc-300';
     const [postResult, setPostResult] = useState(null);
 
     const [isEditing, setIsEditing] = useState(false);
-    const [isSubtitling, setIsSubtitling] = useState(false);
-    const [isHooking, setIsHooking] = useState(false);
-    const [isTranslating, setIsTranslating] = useState(false);
-    const [showHookModal, setShowHookModal] = useState(false);
-    const [showTranslateModal, setShowTranslateModal] = useState(false);
+    const [isRecutting, setIsRecutting] = useState(false);
+    const [isRegeneratingTitle, setIsRegeneratingTitle] = useState(false);
+    const [isRegeneratingSocial, setIsRegeneratingSocial] = useState(false);
     const [editError, setEditError] = useState(null);
+    const [activeTextTab, setActiveTextTab] = useState('social');
+    const [transcriptFallback, setTranscriptFallback] = useState('');
+    const [titleOverride, setTitleOverride] = useState('');
+    const [socialOverride, setSocialOverride] = useState('');
+    const [recutStart, setRecutStart] = useState(clip.start);
+    const [recutEnd, setRecutEnd] = useState(clip.end);
+    const [editDuration, setEditDuration] = useState(0);
+    const [editCurrentTime, setEditCurrentTime] = useState(0);
+    const [editPlaying, setEditPlaying] = useState(false);
+
+    useEffect(() => {
+        const nextUrl = getApiUrl(String(clip?.video_url || '').trim());
+        if (!nextUrl) return;
+        setCurrentVideoUrl(nextUrl);
+        setBaseVideoUrl(nextUrl);
+        setSubtitledVideoUrl(null);
+        setSubtitlesEnabled(false);
+    }, [clip?.clip_index, clip?.video_url]);
+
+    const buildDownloadFilename = useCallback(() => {
+        const raw = String(
+            clip?.video_title_for_youtube_short
+            || clip?.title
+            || `clip-${displayIndex + 1}`
+        );
+        const safe = raw
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .slice(0, 72);
+        return `${safe || `clip-${displayIndex + 1}`}.mp4`;
+    }, [clip?.video_title_for_youtube_short, clip?.title, displayIndex]);
+
+    const triggerAnchorDownload = useCallback((href, filename) => {
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = href;
+        if (filename) a.download = filename;
+        a.rel = 'noopener noreferrer';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }, []);
+
+    const openDownloadFallback = useCallback(() => {
+        const sourceUrl = String(currentVideoUrl || '').trim();
+        if (!sourceUrl) return;
+        const popup = window.open(sourceUrl, '_blank', 'noopener,noreferrer');
+        if (!popup) {
+            triggerAnchorDownload(sourceUrl, undefined);
+        }
+    }, [currentVideoUrl, triggerAnchorDownload]);
+
+    const downloadCurrentVideo = useCallback(async () => {
+        const sourceUrl = String(currentVideoUrl || '').trim();
+        if (!sourceUrl) throw new Error('URL de video vacia');
+
+        const useDirectFetch = /^blob:|^data:/i.test(sourceUrl);
+        const response = await (useDirectFetch
+            ? fetch(sourceUrl, { method: 'GET' })
+            : apiFetch(sourceUrl, { method: 'GET' }));
+
+        if (!response.ok) {
+            throw new Error(`Descarga fallida (${response.status})`);
+        }
+
+        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+        if (contentType.includes('text/html')) {
+            throw new Error('El servidor devolvio HTML en lugar de video');
+        }
+
+        const blob = await response.blob();
+        const blobType = String(blob.type || '').toLowerCase();
+        if (blobType.includes('text/html')) {
+            throw new Error('Respuesta invalida al descargar video');
+        }
+
+        const objectUrl = window.URL.createObjectURL(blob);
+        try {
+            triggerAnchorDownload(objectUrl, buildDownloadFilename());
+        } finally {
+            setTimeout(() => {
+                window.URL.revokeObjectURL(objectUrl);
+            }, 1500);
+        }
+    }, [currentVideoUrl, triggerAnchorDownload, buildDownloadFilename]);
+
+    useEffect(() => {
+        const cleanupBlobUrl = () => {
+            if (blobUrlRef.current) {
+                URL.revokeObjectURL(blobUrlRef.current);
+                blobUrlRef.current = null;
+            }
+        };
+
+        const sourceUrl = String(currentVideoUrl || '');
+        if (!sourceUrl) {
+            cleanupBlobUrl();
+            setPlaybackVideoUrl('');
+            setVideoLoadError(null);
+            return () => { };
+        }
+
+        const isNgrokSource = /ngrok/i.test(sourceUrl);
+        if (!isNgrokSource) {
+            cleanupBlobUrl();
+            setPlaybackVideoUrl(sourceUrl);
+            setVideoLoadError(null);
+            return () => { };
+        }
+
+        let cancelled = false;
+        setVideoLoadError(null);
+
+        (async () => {
+            try {
+                const res = await apiFetch(sourceUrl, { method: 'GET' });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const blob = await res.blob();
+                const blobType = String(blob.type || '').toLowerCase();
+                if (blobType && !blobType.startsWith('video/') && !blobType.includes('mp4') && !blobType.includes('octet-stream')) {
+                    throw new Error(`Tipo recibido: ${blob.type || 'desconocido'}`);
+                }
+                if (cancelled) return;
+                cleanupBlobUrl();
+                const objectUrl = URL.createObjectURL(blob);
+                blobUrlRef.current = objectUrl;
+                setPlaybackVideoUrl(objectUrl);
+            } catch (err) {
+                if (cancelled) return;
+                setPlaybackVideoUrl(sourceUrl);
+                setVideoLoadError(`No se pudo cargar video remoto (${err.message}).`);
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+            cleanupBlobUrl();
+        };
+    }, [currentVideoUrl]);
+
+    useEffect(() => {
+        setTitleOverride('');
+        setSocialOverride('');
+    }, [clip?.clip_index, clip?.video_url]);
+
+    const effectiveTitle = String(
+        titleOverride
+        || clip?.video_title_for_youtube_short
+        || clip?.title
+        || "Clip viral generado"
+    ).trim();
+    const viralityTen = (clipScore / 10).toFixed(1);
+    const socialText = String(
+        socialOverride
+        || clip?.video_description_for_tiktok
+        || clip?.video_description_for_instagram
+        || clip?.video_title_for_youtube_short
+        || "Sin descripción."
+    ).trim();
+    const viralityText = clip.score_reason || 'Este clip tiene buena combinación de claridad, gancho y potencial de engagement.';
 
     // Initialize/Reset form when modal opens
     useEffect(() => {
         if (showModal) {
-            setPostTitle(clip.video_title_for_youtube_short || "Viral Short");
-            setPostDescription(clip.video_description_for_instagram || clip.video_description_for_tiktok || "");
+            setPostTitle(effectiveTitle || "Corto viral");
+            setPostDescription(socialText || "");
             setIsScheduling(false);
             setScheduleDate("");
             setPostResult(null);
         }
-    }, [showModal, clip]);
+    }, [showModal, effectiveTitle, socialText]);
+
+    useEffect(() => {
+        if (!showRecutModal || !editVideoRef.current) return;
+        const vid = editVideoRef.current;
+        const onLoaded = () => setEditDuration(vid.duration || 0);
+        const onTime = () => setEditCurrentTime(vid.currentTime || 0);
+        const onPlay = () => setEditPlaying(true);
+        const onPause = () => setEditPlaying(false);
+        vid.addEventListener('loadedmetadata', onLoaded);
+        vid.addEventListener('timeupdate', onTime);
+        vid.addEventListener('play', onPlay);
+        vid.addEventListener('pause', onPause);
+        return () => {
+            vid.removeEventListener('loadedmetadata', onLoaded);
+            vid.removeEventListener('timeupdate', onTime);
+            vid.removeEventListener('play', onPlay);
+            vid.removeEventListener('pause', onPause);
+        };
+    }, [showRecutModal]);
+
+    const clipDuration = Math.max(0, Number(clip?.end || 0) - Number(clip?.start || 0));
+    const baseTranscriptText = [
+        clip?.transcript_excerpt,
+        clip?.transcript_text,
+        clip?.transcription,
+        typeof clip?.transcript === 'string' ? clip.transcript : null
+    ].find((value) => typeof value === 'string' && value.trim()) || '';
+    const transcriptDisplay = baseTranscriptText || transcriptFallback || "No hay transcripción disponible para este clip todavía.";
+    const hashtagsText = topicTags.length > 0 ? topicTags.map((tag) => `#${tag}`).join(' ') : 'Sin hashtags sugeridos.';
+    const activePanelText = activeTextTab === 'transcript'
+        ? transcriptDisplay
+        : activeTextTab === 'virality'
+            ? viralityText
+            : activeTextTab === 'hashtags'
+                ? hashtagsText
+                : socialText;
+
+    const parseApiErrorDetail = async (res) => {
+        const raw = await res.text();
+        let detail = '';
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+        } catch (_) {
+            // Non-JSON payloads are handled with raw text below.
+        }
+        return detail || raw || `HTTP ${res.status}`;
+    };
+
+    const handleRegenerateTitle = async () => {
+        if (!jobId || !Number.isFinite(Number(clipIndex))) return;
+        setIsRegeneratingTitle(true);
+        setEditError(null);
+        const apiKey = String(geminiApiKey || localStorage.getItem('gemini_key') || '').trim();
+        const applyLocalRetitle = (notice = '') => {
+            const nextTitle = buildFallbackTitleLocal({
+                currentTitle: effectiveTitle || 'Momento clave del video',
+                transcriptExcerpt: transcriptDisplay,
+                topicTags,
+                avoidTitle: effectiveTitle || ''
+            });
+            setTitleOverride(nextTitle);
+            setPostTitle(nextTitle);
+            onClipPatched && onClipPatched({
+                clipIndex: Number(clipIndex),
+                clipPatch: {
+                    video_title_for_youtube_short: nextTitle,
+                    title: nextTitle
+                }
+            });
+            if (notice) {
+                setEditError(notice);
+                setTimeout(() => setEditError(null), 3500);
+            } else {
+                setEditError(null);
+            }
+        };
+        const fallbackRetitle = async () => {
+            const nextTitle = await regenerateTitleWithGemini({
+                apiKey,
+                currentTitle: effectiveTitle || 'Momento clave del video',
+                transcriptExcerpt: transcriptDisplay,
+                socialExcerpt: socialText,
+                topicTags
+            });
+            setTitleOverride(nextTitle);
+            setPostTitle(nextTitle);
+            onClipPatched && onClipPatched({
+                clipIndex: Number(clipIndex),
+                clipPatch: {
+                    video_title_for_youtube_short: nextTitle,
+                    title: nextTitle
+                }
+            });
+            setEditError(null);
+        };
+        try {
+            const headers = { 'Content-Type': 'application/json' };
+            if (apiKey) headers['X-Gemini-Key'] = apiKey;
+
+            const res = await apiFetch('/api/clip/retitle', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                    job_id: jobId,
+                    clip_index: Number(clipIndex),
+                    current_title: effectiveTitle || null
+                })
+            });
+            if (!res.ok) throw new Error(await parseApiErrorDetail(res));
+            const data = await res.json();
+            const nextTitle = String(data?.new_title || '').trim();
+            if (!nextTitle) throw new Error('No se recibió un título nuevo.');
+            setTitleOverride(nextTitle);
+            setPostTitle(nextTitle);
+            onClipPatched && onClipPatched({
+                clipIndex: Number(clipIndex),
+                clipPatch: data?.clip_patch || {
+                    video_title_for_youtube_short: nextTitle,
+                    title: nextTitle,
+                    ...(Array.isArray(data?.title_variants) ? { title_variants: data.title_variants } : {}),
+                    ...(Number.isFinite(Number(data?.title_variant_index))
+                        ? { title_variant_index: Number(data.title_variant_index) }
+                        : {})
+                }
+            });
+        } catch (e) {
+            const msg = String(e?.message || '');
+            const lower = msg.toLowerCase();
+            const isNetworkIssue = (
+                lower.includes('networkerror')
+                || lower.includes('failed to fetch')
+                || lower.includes('load failed')
+                || lower.includes('fetch resource')
+                || lower.includes('cors')
+            );
+            const isQuotaOrRateError = (
+                lower.includes('quota')
+                || lower.includes('rate limit')
+                || lower.includes('429')
+                || lower.includes('resource exhausted')
+                || lower.includes('too many requests')
+                || lower.includes('exceeded')
+            );
+            if (lower === 'not found') {
+                try {
+                    await fallbackRetitle();
+                    return;
+                } catch (fallbackError) {
+                    applyLocalRetitle('Backend desactualizado: se aplicó un título local.');
+                    return;
+                }
+            } else if (isNetworkIssue) {
+                try {
+                    await fallbackRetitle();
+                    return;
+                } catch (fallbackError) {
+                    applyLocalRetitle('Backend no disponible (ngrok/red): se aplicó un título local.');
+                    return;
+                }
+            } else if (lower.includes('missing gemini api key')) {
+                applyLocalRetitle('Falta API key de Gemini: se aplicó un título local.');
+                return;
+            } else if (isQuotaOrRateError) {
+                applyLocalRetitle('Gemini sin cuota/rate-limit: se aplicó un título local.');
+                return;
+            } else if (
+                lower.includes('job not found')
+                || lower.includes('job output directory not found')
+                || lower.includes('metadata not found')
+                || (lower.includes('model') && lower.includes('not found'))
+                || (lower.includes('model') && lower.includes('not supported'))
+                || (lower.includes('for api version') && lower.includes('model'))
+            ) {
+                try {
+                    await fallbackRetitle();
+                    return;
+                } catch (fallbackError) {
+                    applyLocalRetitle('No fue posible usar Gemini: se aplicó un título local.');
+                    return;
+                }
+            } else {
+                setEditError(`No se pudo regenerar el título: ${msg}`);
+                setTimeout(() => setEditError(null), 5000);
+            }
+        } finally {
+            setIsRegeneratingTitle(false);
+        }
+    };
+
+    const handleRegenerateSocial = async () => {
+        if (!jobId || !Number.isFinite(Number(clipIndex))) return;
+        setIsRegeneratingSocial(true);
+        setEditError(null);
+        try {
+            const headers = { 'Content-Type': 'application/json' };
+            const apiKey = String(geminiApiKey || localStorage.getItem('gemini_key') || '').trim();
+            if (apiKey) headers['X-Gemini-Key'] = apiKey;
+
+            const res = await apiFetch('/api/clip/resocial', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                    job_id: jobId,
+                    clip_index: Number(clipIndex),
+                    current_social: socialText || null
+                })
+            });
+            if (!res.ok) throw new Error(await parseApiErrorDetail(res));
+            const data = await res.json();
+            const nextSocial = String(data?.new_social || '').trim();
+            if (!nextSocial) throw new Error('No se recibió texto social nuevo.');
+            setSocialOverride(nextSocial);
+            setPostDescription(nextSocial);
+            setActiveTextTab('social');
+            onClipPatched && onClipPatched({
+                clipIndex: Number(clipIndex),
+                clipPatch: data?.clip_patch || {
+                    video_description_for_tiktok: nextSocial,
+                    video_description_for_instagram: nextSocial,
+                    ...(Array.isArray(data?.social_variants) ? { social_variants: data.social_variants } : {}),
+                    ...(Number.isFinite(Number(data?.social_variant_index))
+                        ? { social_variant_index: Number(data.social_variant_index) }
+                        : {})
+                }
+            });
+        } catch (e) {
+            const msg = String(e?.message || '');
+            const lower = msg.toLowerCase();
+            if (lower === 'not found') {
+                setEditError('No se pudo regenerar el texto social: backend desactualizado o endpoint no disponible. Reinicia Colab con la versión nueva.');
+            } else if (lower.includes('missing gemini api key')) {
+                setEditError('No se pudo regenerar el texto social: falta la API key de Gemini en Configuración.');
+            } else if (lower.includes('job not found') || lower.includes('job output directory not found') || lower.includes('metadata not found')) {
+                setEditError('No se pudo regenerar el texto social: este proyecto no está cargado en este backend de Colab.');
+            } else {
+                setEditError(`No se pudo regenerar el texto social: ${msg}`);
+            }
+            setTimeout(() => setEditError(null), 5000);
+        } finally {
+            setIsRegeneratingSocial(false);
+        }
+    };
+
+    const handleCopyActiveText = async () => {
+        try {
+            if (activePanelText) await navigator.clipboard.writeText(activePanelText);
+        } catch (_) {
+            // Ignore clipboard permission errors.
+        }
+    };
+
+    useEffect(() => {
+        let cancelled = false;
+        const loadFallback = async () => {
+            if (baseTranscriptText || !jobId) {
+                setTranscriptFallback('');
+                return;
+            }
+            const cachedSegments = transcriptSegmentsCache.get(jobId);
+            if (cachedSegments) {
+                const text = buildTranscriptExcerpt(cachedSegments, clip?.start, clip?.end);
+                if (!cancelled) setTranscriptFallback(text);
+                return;
+            }
+            try {
+                const res = await apiFetch(`/api/transcript/${jobId}?limit=2000`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const segments = Array.isArray(data?.segments) ? data.segments : [];
+                transcriptSegmentsCache.set(jobId, segments);
+                const text = buildTranscriptExcerpt(segments, clip?.start, clip?.end);
+                if (!cancelled) setTranscriptFallback(text);
+            } catch (_) {
+                // No-op: keep fallback empty.
+            }
+        };
+        loadFallback();
+        return () => {
+            cancelled = true;
+        };
+    }, [baseTranscriptText, jobId, clip?.start, clip?.end]);
+
+    const handleDownload = async (e) => {
+        e.preventDefault();
+        try {
+            await downloadCurrentVideo();
+        } catch (err) {
+            console.error('Error de descarga:', err);
+            openDownloadFallback();
+        }
+    };
 
     const handleAutoEdit = async () => {
         setIsEditing(true);
@@ -51,10 +554,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
 
             if (!apiKey) {
-                throw new Error("Gemini API Key is missing. Please set it in Settings.");
+                throw new Error("Falta la API Key de Gemini. Configúrala en Configuración.");
             }
 
-            const res = await fetch(getApiUrl('/api/edit'), {
+            const res = await apiFetch('/api/edit', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -62,7 +565,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 },
                 body: JSON.stringify({
                     job_id: jobId,
-                    clip_index: index,
+                    clip_index: clipIndex,
                     input_filename: currentVideoUrl.split('/').pop()
                 })
             });
@@ -79,7 +582,11 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
             const data = await res.json();
             if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                const nextUrl = getApiUrl(data.new_video_url);
+                setCurrentVideoUrl(nextUrl);
+                setBaseVideoUrl(nextUrl);
+                setSubtitledVideoUrl(null);
+                setSubtitlesEnabled(false);
                 // Reload video
                 if (videoRef.current) {
                     videoRef.current.load();
@@ -94,165 +601,59 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         }
     };
 
-    const handleSubtitle = async (options) => {
-        setIsSubtitling(true);
+    const handleRecut = async () => {
+        setIsRecutting(true);
         setEditError(null);
         try {
-            const res = await fetch(getApiUrl('/api/subtitle'), {
+            const res = await apiFetch('/api/recut', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     job_id: jobId,
-                    clip_index: index,
-                    position: options.position,
-                    font_size: options.fontSize,
-                    input_filename: currentVideoUrl.split('/').pop()
+                    clip_index: clipIndex,
+                    start: Number(recutStart),
+                    end: Number(recutEnd),
+                    aspect_ratio: clipAspectRatio
                 })
             });
-
             if (!res.ok) {
                 const errText = await res.text();
                 throw new Error(errText);
             }
-
             const data = await res.json();
             if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                const nextUrl = getApiUrl(data.new_video_url);
+                setCurrentVideoUrl(nextUrl);
+                setBaseVideoUrl(nextUrl);
+                setSubtitledVideoUrl(null);
+                setSubtitlesEnabled(false);
                 if (videoRef.current) {
                     videoRef.current.load();
                 }
-                setShowSubtitleModal(false);
+                setShowRecutModal(false);
             }
-
         } catch (e) {
             setEditError(e.message);
             setTimeout(() => setEditError(null), 5000);
         } finally {
-            setIsSubtitling(false);
-        }
-    };
-
-    const handleHook = async (hookData) => {
-        setIsHooking(true);
-        setEditError(null);
-        try {
-            // Support both string (legacy) and object
-            const payload = typeof hookData === 'string'
-                ? { text: hookData, position: 'top', size: 'M' }
-                : hookData;
-
-            const res = await fetch(getApiUrl('/api/hook'), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: index,
-                    text: payload.text,
-                    position: payload.position,
-                    size: payload.size,
-                    input_filename: currentVideoUrl.split('/').pop()
-                })
-            });
-
-            if (!res.ok) {
-                const errText = await res.text();
-                throw new Error(errText);
-            }
-
-            const data = await res.json();
-            if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                if (videoRef.current) {
-                    videoRef.current.load();
-                }
-                setShowHookModal(false);
-            }
-
-        } catch (e) {
-            setEditError(e.message);
-            setTimeout(() => setEditError(null), 5000);
-        } finally {
-            setIsHooking(false);
-        }
-    };
-
-    const handleTranslate = async (options) => {
-        console.log('[Translate] Starting translation with options:', options);
-        setIsTranslating(true);
-        setEditError(null);
-        try {
-            const apiKey = elevenLabsKey;
-            console.log('[Translate] API Key available:', !!apiKey);
-
-            if (!apiKey) {
-                throw new Error("ElevenLabs API Key is missing. Please set it in Settings.");
-            }
-
-            const requestBody = {
-                job_id: jobId,
-                clip_index: index,
-                target_language: options.targetLanguage,
-                input_filename: currentVideoUrl.split('/').pop()
-            };
-            console.log('[Translate] Request body:', requestBody);
-            console.log('[Translate] Sending request to /api/translate');
-
-            const res = await fetch(getApiUrl('/api/translate'), {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-ElevenLabs-Key': apiKey
-                },
-                body: JSON.stringify(requestBody)
-            });
-
-            console.log('[Translate] Response status:', res.status);
-
-            if (!res.ok) {
-                const errText = await res.text();
-                console.error('[Translate] Error response:', errText);
-                try {
-                    const jsonErr = JSON.parse(errText);
-                    throw new Error(jsonErr.detail || errText);
-                } catch (e) {
-                    if (e.message !== errText) throw e;
-                    throw new Error(errText);
-                }
-            }
-
-            const data = await res.json();
-            console.log('[Translate] Success response:', data);
-            if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                if (videoRef.current) {
-                    videoRef.current.load();
-                }
-                setShowTranslateModal(false);
-            }
-
-        } catch (e) {
-            console.error('[Translate] Exception:', e);
-            setEditError(e.message);
-            setTimeout(() => setEditError(null), 5000);
-        } finally {
-            setIsTranslating(false);
+            setIsRecutting(false);
         }
     };
 
     const handlePost = async () => {
         if (!uploadPostKey || !uploadUserId) {
-            setPostResult({ success: false, msg: "Missing API Key or User ID." });
+            setPostResult({ success: false, msg: "Falta API Key o User ID." });
             return;
         }
 
         const selectedPlatforms = Object.keys(platforms).filter(k => platforms[k]);
         if (selectedPlatforms.length === 0) {
-            setPostResult({ success: false, msg: "Select at least one platform." });
+            setPostResult({ success: false, msg: "Selecciona al menos una plataforma." });
             return;
         }
 
         if (isScheduling && !scheduleDate) {
-            setPostResult({ success: false, msg: "Please select a date and time." });
+            setPostResult({ success: false, msg: "Selecciona fecha y hora." });
             return;
         }
 
@@ -262,7 +663,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         try {
             const payload = {
                 job_id: jobId,
-                clip_index: index,
+                clip_index: clipIndex,
                 api_key: uploadPostKey,
                 user_id: uploadUserId,
                 platforms: selectedPlatforms,
@@ -277,7 +678,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 payload.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
             }
 
-            const res = await fetch(getApiUrl('/api/social/post'), {
+            const res = await apiFetch('/api/social/post', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -293,29 +694,46 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 }
             }
 
-            setPostResult({ success: true, msg: isScheduling ? "Scheduled successfully!" : "Posted successfully!" });
+            setPostResult({ success: true, msg: isScheduling ? "Programado correctamente." : "Publicado correctamente." });
+            if (typeof onSocialPosted === 'function') {
+                onSocialPosted({
+                    jobId,
+                    clipIndex,
+                    platforms: selectedPlatforms,
+                    scheduled: Boolean(isScheduling)
+                });
+            }
             setTimeout(() => {
                 setShowModal(false);
                 setPostResult(null);
             }, 3000);
 
         } catch (e) {
-            setPostResult({ success: false, msg: `Failed: ${e.message}` });
+            setPostResult({ success: false, msg: `Falló: ${e.message}` });
         } finally {
             setPosting(false);
         }
     };
 
     return (
-        <div className="bg-surface border border-white/5 rounded-2xl overflow-hidden flex flex-col md:flex-row group hover:border-white/10 transition-all animate-[fadeIn_0.5s_ease-out] min-h-[300px] h-auto" style={{ animationDelay: `${index * 0.1}s` }}>
-            {/* Left: Video Preview (Responsive Width) */}
-            <div className="w-full md:w-[180px] lg:w-[200px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
+        <div
+            className={`bg-white border border-slate-200 rounded-2xl overflow-hidden flex group hover:border-primary/30 hover:shadow-[0_12px_28px_rgba(15,23,42,0.12)] transition-all animate-[fadeIn_0.5s_ease-out] ${isGalleryView ? 'flex-col h-full' : 'flex-col md:flex-row'
+                }`}
+            style={{ animationDelay: `${displayIndex * 0.08}s` }}
+        >
+            <div
+                className={`w-full bg-black relative shrink-0 ${isGalleryView ? '' : 'md:w-[220px] lg:w-[240px]'}`}
+                style={{ aspectRatio: isLandscape ? '16 / 9' : '9 / 16' }}
+            >
                 <video
                     ref={videoRef}
-                    src={currentVideoUrl}
+                    src={playbackVideoUrl || currentVideoUrl}
                     controls
                     className="w-full h-full object-cover"
                     playsInline
+                    onError={() => {
+                        setVideoLoadError('El navegador no pudo reproducir este archivo (codec o respuesta no válida).');
+                    }}
                     onPlay={() => {
                         const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
                         onPlay && onPlay(clip.start + currentTime);
@@ -328,145 +746,268 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         }
                     }}
                 />
-                <div className="absolute top-3 left-3 flex gap-2">
-                    <span className="bg-black/60 backdrop-blur-md text-white text-[10px] font-bold px-2 py-1 rounded-md border border-white/10 uppercase tracking-wide">
-                        Clip {index + 1}
-                    </span>
+                <div className="absolute top-3 left-3 bg-white/92 dark:bg-black/70 backdrop-blur-sm text-slate-900 dark:text-white text-[10px] font-bold px-2 py-1 rounded-md border border-slate-200/90 dark:border-white/20 shadow-sm">
+                    #{displayIndex + 1}
+                </div>
+                <div className="absolute top-3 right-3 bg-white/92 dark:bg-black/70 backdrop-blur-sm text-slate-900 dark:text-white text-[10px] font-semibold px-2 py-1 rounded-md border border-slate-200/90 dark:border-white/20 shadow-sm">
+                    {clipAspectRatio}
+                </div>
+                <div className="absolute bottom-3 right-3 bg-white/92 dark:bg-black/75 text-slate-900 dark:text-white text-[10px] font-mono px-1.5 py-0.5 rounded border border-slate-200/90 dark:border-white/20 shadow-sm">
+                    {formatTime(clipDuration)}
                 </div>
 
-                {/* Auto Edit Overlay if Processing */}
                 {isEditing && (
                     <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center z-10 p-4 text-center">
-                        <Loader2 size={32} className="text-primary animate-spin mb-3" />
-                        <span className="text-xs font-bold text-white uppercase tracking-wider">AI Magic in Progress...</span>
-                        <span className="text-[10px] text-zinc-400 mt-1">Applying viral edits & zooms</span>
+                        <Loader2 size={30} className="text-primary animate-spin mb-2" />
+                        <span className="text-xs font-bold text-white uppercase tracking-wider">IA editando</span>
+                        <span className="text-[10px] text-zinc-300 mt-1">Aplicando mejoras visuales</span>
+                    </div>
+                )}
+                {videoLoadError && (
+                    <div className="absolute inset-x-2 bottom-10 z-10 rounded-md border border-amber-400/40 bg-amber-500/15 px-2 py-1 text-[10px] leading-tight text-amber-100">
+                        {videoLoadError}
                     </div>
                 )}
             </div>
 
-            {/* Right: Content & Details */}
-            <div className="flex-1 p-4 md:p-5 flex flex-col bg-[#121214] overflow-hidden min-w-0">
-                <div className="mb-4">
-                    <h3 className="text-base font-bold text-white leading-tight line-clamp-2 mb-2 break-words" title={clip.video_title_for_youtube_short}>
-                        {clip.video_title_for_youtube_short || "Viral Clip Generated"}
-                    </h3>
-                    <div className="flex flex-wrap gap-2 text-[10px] text-zinc-500 font-mono">
-                        <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">{Math.floor(clip.end - clip.start)}s</span>
-                        <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#shorts</span>
-                        <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#viral</span>
+            <div className={`flex-1 p-4 md:p-5 flex flex-col min-w-0 bg-white ${isGalleryView ? 'h-full' : ''}`}>
+                <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                        <h3 className="text-lg font-bold text-slate-900 leading-tight line-clamp-2 break-words" title={effectiveTitle}>
+                            {effectiveTitle || "Clip viral generado"}
+                        </h3>
+                        <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-500">
+                            <span className={`px-2 py-1 rounded-md border ${scoreBadgeClass}`}>
+                                Puntaje {clipScore}/100
+                            </span>
+                            <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50">
+                                Confianza {Math.round(clipConfidence * 100)}%
+                            </span>
+                            <span className="px-2 py-1 rounded-md border border-slate-200 bg-slate-50">
+                                {formatTime(Number(clip.start || 0))} - {formatTime(Number(clip.end || 0))}
+                            </span>
+                        </div>
+                    </div>
+                    <div className="shrink-0 flex items-start gap-2">
+                        <button
+                            type="button"
+                            onClick={handleRegenerateTitle}
+                            disabled={isRegeneratingTitle || !jobId}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100 disabled:opacity-60 disabled:cursor-not-allowed"
+                            title="Regenerar título"
+                        >
+                            {isRegeneratingTitle ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                            {isRegeneratingTitle ? 'Generando...' : 'Regenerar'}
+                        </button>
+                        <div className="text-right px-3 py-2 rounded-lg border border-slate-200 bg-slate-50">
+                            <div className="text-3xl leading-none font-black text-slate-900">{viralityTen}</div>
+                            <div className="text-[10px] uppercase tracking-wider text-slate-500 mt-1">Virality</div>
+                        </div>
                     </div>
                 </div>
 
-                {/* Scrollable Descriptions Area */}
-                <div className="flex-1 overflow-y-auto custom-scrollbar space-y-3 pr-2 mb-4">
-                    {/* YouTube */}
-                    <div className="bg-black/20 rounded-lg p-3 border border-white/5">
-                        <div className="flex items-center gap-2 text-[10px] font-bold text-red-400 mb-1.5 uppercase tracking-wider">
-                            <Youtube size={12} className="shrink-0" /> <span className="truncate">YouTube Title</span>
+                <div className={`mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 ${isGalleryView ? 'min-h-[160px]' : ''}`}>
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                        <div className="flex items-center gap-5 md:gap-6 border-b border-slate-200 w-full">
+                            <button
+                                onClick={() => setActiveTextTab('social')}
+                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${activeTextTab === 'social'
+                                    ? 'text-primary border-primary'
+                                    : 'text-slate-500 border-transparent hover:text-slate-700'
+                                    }`}
+                            >
+                                Social
+                            </button>
+                            <button
+                                onClick={() => setActiveTextTab('transcript')}
+                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${activeTextTab === 'transcript'
+                                    ? 'text-primary border-primary'
+                                    : 'text-slate-500 border-transparent hover:text-slate-700'
+                                    }`}
+                            >
+                                Transcripción
+                            </button>
+                            <button
+                                onClick={() => setActiveTextTab('hashtags')}
+                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${activeTextTab === 'hashtags'
+                                    ? 'text-primary border-primary'
+                                    : 'text-slate-500 border-transparent hover:text-slate-700'
+                                    }`}
+                            >
+                                Etiquetas
+                            </button>
+                            <button
+                                onClick={() => setActiveTextTab('virality')}
+                                className={`pb-1.5 px-0.5 text-xs font-semibold transition-colors border-b-2 ${activeTextTab === 'virality'
+                                    ? 'text-primary border-primary'
+                                    : 'text-slate-500 border-transparent hover:text-slate-700'
+                                    }`}
+                            >
+                                Puntaje viral
+                            </button>
                         </div>
-                        <p className="text-xs text-zinc-300 select-all break-words">
-                            {clip.video_title_for_youtube_short || "Viral Short Video"}
-                        </p>
-                    </div>
-
-                    {/* TikTok / IG */}
-                    <div className="bg-black/20 rounded-lg p-3 border border-white/5">
-                        <div className="flex items-center gap-2 text-[10px] font-bold text-zinc-400 mb-1.5 uppercase tracking-wider">
-                            <Video size={12} className="text-cyan-400 shrink-0" />
-                            <span className="text-zinc-500">/</span>
-                            <Instagram size={12} className="text-pink-400 shrink-0" />
-                            <span className="truncate">Caption</span>
+                        <div className="flex items-center gap-1.5">
+                            {activeTextTab === 'social' && (
+                                <button
+                                    onClick={handleRegenerateSocial}
+                                    disabled={isRegeneratingSocial || !jobId}
+                                    className="text-slate-400 hover:text-slate-700 p-1 rounded border border-slate-200 bg-white disabled:opacity-60 disabled:cursor-not-allowed"
+                                    title="Regenerar texto social"
+                                >
+                                    {isRegeneratingSocial ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                                </button>
+                            )}
+                            <button
+                                onClick={handleCopyActiveText}
+                                className="text-slate-400 hover:text-slate-700 p-1 rounded border border-slate-200 bg-white"
+                                title="Copiar texto"
+                            >
+                                <Copy size={13} />
+                            </button>
                         </div>
-                        <p className="text-xs text-zinc-300 line-clamp-3 hover:line-clamp-none transition-all cursor-pointer select-all break-words">
-                            {clip.video_description_for_tiktok || clip.video_description_for_instagram}
-                        </p>
                     </div>
+                    {activeTextTab === 'virality' ? (
+                        <div className="space-y-3">
+                            <p className="text-sm text-slate-700 leading-relaxed break-words">{viralityText}</p>
+                        </div>
+                    ) : activeTextTab === 'hashtags' ? (
+                        <div className="space-y-3">
+                            <p className="text-xs text-slate-500">Hashtags sugeridos para publicar este clip:</p>
+                            {topicTags.length > 0 ? (
+                                <div className="flex flex-wrap gap-2">
+                                    {topicTags.map((tag) => (
+                                        <span key={`hash-${tag}`} className="text-xs px-2.5 py-1 rounded-md border border-primary/30 bg-primary/10 text-primary">
+                                            #{tag}
+                                        </span>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className="text-sm text-slate-700">Sin hashtags sugeridos.</p>
+                            )}
+                        </div>
+                    ) : (
+                        <p className={`text-sm text-slate-700 leading-relaxed break-words ${activeTextTab === 'transcript' ? 'font-mono text-xs' : ''}`}>
+                            {activePanelText}
+                        </p>
+                    )}
                 </div>
 
-                {/* Error Message */}
+                {subtitledVideoUrl && (
+                    <div className="mt-3 flex items-center gap-2 text-[11px] text-slate-500">
+                        <span>Subtítulos:</span>
+                        <button
+                            onClick={() => {
+                                const next = !subtitlesEnabled;
+                                setSubtitlesEnabled(next);
+                                setCurrentVideoUrl(next ? subtitledVideoUrl : baseVideoUrl);
+                                if (videoRef.current) {
+                                    videoRef.current.load();
+                                }
+                            }}
+                            className={`px-2 py-1 rounded-full border transition-colors ${subtitlesEnabled
+                                ? 'bg-yellow-500/20 border-yellow-500/40 text-yellow-300'
+                                : 'bg-slate-50 border-slate-200 text-slate-500'
+                                }`}
+                        >
+                            {subtitlesEnabled ? 'ON' : 'OFF'}
+                        </button>
+                    </div>
+                )}
+
                 {editError && (
-                    <div className="mb-3 p-2 bg-red-500/10 border border-red-500/20 text-red-400 text-[10px] rounded-lg flex items-center gap-2">
-                        <AlertCircle size={12} className="shrink-0" />
+                    <div className="mt-3 p-2 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-lg flex items-center gap-2">
+                        <AlertCircle size={13} className="shrink-0" />
                         {editError}
                     </div>
                 )}
 
-                {/* Actions Footer */}
-                <div className="grid grid-cols-2 gap-3 mt-auto pt-4 border-t border-white/5">
-                    <button
-                        onClick={handleAutoEdit}
-                        disabled={isEditing}
-                        className="col-span-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isEditing ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {isEditing ? 'Editing...' : 'Auto Edit'}
-                    </button>
-
-                    <button
-                        onClick={() => setShowSubtitleModal(true)}
-                        disabled={isSubtitling}
-                        className="col-span-1 py-2 bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isSubtitling ? <Loader2 size={14} className="animate-spin" /> : <Type size={14} />}
-                        {isSubtitling ? 'Adding...' : 'Subtitles'}
-                    </button>
-
-                    <button
-                        onClick={() => setShowHookModal(true)}
-                        disabled={isHooking}
-                        className="col-span-1 py-2 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black rounded-lg text-xs font-bold shadow-lg shadow-yellow-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isHooking ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {isHooking ? 'Adding...' : 'Viral Hook'}
-                    </button>
-
-                    <button
-                        onClick={() => setShowTranslateModal(true)}
-                        disabled={isTranslating}
-                        className="col-span-1 py-2 bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-400 hover:to-teal-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-green-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isTranslating ? <Loader2 size={14} className="animate-spin" /> : <Languages size={14} />}
-                        {isTranslating ? 'Translating...' : 'Dub Voice'}
-                    </button>
-
-                    <button
-                        onClick={() => setShowModal(true)}
-                        className="col-span-1 py-2 bg-primary hover:bg-blue-600 text-white rounded-lg text-xs font-bold shadow-lg shadow-primary/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
-                    >
-                        <Share2 size={14} className="shrink-0" /> Post
-                    </button>
-                    <button
-                        onClick={async (e) => {
-                            e.preventDefault();
-                            try {
-                                const response = await fetch(currentVideoUrl);
-                                if (!response.ok) throw new Error('Download failed');
-                                const blob = await response.blob();
-                                const url = window.URL.createObjectURL(blob);
-                                const a = document.createElement('a');
-                                a.style.display = 'none';
-                                a.href = url;
-                                a.download = `clip-${index + 1}.mp4`;
-                                document.body.appendChild(a);
-                                a.click();
-                                window.URL.revokeObjectURL(url);
-                                document.body.removeChild(a);
-                            } catch (err) {
-                                console.error('Download error:', err);
-                                window.open(currentVideoUrl, '_blank');
-                            }
-                        }}
-                        className="col-span-1 py-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5 truncate px-2"
-                    >
-                        <Download size={14} className="shrink-0" /> Download
-                    </button>
-                </div>
+                {isGalleryView ? (
+                    <div className="mt-4 pt-4 border-t border-slate-200 space-y-2.5">
+                        <button
+                            onClick={() => {
+                                if (onOpenStudio) {
+                                    onOpenStudio({ clip, clipIndex, currentVideoUrl });
+                                    return;
+                                }
+                                setShowStudioModal(true);
+                            }}
+                            className="w-full py-2.5 px-3 rounded-full border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 transition-colors inline-flex items-center justify-center gap-2"
+                            title="Editar clip"
+                        >
+                            <Pencil size={14} />
+                            <span className="text-sm font-medium">Editar clip</span>
+                        </button>
+                        <div className="grid grid-cols-2 gap-2">
+                            <button
+                                onClick={handleDownload}
+                                className="py-2.5 px-3 bg-[#f97316] hover:bg-[#fb923c] rounded-full transition-all active:scale-[0.98] inline-flex items-center justify-center gap-2 !text-white"
+                            >
+                                <Download size={14} className="!text-white" />
+                                <span className="text-sm font-semibold !text-white">Descargar</span>
+                            </button>
+                            <button
+                                onClick={() => setShowModal(true)}
+                                className="py-2.5 px-3 bg-[#10b981] hover:bg-[#34d399] rounded-full transition-colors inline-flex items-center justify-center gap-2 !text-white"
+                            >
+                                <Share2 size={14} className="!text-white" />
+                                <span className="text-sm font-semibold !text-white">Publicar</span>
+                            </button>
+                        </div>
+                        <div className="flex items-center justify-end">
+                            <button
+                                onClick={handleAutoEdit}
+                                disabled={isEditing}
+                                className="p-2 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 disabled:opacity-60 inline-flex items-center gap-1.5 text-xs font-medium"
+                                title={isEditing ? 'Editando...' : 'Edición automática IA'}
+                            >
+                                {isEditing ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
+                                {isEditing ? 'Aplicando...' : 'Mejorar IA'}
+                            </button>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="mt-4 pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={handleAutoEdit}
+                                disabled={isEditing}
+                                className="p-2.5 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 disabled:opacity-60"
+                                title={isEditing ? 'Editando...' : 'Edición automática IA'}
+                            >
+                                {isEditing ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
+                            </button>
+                            <button
+                                onClick={() => {
+                                    if (onOpenStudio) {
+                                        onOpenStudio({ clip, clipIndex, currentVideoUrl });
+                                        return;
+                                    }
+                                    setShowStudioModal(true);
+                                }}
+                                className="py-2 px-3 rounded-full border border-violet-300 bg-violet-100 text-violet-700 hover:bg-violet-200 dark:border-violet-400/40 dark:bg-violet-500/15 dark:hover:bg-violet-500/25 dark:text-violet-200 transition-colors inline-flex items-center gap-2"
+                                title="Editar clip"
+                            >
+                                <Pencil size={14} />
+                                <span className="text-sm font-medium">Editar</span>
+                            </button>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 ml-auto">
+                            <button
+                                onClick={handleDownload}
+                                className="py-2.5 px-5 bg-[#f97316] hover:bg-[#fb923c] rounded-full transition-all active:scale-[0.98] inline-flex items-center gap-2 !text-white"
+                            >
+                                <Download size={15} className="!text-white" />
+                                <span className="text-sm font-semibold !text-white">Descargar</span>
+                            </button>
+                        </div>
+                    </div>
+                )}
             </div>
 
             {/* Post Modal */}
             {showModal && (
                 <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-                    <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-md shadow-2xl relative max-h-[90vh] overflow-y-auto custom-scrollbar">
+                    <div className="bg-[#121214] border border-white/10 p-6 rounded-3xl w-full max-w-md shadow-2xl relative max-h-[90vh] overflow-y-auto custom-scrollbar">
                         <button
                             onClick={() => setShowModal(false)}
                             className="absolute top-4 right-4 text-zinc-500 hover:text-white"
@@ -474,36 +1015,36 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             <X size={20} />
                         </button>
 
-                        <h3 className="text-lg font-bold text-white mb-4">Post / Schedule</h3>
+                        <h3 className="text-lg font-bold text-white mb-4">Publicar / Programar</h3>
 
                         {!uploadPostKey && (
-                            <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200 text-xs rounded-lg flex items-start gap-2">
+                            <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200 text-xs rounded-full flex items-start gap-2">
                                 <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                                <div>Configure API Key in Settings first.</div>
+                                <div>Configura primero la API Key en Configuración.</div>
                             </div>
                         )}
 
                         <div className="space-y-4 mb-6">
                             {/* Title & Description */}
                             <div>
-                                <label className="block text-xs font-bold text-zinc-400 mb-1">Video Title</label>
+                                <label className="block text-xs font-bold text-zinc-400 mb-1">Título del video</label>
                                 <input
                                     type="text"
                                     value={postTitle}
                                     onChange={(e) => setPostTitle(e.target.value)}
-                                    className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600"
-                                    placeholder="Enter a catchy title..."
+                                    className="w-full bg-black/40 border border-white/10 rounded-full py-2 px-4 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600"
+                                    placeholder="Escribe un título llamativo..."
                                 />
                             </div>
 
                             <div>
-                                <label className="block text-xs font-bold text-zinc-400 mb-1">Caption / Description</label>
+                                <label className="block text-xs font-bold text-zinc-400 mb-1">Texto / Descripción</label>
                                 <textarea
                                     value={postDescription}
                                     onChange={(e) => setPostDescription(e.target.value)}
                                     rows={4}
-                                    className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-none"
-                                    placeholder="Write a caption for your post..."
+                                    className="w-full bg-black/40 border border-white/10 rounded-3xl p-3 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-none"
+                                    placeholder="Escribe un texto para tu publicación..."
                                 />
                             </div>
 
@@ -511,7 +1052,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             <div className="p-3 bg-white/5 rounded-lg border border-white/5">
                                 <div className="flex items-center justify-between mb-2">
                                     <div className="flex items-center gap-2 text-sm text-white font-medium">
-                                        <Calendar size={16} className="text-purple-400" /> Schedule Post
+                                        <Calendar size={16} className="text-purple-400" /> Programar publicación
                                     </div>
                                     <label className="relative inline-flex items-center cursor-pointer">
                                         <input type="checkbox" checked={isScheduling} onChange={(e) => setIsScheduling(e.target.checked)} className="sr-only peer" />
@@ -521,7 +1062,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
                                 {isScheduling && (
                                     <div className="mt-3 animate-[fadeIn_0.2s_ease-out]">
-                                        <label className="block text-xs text-zinc-400 mb-1">Select Date & Time</label>
+                                        <label className="block text-xs text-zinc-400 mb-1">Selecciona fecha y hora</label>
                                         <div className="relative">
                                             <input
                                                 type="datetime-local"
@@ -537,7 +1078,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
                             {/* Platforms */}
                             <div>
-                                <label className="block text-xs font-bold text-zinc-400 mb-2">Select Platforms</label>
+                                <label className="block text-xs font-bold text-zinc-400 mb-2">Seleccionar plataformas</label>
                                 <div className="grid grid-cols-1 gap-2">
                                     <label className="flex items-center gap-3 p-3 bg-white/5 rounded-lg cursor-pointer hover:bg-white/10 transition-colors border border-white/5">
                                         <input type="checkbox" checked={platforms.tiktok} onChange={e => setPlatforms({ ...platforms, tiktok: e.target.checked })} className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary" />
@@ -567,37 +1108,176 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             disabled={posting || !uploadPostKey}
                             className="w-full py-3 bg-primary hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-bold transition-all flex items-center justify-center gap-2"
                         >
-                            {posting ? <><Loader2 size={16} className="animate-spin" /> {isScheduling ? 'Scheduling...' : 'Publishing...'}</> : <><Share2 size={16} /> {isScheduling ? 'Schedule Post' : 'Publish Now'}</>}
+                            {posting ? <><Loader2 size={16} className="animate-spin" /> {isScheduling ? 'Programando...' : 'Publicando...'}</> : <><Share2 size={16} /> {isScheduling ? 'Programar publicación' : 'Publicar ahora'}</>}
                         </button>
                     </div>
                 </div>
             )}
 
-            <SubtitleModal
-                isOpen={showSubtitleModal}
-                onClose={() => setShowSubtitleModal(false)}
-                onGenerate={handleSubtitle}
-                isProcessing={isSubtitling}
-                videoUrl={currentVideoUrl}
-            />
+            {!onOpenStudio && (
+                <ClipStudioModal
+                    isOpen={showStudioModal}
+                    onClose={() => setShowStudioModal(false)}
+                    jobId={jobId}
+                    clipIndex={clipIndex}
+                    clip={clip}
+                    currentVideoUrl={currentVideoUrl}
+                    onApplied={({ newVideoUrl }) => {
+                        if (newVideoUrl) {
+                            setCurrentVideoUrl(newVideoUrl);
+                            setBaseVideoUrl(newVideoUrl);
+                            setSubtitledVideoUrl(null);
+                            setSubtitlesEnabled(false);
+                            if (videoRef.current) {
+                                videoRef.current.load();
+                            }
+                        }
+                        setShowStudioModal(false);
+                    }}
+                />
+            )}
 
-            <HookModal
-                isOpen={showHookModal}
-                onClose={() => setShowHookModal(false)}
-                onGenerate={handleHook}
-                isProcessing={isHooking}
-                videoUrl={currentVideoUrl}
-                initialText={clip.viral_hook_text}
-            />
-
-            <TranslateModal
-                isOpen={showTranslateModal}
-                onClose={() => setShowTranslateModal(false)}
-                onTranslate={handleTranslate}
-                isProcessing={isTranslating}
-                videoUrl={currentVideoUrl}
-                hasApiKey={!!elevenLabsKey}
-            />
+            {showRecutModal && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
+                    <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-3xl shadow-2xl relative">
+                        <button
+                            onClick={() => setShowRecutModal(false)}
+                            className="absolute top-4 right-4 text-zinc-500 hover:text-white"
+                        >
+                            <X size={20} />
+                        </button>
+                        <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
+                            <Scissors size={16} className="text-primary" /> Editar video
+                        </h3>
+                        <div className="grid grid-cols-1 md:grid-cols-[1.4fr_1fr] gap-6">
+                            <div className="bg-black/60 rounded-xl border border-white/10 p-3">
+                                <video
+                                    ref={editVideoRef}
+                                    src={currentVideoUrl}
+                                    controls
+                                    className={`w-full rounded-lg ${isLandscape ? 'aspect-video' : 'aspect-[9/16]'}`}
+                                />
+                                <div className="mt-3 flex items-center justify-between text-xs text-zinc-400">
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => {
+                                                const v = editVideoRef.current;
+                                                if (!v) return;
+                                                if (v.paused) v.play();
+                                                else v.pause();
+                                            }}
+                                            className="px-3 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 flex items-center gap-2"
+                                        >
+                                            {editPlaying ? <Pause size={12} /> : <Play size={12} />}
+                                            {editPlaying ? 'Pausar' : 'Reproducir'}
+                                        </button>
+                                        <span>{formatTime(editCurrentTime)} / {formatTime(editDuration)}</span>
+                                    </div>
+                                    <button
+                                        onClick={async () => {
+                                            try {
+                                                await downloadCurrentVideo();
+                                            } catch (err) {
+                                                openDownloadFallback();
+                                            }
+                                        }}
+                                        className="px-3 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 flex items-center gap-2"
+                                    >
+                                        <Download size={12} /> Descargar
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="block text-xs font-bold text-zinc-400 mb-2">Rango de corte</label>
+                                    <div className="space-y-3">
+                                        <div>
+                                            <div className="flex justify-between text-[10px] text-zinc-500 mb-1">
+                                                <span>Inicio: {formatTime(Number(recutStart))}</span>
+                                                <button
+                                                    onClick={() => setRecutStart(editCurrentTime.toFixed(1))}
+                                                    className="text-primary hover:text-primary/80"
+                                                >
+                                                    Fijar al playhead
+                                                </button>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="0"
+                                                max={editDuration || 0}
+                                                step="0.1"
+                                                value={recutStart}
+                                                onChange={(e) => {
+                                                    const val = Number(e.target.value);
+                                                    setRecutStart(val);
+                                                    if (val >= Number(recutEnd)) setRecutEnd(val + 0.5);
+                                                }}
+                                                className="w-full"
+                                            />
+                                        </div>
+                                        <div>
+                                            <div className="flex justify-between text-[10px] text-zinc-500 mb-1">
+                                                <span>Fin: {formatTime(Number(recutEnd))}</span>
+                                                <button
+                                                    onClick={() => setRecutEnd(editCurrentTime.toFixed(1))}
+                                                    className="text-primary hover:text-primary/80"
+                                                >
+                                                    Fijar al playhead
+                                                </button>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min="0"
+                                                max={editDuration || 0}
+                                                step="0.1"
+                                                value={recutEnd}
+                                                onChange={(e) => setRecutEnd(Number(e.target.value))}
+                                                className="w-full"
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block text-xs font-bold text-zinc-400 mb-1">Inicio (segundos)</label>
+                                        <input
+                                            type="number"
+                                            step="0.1"
+                                            value={recutStart}
+                                            onChange={(e) => setRecutStart(e.target.value)}
+                                            className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-zinc-400 mb-1">Fin (segundos)</label>
+                                        <input
+                                            type="number"
+                                            step="0.1"
+                                            value={recutEnd}
+                                            onChange={(e) => setRecutEnd(e.target.value)}
+                                            className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                                        />
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={handleRecut}
+                                    disabled={isRecutting}
+                                    className="w-full py-3 mt-2 bg-primary hover:bg-primary/90 rounded-xl text-white font-bold transition-all flex items-center justify-center gap-2"
+                                >
+                                    {isRecutting ? <Loader2 size={16} className="animate-spin" /> : <Scissors size={16} />}
+                                    {isRecutting ? 'Procesando...' : 'Aplicar corte'}
+                                </button>
+                                <p className="text-[10px] text-zinc-500 text-center">
+                                    Usa el playhead para marcar inicio/fin y ajustar el rango.
+                                </p>
+                            </div>
+                        </div>
+                        <p className="text-[10px] text-zinc-500 text-center mt-4">
+                            El recorte requiere que el video original subido esté disponible.
+                        </p>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
