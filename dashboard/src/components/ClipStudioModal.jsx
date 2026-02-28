@@ -1,30 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, FileText, Captions, Type, LayoutTemplate, Music2, Search, Sparkles, Loader2, Play, Pause, Pencil, SlidersHorizontal, ZoomOut, ZoomIn, Crosshair, Menu, Lightbulb, Download } from 'lucide-react';
 import { apiFetch, getApiUrl } from '../config';
+import SubtitleRenderer from './SubtitleRenderer';
 
 const CAPTION_PRESETS = [
-  {
-    id: 'deep_diver',
-    name: 'Deep Diver',
-    sample: 'TO GET\nSTARTED',
-    preview: {
-      bg: 'linear-gradient(145deg, #0f172a 0%, #111827 60%, #1f2937 100%)',
-      highlightColor: '#E2E8F0',
-      highlightWordIndex: 2
-    },
-    style: {
-      position: 'bottom',
-      fontSize: 40,
-      fontFamily: 'Montserrat',
-      fontColor: '#FFFFFF',
-      strokeColor: '#111827',
-      strokeWidth: 1,
-      bold: true,
-      boxColor: '#111827',
-      boxOpacity: 72,
-      animation: 'slide'
-    }
-  },
   {
     id: 'karaoke_pro',
     name: 'Karaoke Pro',
@@ -36,7 +15,7 @@ const CAPTION_PRESETS = [
     },
     style: {
       position: 'bottom',
-      fontSize: 40,
+      fontSize: 50,
       fontFamily: 'Anton',
       fontColor: '#FFFFFF',
       strokeColor: '#000000',
@@ -49,6 +28,28 @@ const CAPTION_PRESETS = [
     karaokeMode: true
   },
   {
+    id: 'deep_diver',
+    name: 'Deep Diver',
+    sample: 'TO GET\nSTARTED',
+    preview: {
+      bg: 'linear-gradient(145deg, #0f172a 0%, #111827 60%, #1f2937 100%)',
+      highlightColor: '#E2E8F0',
+      highlightWordIndex: 2
+    },
+    style: {
+      position: 'bottom',
+      fontSize: 50,
+      fontFamily: 'Montserrat',
+      fontColor: '#FFFFFF',
+      strokeColor: '#111827',
+      strokeWidth: 1,
+      bold: true,
+      boxColor: '#111827',
+      boxOpacity: 72,
+      animation: 'slide'
+    }
+  },
+  {
     id: 'mozi_pop',
     name: 'Mozi Pop',
     sample: 'TO GET\nSTARTED',
@@ -59,7 +60,7 @@ const CAPTION_PRESETS = [
     },
     style: {
       position: 'bottom',
-      fontSize: 40,
+      fontSize: 50,
       fontFamily: 'Archivo Black',
       fontColor: '#FFFFFF',
       strokeColor: '#0A0A0A',
@@ -82,7 +83,7 @@ const CAPTION_PRESETS = [
     },
     style: {
       position: 'bottom',
-      fontSize: 40,
+      fontSize: 50,
       fontFamily: 'Bebas Neue',
       fontColor: '#FFFFFF',
       strokeColor: '#0A0A0A',
@@ -105,7 +106,7 @@ const CAPTION_PRESETS = [
     },
     style: {
       position: 'middle',
-      fontSize: 40,
+      fontSize: 50,
       fontFamily: 'Oswald',
       fontColor: '#E0F2FE',
       strokeColor: '#0F172A',
@@ -127,7 +128,7 @@ const CAPTION_PRESETS = [
     },
     style: {
       position: 'middle',
-      fontSize: 40,
+      fontSize: 50,
       fontFamily: 'Montserrat',
       fontColor: '#111111',
       strokeColor: '#111111',
@@ -149,7 +150,7 @@ const CAPTION_PRESETS = [
     },
     style: {
       position: 'bottom',
-      fontSize: 40,
+      fontSize: 50,
       fontFamily: 'Teko',
       fontColor: '#EAFB23',
       strokeColor: '#101010',
@@ -177,6 +178,7 @@ const SECTION_ITEMS = [
   { id: 'transcript', label: 'Transcripción', icon: FileText },
   { id: 'captions', label: 'Subtítulos', icon: Captions },
   { id: 'subtitle_edit', label: 'Editar subtítulos', icon: Type },
+  { id: 'viral_hook', label: 'Hook Viral', icon: Sparkles },
   { id: 'layout', label: 'Editar layout', icon: LayoutTemplate },
   { id: 'music', label: 'Música', icon: Music2 }
 ];
@@ -659,12 +661,15 @@ export default function ClipStudioModal({
   const [musicVolume, setMusicVolume] = useState(0.18);
   const [duckVoice, setDuckVoice] = useState(true);
 
+  const [viralHookText, setViralHookText] = useState('');
+  const [viralHookDuration, setViralHookDuration] = useState(2.5);
+
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewCurrentTime, setPreviewCurrentTime] = useState(0);
   const [previewDuration, setPreviewDuration] = useState(0);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [timelineZoom, setTimelineZoom] = useState(TIMELINE_ZOOM_DEFAULT);
-  const [timelineMode, setTimelineMode] = useState(TIMELINE_MODE_MINI);
+  const [timelineMode, setTimelineMode] = useState(TIMELINE_MODE_ADVANCED);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [previewVideoUrl, setPreviewVideoUrl] = useState('');
   const [fastPreviewCaptionsBurned, setFastPreviewCaptionsBurned] = useState(false);
@@ -728,6 +733,9 @@ export default function ClipStudioModal({
     return '';
   }, [activeSubtitleEntry, subtitleEntries, previewCurrentTime, previewPlaying, emojiOn]);
 
+  const baseClipStart = Number(clip?.start || 0);
+  const baseClipEnd = Number(clip?.end || baseClipStart);
+
   const karaokePreview = useMemo(() => {
     if (!karaokeMode || !activeSubtitleEntry) return null;
     const rawText = formatSubtitleText(activeSubtitleEntry.text, activeSubtitleEntry.emphasize, punctuationOn);
@@ -755,9 +763,6 @@ export default function ClipStudioModal({
   }, [karaokeMode, activeSubtitleEntry, previewCurrentTime, punctuationOn, baseClipStart, transcriptSegments, speakerColorMode]);
   const captionDragEnabled = captionsOn && (section === 'captions' || section === 'subtitle_edit');
   const captionAnchorTopPercent = position === 'top' ? 12 : position === 'middle' ? 50 : 86;
-
-  const baseClipStart = Number(clip?.start || 0);
-  const baseClipEnd = Number(clip?.end || baseClipStart);
 
   const filteredTranscript = useMemo(() => {
     const q = String(transcriptQuery || '').trim().toLowerCase();
@@ -1095,8 +1100,51 @@ export default function ClipStudioModal({
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      const parsed = parseSrt(data?.srt || '');
-      setSubtitleEntries(parsed);
+      const rawParsed = parseSrt(data?.srt || '');
+
+      // Enrich with rich words and speakers from transcriptSegments if available
+      const enrichedParsed = rawParsed.map(entry => {
+        let entryWords = [];
+        let speakerCounts = {};
+
+        if (transcriptSegments && transcriptSegments.length > 0) {
+          transcriptSegments.forEach(seg => {
+            if (seg.words && Array.isArray(seg.words)) {
+              seg.words.forEach(w => {
+                // Approximate overlap check (Word falls inside SRT bound)
+                if (w.end > entry.start && w.start < entry.end) {
+                  entryWords.push({
+                    word: w.word,
+                    start: w.start,
+                    end: w.end,
+                    speaker: seg.speaker || null
+                  });
+                  if (seg.speaker) {
+                    speakerCounts[seg.speaker] = (speakerCounts[seg.speaker] || 0) + 1;
+                  }
+                }
+              });
+            }
+          });
+        }
+
+        let dominantSpeaker = null;
+        let maxCount = 0;
+        for (const [spk, count] of Object.entries(speakerCounts)) {
+          if (count > maxCount) {
+            maxCount = count;
+            dominantSpeaker = spk;
+          }
+        }
+
+        return {
+          ...entry,
+          words: entryWords.length > 0 ? entryWords : undefined,
+          speaker: dominantSpeaker || undefined
+        };
+      });
+
+      setSubtitleEntries(enrichedParsed);
     } catch (e) {
       setError(`No se pudo cargar subtítulos: ${e.message}`);
       setTimeout(() => setError(''), 3500);
@@ -1556,58 +1604,31 @@ export default function ClipStudioModal({
         || Math.abs(Number(layoutSplitOffsetBX) - originalSplitOffsetBX) > 0.01
         || Math.abs(Number(layoutSplitOffsetBY) - originalSplitOffsetBY) > 0.01;
 
-      if (needsRecut) {
-        const recutRes = await apiFetch('/api/recut', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            job_id: jobId,
-            clip_index: clipIndex,
-            start: requestedStart,
-            end: requestedEnd,
-            aspect_ratio: layoutAspect,
-            layout_mode: normalizedLayoutMode,
-            auto_smart_reframe: autoSmartRequest,
-            fit_mode: layoutFitMode,
-            zoom: Number(layoutZoom),
-            offset_x: Number(layoutOffsetX),
-            offset_y: Number(layoutOffsetY),
-            split_zoom_a: Number(layoutSplitZoomA),
-            split_offset_a_x: Number(layoutSplitOffsetAX),
-            split_offset_a_y: Number(layoutSplitOffsetAY),
-            split_zoom_b: Number(layoutSplitZoomB),
-            split_offset_b_x: Number(layoutSplitOffsetBX),
-            split_offset_b_y: Number(layoutSplitOffsetBY)
-          })
-        });
-        if (!recutRes.ok) throw new Error(await recutRes.text());
-        const recutData = await recutRes.json();
-        if (recutData?.new_video_url) {
-          resultingUrl = getApiUrl(recutData.new_video_url);
-          workingFile = extractFilename(recutData.new_video_url);
-        }
-        if (Number.isFinite(Number(recutData?.start)) && Number.isFinite(Number(recutData?.end))) {
-          appliedClipStart = Number(recutData.start);
-          appliedClipEnd = Number(recutData.end);
-        } else {
-          appliedClipStart = requestedStart;
-          appliedClipEnd = requestedEnd;
-        }
-        if (typeof recutData?.layout_mode === 'string') {
-          appliedLayoutMode = String(recutData.layout_mode).toLowerCase() === 'split' ? 'split' : 'single';
-          setLayoutMode(appliedLayoutMode);
-        }
-        if (typeof recutData?.auto_smart_reframe_applied === 'boolean') {
-          appliedLayoutAutoSmart = Boolean(recutData.auto_smart_reframe_applied);
-          setLayoutAutoSmart(appliedLayoutAutoSmart);
-        }
-      }
+      // We now determine if a new render is required based on layout OR caption changes.
+      // With Single-Pass Optimization, we send everything to /api/recut.
+      const captionsChanged = captionsOn && (
+        appliedCaptionPosition !== String(clip?.caption_position || appliedCaptionPosition)
+        || Math.abs(appliedCaptionOffsetX - Number(clip?.caption_offset_x || 0)) > 0.01
+        || Math.abs(appliedCaptionOffsetY - Number(clip?.caption_offset_y || 0)) > 0.01
+        || Math.abs(appliedCaptionFontSize - Number(clip?.caption_font_size || appliedCaptionFontSize)) > 0.01
+        || appliedCaptionFontFamily !== String(clip?.caption_font_family || appliedCaptionFontFamily)
+        || appliedCaptionFontColor !== String(clip?.caption_font_color || appliedCaptionFontColor)
+        || appliedCaptionStrokeColor !== String(clip?.caption_stroke_color || appliedCaptionStrokeColor)
+        || Math.abs(appliedCaptionStrokeWidth - Number(clip?.caption_stroke_width || appliedCaptionStrokeWidth)) > 0.01
+        || appliedCaptionBold !== Boolean(clip?.caption_bold ?? appliedCaptionBold)
+        || appliedCaptionBoxColor !== String(clip?.caption_box_color || appliedCaptionBoxColor)
+        || Math.abs(appliedCaptionBoxOpacity - Number(clip?.caption_box_opacity || appliedCaptionBoxOpacity)) > 0.01
+        || appliedCaptionKaraokeMode !== Boolean(clip?.caption_karaoke_mode ?? appliedCaptionKaraokeMode)
+        || appliedCaptionAnimation !== String(clip?.caption_animation || appliedCaptionAnimation)
+        || appliedCaptionSpeakerColorMode !== Boolean(clip?.caption_speaker_color_mode ?? appliedCaptionSpeakerColorMode)
+      );
 
+      // We always attempt to fetch fresh subtitle SRT data if we are overriding it or if timestamps changed
       const clipRangeChangedByRecut = (
         Math.abs(Number(appliedClipStart || 0) - Number(clipStart || 0)) > 0.01
         || Math.abs(Number(appliedClipEnd || 0) - Number(clipEnd || 0)) > 0.01
       );
-      if (captionsOn && clipRangeChangedByRecut) {
+      if (captionsOn && (clipRangeChangedByRecut || srtContent)) {
         try {
           const refreshedSrtRes = await apiFetch('/api/subtitle/preview', {
             method: 'POST',
@@ -1631,68 +1652,73 @@ export default function ClipStudioModal({
         }
       }
 
-      if (captionsOn) {
-        const subtitleRes = await apiFetch('/api/subtitle', {
+      if (needsRecut || captionsChanged) {
+        const payload = {
+          job_id: jobId,
+          clip_index: clipIndex,
+          start: requestedStart,
+          end: requestedEnd,
+          aspect_ratio: layoutAspect,
+          layout_mode: normalizedLayoutMode,
+          auto_smart_reframe: autoSmartRequest,
+          fit_mode: layoutFitMode,
+          zoom: Number(layoutZoom),
+          offset_x: Number(layoutOffsetX),
+          offset_y: Number(layoutOffsetY),
+          split_zoom_a: Number(layoutSplitZoomA),
+          split_offset_a_x: Number(layoutSplitOffsetAX),
+          split_offset_a_y: Number(layoutSplitOffsetAY),
+          split_zoom_b: Number(layoutSplitZoomB),
+          split_offset_b_x: Number(layoutSplitOffsetBX),
+          split_offset_b_y: Number(layoutSplitOffsetBY),
+          // Subtitle parameters injected directly into the Recut API step
+          captions_on: captionsOn,
+          caption_position: appliedCaptionPosition,
+          caption_font_size: appliedCaptionFontSize,
+          caption_font_family: appliedCaptionFontFamily,
+          caption_font_color: appliedCaptionFontColor,
+          caption_stroke_color: appliedCaptionStrokeColor,
+          caption_stroke_width: appliedCaptionStrokeWidth,
+          caption_bold: appliedCaptionBold,
+          caption_box_color: appliedCaptionBoxColor,
+          caption_box_opacity: appliedCaptionBoxOpacity,
+          caption_karaoke_mode: appliedCaptionKaraokeMode,
+          caption_animation: appliedCaptionAnimation,
+          caption_speaker_color_mode: appliedCaptionSpeakerColorMode,
+          caption_offset_x: appliedCaptionOffsetX,
+          caption_offset_y: appliedCaptionOffsetY,
+          srt_content: subtitleSrtPayload,
+          viral_hook_text: viralHookText,
+          viral_hook_duration: viralHookDuration
+        };
+
+        const recutRes = await apiFetch('/api/recut', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            job_id: jobId,
-            clip_index: clipIndex,
-            position: appliedCaptionPosition,
-            font_size: appliedCaptionFontSize,
-            font_family: appliedCaptionFontFamily,
-            font_color: appliedCaptionFontColor,
-            stroke_color: appliedCaptionStrokeColor,
-            stroke_width: appliedCaptionStrokeWidth,
-            bold: appliedCaptionBold,
-            box_color: appliedCaptionBoxColor,
-            box_opacity: appliedCaptionBoxOpacity,
-            karaoke_mode: appliedCaptionKaraokeMode,
-            subtitle_animation: appliedCaptionAnimation,
-            speaker_color_mode: appliedCaptionSpeakerColorMode,
-            caption_offset_x: appliedCaptionOffsetX,
-            caption_offset_y: appliedCaptionOffsetY,
-            srt_content: subtitleSrtPayload,
-            input_filename: workingFile || undefined
-          })
+          body: JSON.stringify(payload)
         });
-        if (!subtitleRes.ok) throw new Error(await subtitleRes.text());
-        const subtitleData = await subtitleRes.json();
-        appliedCaptionPosition = String(subtitleData?.caption_position || appliedCaptionPosition);
-        appliedCaptionOffsetX = Number.isFinite(Number(subtitleData?.caption_offset_x))
-          ? Number(subtitleData.caption_offset_x)
-          : appliedCaptionOffsetX;
-        appliedCaptionOffsetY = Number.isFinite(Number(subtitleData?.caption_offset_y))
-          ? Number(subtitleData.caption_offset_y)
-          : appliedCaptionOffsetY;
-        appliedCaptionFontSize = Number.isFinite(Number(subtitleData?.caption_font_size))
-          ? Number(subtitleData.caption_font_size)
-          : appliedCaptionFontSize;
-        appliedCaptionFontFamily = normalizeSubtitleFontFamily(subtitleData?.caption_font_family || appliedCaptionFontFamily);
-        appliedCaptionFontColor = String(subtitleData?.caption_font_color || appliedCaptionFontColor);
-        appliedCaptionStrokeColor = String(subtitleData?.caption_stroke_color || appliedCaptionStrokeColor);
-        appliedCaptionStrokeWidth = Number.isFinite(Number(subtitleData?.caption_stroke_width))
-          ? Number(subtitleData.caption_stroke_width)
-          : appliedCaptionStrokeWidth;
-        appliedCaptionBold = typeof subtitleData?.caption_bold === 'boolean'
-          ? subtitleData.caption_bold
-          : appliedCaptionBold;
-        appliedCaptionBoxColor = String(subtitleData?.caption_box_color || appliedCaptionBoxColor);
-        appliedCaptionBoxOpacity = Number.isFinite(Number(subtitleData?.caption_box_opacity))
-          ? Number(subtitleData.caption_box_opacity)
-          : appliedCaptionBoxOpacity;
-        appliedCaptionKaraokeMode = typeof subtitleData?.caption_karaoke_mode === 'boolean'
-          ? subtitleData.caption_karaoke_mode
-          : appliedCaptionKaraokeMode;
-        appliedCaptionAnimation = ['none', 'pop', 'bounce', 'slide'].includes(String(subtitleData?.caption_animation || '').toLowerCase())
-          ? String(subtitleData.caption_animation).toLowerCase()
-          : appliedCaptionAnimation;
-        appliedCaptionSpeakerColorMode = typeof subtitleData?.caption_speaker_color_mode === 'boolean'
-          ? subtitleData.caption_speaker_color_mode
-          : appliedCaptionSpeakerColorMode;
-        if (subtitleData?.new_video_url) {
-          resultingUrl = getApiUrl(subtitleData.new_video_url);
-          workingFile = extractFilename(subtitleData.new_video_url);
+        if (!recutRes.ok) throw new Error(await recutRes.text());
+        const recutData = await recutRes.json();
+
+        // Single Output processing
+        if (recutData?.new_video_url) {
+          resultingUrl = getApiUrl(recutData.new_video_url);
+          workingFile = extractFilename(recutData.new_video_url);
+        }
+        if (Number.isFinite(Number(recutData?.start)) && Number.isFinite(Number(recutData?.end))) {
+          appliedClipStart = Number(recutData.start);
+          appliedClipEnd = Number(recutData.end);
+        } else {
+          appliedClipStart = requestedStart;
+          appliedClipEnd = requestedEnd;
+        }
+        if (typeof recutData?.layout_mode === 'string') {
+          appliedLayoutMode = String(recutData.layout_mode).toLowerCase() === 'split' ? 'split' : 'single';
+          setLayoutMode(appliedLayoutMode);
+        }
+        if (typeof recutData?.auto_smart_reframe_applied === 'boolean') {
+          appliedLayoutAutoSmart = Boolean(recutData.auto_smart_reframe_applied);
+          setLayoutAutoSmart(appliedLayoutAutoSmart);
         }
       }
 
@@ -2491,7 +2517,7 @@ export default function ClipStudioModal({
 
                       <div className="grid grid-cols-2 gap-3">
                         <label className="text-xs text-zinc-600 dark:text-zinc-300">Tamaño
-                          <input type="number" min="12" max="84" value={fontSize} onChange={(e) => setFontSize(Number(e.target.value || 40))} className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm" />
+                          <input type="number" min="12" max="84" value={fontSize} onChange={(e) => setFontSize(Number(e.target.value || 50))} className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm" />
                         </label>
                         <label className="text-xs text-zinc-600 dark:text-zinc-300">Fuente
                           <select
@@ -2547,11 +2573,10 @@ export default function ClipStudioModal({
                               setSpeakerColorMode((v) => !v);
                               setSavedPulse(false);
                             }}
-                            className={`mt-1 flex h-10 w-full items-center justify-between rounded-md border px-2 text-xs transition-colors ${
-                              speakerColorMode
-                                ? 'border-violet-400 bg-violet-100/70 dark:bg-violet-900/25 text-violet-700 dark:text-violet-300'
-                                : 'border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 text-zinc-600 dark:text-zinc-300'
-                            }`}
+                            className={`mt-1 flex h-10 w-full items-center justify-between rounded-md border px-2 text-xs transition-colors ${speakerColorMode
+                              ? 'border-violet-400 bg-violet-100/70 dark:bg-violet-900/25 text-violet-700 dark:text-violet-300'
+                              : 'border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 text-zinc-600 dark:text-zinc-300'
+                              }`}
                             title="Asigna color de resaltado según el hablante detectado en transcript."
                           >
                             <span>{speakerColorMode ? 'Activo' : 'Inactivo'}</span>
@@ -2726,6 +2751,64 @@ export default function ClipStudioModal({
                     {!isLoadingSrt && filteredSubtitleEntries.length === 0 && (
                       <p className="text-sm text-zinc-500">No hay líneas de subtítulo para editar.</p>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {section === 'viral_hook' && (
+                <div className="space-y-4">
+                  <div>
+                    <h3 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100 flex items-center gap-2">
+                      <Sparkles size={18} className="text-amber-500" /> Viral Hook Overlay
+                    </h3>
+                    <p className="text-xs text-zinc-500 mt-1">
+                      Muestra un texto impactante centrado arriba en los primeros segundos del video para captar atención.
+                    </p>
+                  </div>
+
+                  <div className="space-y-3 p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/80">
+                    <div className="flex flex-col gap-2">
+                      <div className="flex justify-between items-center">
+                        <label className="text-sm font-medium text-slate-700 dark:text-slate-200 text-left">Texto del Hook</label>
+                        <button
+                          className="text-xs text-violet-600 dark:text-violet-400 font-medium hover:underline bg-transparent"
+                          onClick={() => {
+                            if (clip?.transcript && typeof clip.transcript === 'object' && clip.transcript.text) {
+                              const sentenceMatch = clip.transcript.text.split(/[.?!]/)[0];
+                              if (sentenceMatch) {
+                                setViralHookText(sentenceMatch.trim() + " 🤯");
+                              }
+                            } else if (subtitleEntries && subtitleEntries.length > 0) {
+                              setViralHookText(subtitleEntries[0].text + " 🤯");
+                            }
+                          }}
+                        >
+                          Generar con IA (Transcript)
+                        </button>
+                      </div>
+                      <textarea
+                        value={viralHookText}
+                        onChange={(e) => setViralHookText(e.target.value)}
+                        placeholder="Ej: Un pasajero me reconoció en el avión 🤯"
+                        rows={2}
+                        className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-transparent px-3 py-2 text-sm text-slate-800 dark:text-slate-100 focus:border-violet-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div className="flex flex-col gap-2">
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200 text-left">
+                        Duración: <span className="text-violet-600 dark:text-violet-400">{viralHookDuration}s</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="1"
+                        max="5"
+                        step="0.5"
+                        value={viralHookDuration}
+                        onChange={(e) => setViralHookDuration(Number(e.target.value))}
+                        className="w-full accent-violet-600"
+                      />
+                    </div>
                   </div>
                 </div>
               )}
@@ -3337,71 +3420,28 @@ export default function ClipStudioModal({
                     </div>
                   )}
 
-                  {captionsOn && !fastPreviewCaptionsBurned && Boolean(previewText) && (
-                    <div className="absolute inset-0 pointer-events-none">
-                      <div
-                        className="absolute px-6 text-center"
-                        style={{
-                          left: `calc(50% + ${effectiveCaptionOffsetX}%)`,
-                          top: `calc(${captionAnchorTopPercent}% + ${effectiveCaptionOffsetY}%)`,
-                          transform: 'translate(-50%, -50%)',
-                          width: 'min(94%, 960px)'
-                        }}
-                      >
-                        <span
-                          className={`inline-block rounded-md px-2 py-1 ${captionDragEnabled ? (isDraggingCaption ? 'cursor-grabbing' : 'cursor-grab') : ''}`}
-                          onMouseDown={startCaptionDrag}
-                          style={{
-                            fontSize: `${Math.max(12, Math.round(fontSize * 0.58))}px`,
-                            fontFamily,
-                            fontWeight: bold ? 700 : 400,
-                            color: fontColor,
-                            textShadow: `0 0 ${strokeWidth}px ${strokeColor}`,
-                            backgroundColor: boxOpacity > 0 ? toRgba(boxColor, boxOpacity) : 'transparent',
-                            pointerEvents: captionDragEnabled ? 'auto' : 'none',
-                            userSelect: 'none'
-                          }}
-                        >
-                          {previewEmoji && (
-                            <span
-                              className="block leading-none mb-1"
-                              style={{ fontSize: `${Math.max(16, Math.round(fontSize * 0.66))}px` }}
-                            >
-                              {previewEmoji}
-                            </span>
-                          )}
-                          {karaokeMode && karaokePreview ? (
-                            karaokePreview.words.map((word, idx) => (
-                              <span
-                                key={`${word}-${idx}-${idx === karaokePreview.activeIndex ? 'active' : 'idle'}`}
-                                className={idx === karaokePreview.activeIndex ? 'rounded px-1' : ''}
-                                style={idx === karaokePreview.activeIndex
-                                  ? {
-                                    color: karaokePreview.activeColor,
-                                    display: 'inline-block',
-                                    marginRight: idx < karaokePreview.words.length - 1 ? '0.42em' : 0,
-                                    transform: 'scale(1.16)',
-                                    fontWeight: 800,
-                                    textShadow: `0 0 ${Math.max(2, Number(strokeWidth || 0) + 1)}px ${strokeColor}`,
-                                    animation: 'subtitleWordIn 180ms cubic-bezier(0.2, 0.7, 0.2, 1) both'
-                                  }
-                                  : {
-                                    opacity: 0.92,
-                                    display: 'inline-block',
-                                    marginRight: idx < karaokePreview.words.length - 1 ? '0.42em' : 0,
-                                    transform: 'translateY(0px) scale(1)',
-                                    transition: 'opacity 120ms ease'
-                                  }}
-                              >
-                                {word}
-                              </span>
-                            ))
-                          ) : (
-                            previewText
-                          )}
-                        </span>
-                      </div>
-                    </div>
+                  {captionsOn && !fastPreviewCaptionsBurned && subtitleEntries && subtitleEntries.length > 0 && (
+                    <SubtitleRenderer
+                      currentTime={previewCurrentTime}
+                      srtEntries={subtitleEntries}
+                      fontSize={fontSize}
+                      fontFamily={fontFamily}
+                      fontColor={fontColor}
+                      strokeColor={strokeColor}
+                      strokeWidth={strokeWidth}
+                      bold={bold}
+                      boxColor={boxColor}
+                      boxOpacity={boxOpacity}
+                      karaokeMode={karaokeMode}
+                      position={position}
+                      offsetX={effectiveCaptionOffsetX}
+                      offsetY={effectiveCaptionOffsetY}
+                      animation={subtitleAnimation}
+                      speakerColorMode={speakerColorMode}
+                      isDragging={isDraggingCaption}
+                      onMouseDown={startCaptionDrag}
+                      captionDragEnabled={captionDragEnabled}
+                    />
                   )}
                 </div>
                 {videoLoadError && (
@@ -3412,304 +3452,153 @@ export default function ClipStudioModal({
               </div>
 
               <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-3 text-slate-700 dark:text-slate-200">
+                {/* ── Controls Bar ── */}
                 <div className="flex items-center justify-between gap-3 text-sm mb-2.5">
                   <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="w-8 h-8 rounded-md border border-slate-200 dark:border-slate-700 inline-flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
-                      title="Controles"
-                    >
-                      <SlidersHorizontal size={15} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setTimelineZoom((z) => clamp(z - 0.15, TIMELINE_ZOOM_MIN, TIMELINE_ZOOM_MAX))}
-                      className="w-8 h-8 rounded-md border border-slate-200 dark:border-slate-700 inline-flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
-                      title="Alejar timeline"
-                    >
+                    <button type="button" onClick={() => setTimelineZoom((z) => clamp(z - 0.15, TIMELINE_ZOOM_MIN, TIMELINE_ZOOM_MAX))} className="w-8 h-8 rounded-md border border-slate-200 dark:border-slate-700 inline-flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700" title="Alejar">
                       <ZoomOut size={15} />
                     </button>
-                    <input
-                      type="range"
-                      min={String(TIMELINE_ZOOM_MIN)}
-                      max={String(TIMELINE_ZOOM_MAX)}
-                      step="0.05"
-                      value={timelineZoom}
-                      onChange={(e) => setTimelineZoom(clamp(Number(e.target.value || TIMELINE_ZOOM_DEFAULT), TIMELINE_ZOOM_MIN, TIMELINE_ZOOM_MAX))}
-                      className="w-28 accent-primary"
-                      title="Zoom timeline"
-                    />
-                    <span className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums min-w-[44px]">
-                      {`${Math.round(timelineZoom * 100)}%`}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setTimelineZoom((z) => clamp(z + 0.15, TIMELINE_ZOOM_MIN, TIMELINE_ZOOM_MAX))}
-                      className="w-8 h-8 rounded-md border border-slate-200 dark:border-slate-700 inline-flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
-                      title="Acercar timeline"
-                    >
+                    <input type="range" min={String(TIMELINE_ZOOM_MIN)} max={String(TIMELINE_ZOOM_MAX)} step="0.05" value={timelineZoom} onChange={(e) => setTimelineZoom(clamp(Number(e.target.value || TIMELINE_ZOOM_DEFAULT), TIMELINE_ZOOM_MIN, TIMELINE_ZOOM_MAX))} className="w-28 accent-primary" title="Zoom" />
+                    <span className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums min-w-[44px]">{`${Math.round(timelineZoom * 100)}%`}</span>
+                    <button type="button" onClick={() => setTimelineZoom((z) => clamp(z + 0.15, TIMELINE_ZOOM_MIN, TIMELINE_ZOOM_MAX))} className="w-8 h-8 rounded-md border border-slate-200 dark:border-slate-700 inline-flex items-center justify-center text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700" title="Acercar">
                       <ZoomIn size={15} />
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setTimelineZoom(TIMELINE_ZOOM_DEFAULT)}
-                      className="h-8 px-2.5 rounded-md border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700"
-                      title="Ajustar vista"
-                    >
-                      Ajustar
-                    </button>
-                    <div className="inline-flex items-center rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden">
-                      <button
-                        type="button"
-                        onClick={() => setTimelineMode(TIMELINE_MODE_MINI)}
-                        className={`h-8 px-2.5 text-xs font-semibold transition-colors ${timelineMode === TIMELINE_MODE_MINI
-                          ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300'
-                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                          }`}
-                        title="Vista mini"
-                      >
-                        Mini
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTimelineMode(TIMELINE_MODE_ADVANCED)}
-                        className={`h-8 px-2.5 text-xs font-semibold transition-colors ${timelineMode === TIMELINE_MODE_ADVANCED
-                          ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300'
-                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                          }`}
-                        title="Vista avanzada"
-                      >
-                        Avanzado
-                      </button>
-                    </div>
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-slate-600 dark:text-slate-300 tabular-nums">{formatTimelineTime(previewCurrentTime)}</span>
-                    <button
-                      type="button"
-                      onClick={togglePreviewPlayback}
-                      className="w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 inline-flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-700"
-                    >
+                    <button type="button" onClick={togglePreviewPlayback} className="w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 inline-flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-700">
                       {previewPlaying ? <Pause size={14} /> : <Play size={14} />}
                     </button>
                     <span className="text-slate-500 dark:text-slate-400 tabular-nums">{formatTimelineTime(timelineDuration)}</span>
-                    <button
-                      type="button"
-                      onClick={cyclePlaybackRate}
-                      className="min-w-[44px] px-2 h-8 rounded-md border border-slate-200 dark:border-slate-700 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-700"
-                    >
-                      {`${playbackRate}x`}
+                    <button type="button" onClick={cyclePlaybackRate} className="min-w-[44px] px-2 h-8 rounded-md border border-slate-200 dark:border-slate-700 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-700">{`${playbackRate}x`}</button>
+                    <button type="button" onClick={() => setSnapEnabled((v) => !v)} className={`h-8 px-2.5 rounded-md border text-xs font-semibold inline-flex items-center gap-1.5 ${snapEnabled ? 'border-emerald-300 bg-emerald-100 text-emerald-700 dark:border-emerald-700/60 dark:bg-emerald-900/30 dark:text-emerald-300' : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'}`} title="Snap magnético: cuando está ON el cursor se adhiere automáticamente a los puntos del transcript al arrastrar">
+                      <Crosshair size={13} />{snapEnabled ? 'Snap ON' : 'Snap OFF'}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setSnapEnabled((v) => !v)}
-                      className={`h-8 px-2.5 rounded-md border text-xs font-semibold inline-flex items-center gap-1.5 ${snapEnabled
-                        ? 'border-emerald-300 bg-emerald-100 text-emerald-700 dark:border-emerald-700/60 dark:bg-emerald-900/30 dark:text-emerald-300'
-                        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
-                        }`}
-                      title="Snap magnético a transcript"
-                    >
-                      <Crosshair size={13} />
-                      {snapEnabled ? 'Snap ON' : 'Snap OFF'}
-                    </button>
+                    <div className="w-px h-5 bg-slate-200 dark:bg-slate-600" />
+                    <button type="button" onClick={() => { const s = snapToNearest(previewCurrentTime); setLayoutStart(Number((baseClipStart + clamp(s, 0, Math.max(0, selectionEndRel - 0.2))).toFixed(3))); }} className="h-8 px-2.5 rounded-md border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700" title="Marcar IN: establece el punto de inicio del clip en la posición actual del cursor (tecla I en editores profesionales)">‹ Marcar IN</button>
+                    <button type="button" onClick={() => { const s = snapToNearest(previewCurrentTime); setLayoutEnd(Number((baseClipStart + clamp(s, selectionStartRel + 0.2, timelineDuration)).toFixed(3))); }} className="h-8 px-2.5 rounded-md border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700" title="Marcar OUT: establece el punto final del clip en la posición actual del cursor (tecla O en editores profesionales)">Marcar OUT ›</button>
                   </div>
                 </div>
 
-                <div className="mb-2 flex items-center justify-between text-[11px]">
-                  <div className="text-slate-500 dark:text-slate-400">
-                    Timeline de edición
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const snapped = snapToNearest(previewCurrentTime);
-                        const nextRel = clamp(snapped, 0, Math.max(0, selectionEndRel - 0.2));
-                        setLayoutStart(Number((baseClipStart + nextRel).toFixed(3)));
-                      }}
-                      className="px-2 py-1 rounded border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700"
-                    >
-                      Marcar IN
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const snapped = snapToNearest(previewCurrentTime);
-                        const nextRel = clamp(snapped, selectionStartRel + 0.2, timelineDuration);
-                        setLayoutEnd(Number((baseClipStart + nextRel).toFixed(3)));
-                      }}
-                      className="px-2 py-1 rounded border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700"
-                    >
-                      Marcar OUT
-                    </button>
-                  </div>
-                </div>
+                {/* ── NLE Layout: sticky labels + scrollable tracks ── */}
+                <div className="flex rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
 
-                <div ref={timelineViewportRef} className="overflow-x-auto custom-scrollbar">
-                  <div
-                    ref={timelineTrackRef}
-                    className="relative select-none rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 overflow-hidden cursor-pointer"
-                    style={{ width: `${Math.max(65, Math.round(timelineZoom * 100))}%`, minWidth: '520px' }}
-                    onClick={(e) => handleTimelinePointerSeek(e.clientX)}
-                  >
-                    <div className="px-3 pt-2 pb-1 border-b border-slate-200 dark:border-slate-700">
-                      <div className="relative h-5">
-                        {timelineTicks.map((tick) => {
-                          const left = `${(tick / Math.max(0.001, timelineDuration)) * 100}%`;
-                          return (
-                            <div key={`tick-${tick}`} className="absolute top-0 -translate-x-1/2" style={{ left }}>
-                              <div className="w-px h-2 bg-slate-300 dark:bg-slate-600 mx-auto" />
-                              <div className="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400 tabular-nums">
-                                {`${Math.round(tick)}s`}
-                              </div>
-                            </div>
-                          );
-                        })}
+                  {/* Fixed label sidebar */}
+                  <div className="shrink-0 w-[72px] border-r border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 flex flex-col">
+                    {/* Tick ruler spacer */}
+                    <div className="h-[28px] border-b border-slate-200 dark:border-slate-700" />
+                    {/* Video label */}
+                    <div className="h-[52px] border-b border-slate-200 dark:border-slate-700 flex items-center gap-1.5 px-2">
+                      <div className="w-4 h-4 rounded-sm bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shrink-0">
+                        <svg width="8" height="8" viewBox="0 0 8 8" fill="white"><polygon points="2,1 7,4 2,7" /></svg>
                       </div>
+                      <span className="text-[10px] font-semibold text-slate-600 dark:text-slate-300">Video</span>
                     </div>
+                    {/* Subs label */}
+                    <div className="h-[58px] border-b border-slate-200 dark:border-slate-700 flex items-center gap-1.5 px-2">
+                      <div className="w-4 h-4 rounded-sm bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center shrink-0">
+                        <svg width="9" height="7" viewBox="0 0 9 7" fill="none"><rect x="0" y="0" width="9" height="2" rx="1" fill="white" /><rect x="0" y="4" width="6" height="2" rx="1" fill="white" /></svg>
+                      </div>
+                      <span className="text-[10px] font-semibold text-slate-600 dark:text-slate-300">Subs</span>
+                    </div>
+                    {/* Waveform label */}
+                    {timelineMode === TIMELINE_MODE_ADVANCED && (
+                      <div className="h-[72px] flex items-center gap-1.5 px-2">
+                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="1" y="4" width="2" height="6" rx="1" fill="#64748b" /><rect x="4" y="2" width="2" height="8" rx="1" fill="#64748b" /><rect x="7" y="5" width="2" height="5" rx="1" fill="#64748b" /></svg>
+                        <span className="text-[10px] font-semibold text-slate-600 dark:text-slate-300">Audio</span>
+                      </div>
+                    )}
+                  </div>
 
-                    <div className="px-3 py-2 border-b border-slate-200 dark:border-slate-700">
-                      <div className="relative h-8 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/50">
-                        <div
-                          className="absolute inset-y-0 left-0 bg-slate-100 dark:bg-slate-800"
-                          style={{ width: `${(selectionStartRel / Math.max(0.001, timelineDuration)) * 100}%` }}
-                        />
-                        <div
-                          className="absolute inset-y-0 right-0 bg-slate-100 dark:bg-slate-800"
-                          style={{ width: `${(1 - (selectionEndRel / Math.max(0.001, timelineDuration))) * 100}%` }}
-                        />
-                        <div
-                          className="absolute inset-y-0 rounded-md border border-emerald-400 bg-emerald-200/50 dark:bg-emerald-500/20 cursor-grab"
-                          style={{
-                            left: `${(selectionStartRel / Math.max(0.001, timelineDuration)) * 100}%`,
-                            width: `${((selectionEndRel - selectionStartRel) / Math.max(0.001, timelineDuration)) * 100}%`
-                          }}
-                          onMouseDown={(e) => startSelectionDrag(e, 'move')}
-                          title="Rango de recorte"
-                        >
-                          <button
-                            type="button"
-                            className="absolute left-0 top-0 bottom-0 w-2 bg-emerald-500/80 cursor-ew-resize"
-                            onMouseDown={(e) => startSelectionDrag(e, 'start')}
-                            onClick={(e) => e.stopPropagation()}
-                            aria-label="Mover inicio de recorte"
-                          />
-                          <button
-                            type="button"
-                            className="absolute right-0 top-0 bottom-0 w-2 bg-emerald-500/80 cursor-ew-resize"
-                            onMouseDown={(e) => startSelectionDrag(e, 'end')}
-                            onClick={(e) => e.stopPropagation()}
-                            aria-label="Mover fin de recorte"
-                          />
+                  {/* Scrollable track area */}
+                  <div ref={timelineViewportRef} className="flex-1 overflow-x-auto custom-scrollbar">
+                    <div
+                      ref={timelineTrackRef}
+                      className="relative select-none bg-slate-50 dark:bg-slate-900/40 cursor-col-resize"
+                      style={{ minWidth: '400px', width: `${Math.max(100, Math.round(timelineZoom * 100))}%` }}
+                      onPointerDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.currentTarget.setPointerCapture(e.pointerId);
+                        handleTimelinePointerSeek(e.clientX);
+                      }}
+                      onPointerMove={(e) => {
+                        if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+                        handleTimelinePointerSeek(e.clientX);
+                      }}
+                      onPointerUp={(e) => { e.currentTarget.releasePointerCapture(e.pointerId); }}
+                    >
+                      {/* Tick ruler */}
+                      <div className="px-3 pt-2 pb-1 border-b border-slate-200 dark:border-slate-700">
+                        <div className="relative h-5">
+                          {timelineTicks.map((tick) => {
+                            const left = `${(tick / Math.max(0.001, timelineDuration)) * 100}%`;
+                            return (
+                              <div key={`tick-${tick}`} className="absolute top-0 -translate-x-1/2" style={{ left }}>
+                                <div className="w-px h-2 bg-slate-300 dark:bg-slate-600 mx-auto" />
+                                <div className="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400 tabular-nums">{`${Math.round(tick)}s`}</div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
-                    </div>
 
-                    <div className="px-3 py-2 border-b border-slate-200 dark:border-slate-700">
-                      <div className="relative h-10 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/50 overflow-hidden">
-                        {subtitleEntries
-                          .filter((entry) => String(entry?.text || '').trim())
-                          .map((entry) => {
+                      {/* Video track */}
+                      <div className="border-b border-slate-200 dark:border-slate-700 py-2 px-2">
+                        <div className="relative h-8 rounded-md overflow-hidden" style={{ background: 'linear-gradient(90deg,#1e3a5f 0%,#1a4a7a 40%,#1e3a5f 100%)' }}>
+                          <div className="absolute inset-y-0 left-0 bg-black/40" style={{ width: `${(selectionStartRel / Math.max(0.001, timelineDuration)) * 100}%` }} />
+                          <div className="absolute inset-y-0 right-0 bg-black/40" style={{ width: `${(1 - (selectionEndRel / Math.max(0.001, timelineDuration))) * 100}%` }} />
+                          <div className="absolute inset-y-0 border-t-2 border-b-2 border-cyan-400/80 cursor-grab" style={{ left: `${(selectionStartRel / Math.max(0.001, timelineDuration)) * 100}%`, width: `${((selectionEndRel - selectionStartRel) / Math.max(0.001, timelineDuration)) * 100}%`, background: 'linear-gradient(90deg,rgba(34,211,238,.18) 0%,rgba(56,189,248,.12) 100%)' }} onMouseDown={(e) => startSelectionDrag(e, 'move')} title="Rango de recorte">
+                            <button type="button" className="absolute left-0 top-0 bottom-0 w-2 bg-cyan-400/80 cursor-ew-resize" onMouseDown={(e) => startSelectionDrag(e, 'start')} onClick={(e) => e.stopPropagation()} aria-label="Inicio" />
+                            <button type="button" className="absolute right-0 top-0 bottom-0 w-2 bg-cyan-400/80 cursor-ew-resize" onMouseDown={(e) => startSelectionDrag(e, 'end')} onClick={(e) => e.stopPropagation()} aria-label="Fin" />
+                          </div>
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[10px] font-semibold text-white/70 pointer-events-none truncate max-w-[60%]">{clip?.video_title_for_youtube_short || `Clip ${clipIndex + 1}`}</span>
+                        </div>
+                      </div>
+
+                      {/* Subtitles track */}
+                      <div className="border-b border-slate-200 dark:border-slate-700 py-2 px-2">
+                        <div className="relative h-10 rounded-md bg-slate-900/10 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700 overflow-hidden">
+                          {subtitleEntries.filter((e) => String(e?.text || '').trim()).map((entry) => {
                             const start = clamp(Number(entry.start || 0), 0, timelineDuration);
                             const end = clamp(Number(entry.end || start), start + 0.08, timelineDuration);
                             const left = (start / Math.max(0.001, timelineDuration)) * 100;
                             const width = Math.max(0.8, ((end - start) / Math.max(0.001, timelineDuration)) * 100);
+                            const accent = fontColor || '#a78bfa';
                             return (
-                              <div
-                                key={`lane-${entry.id}`}
-                                className="absolute top-1 bottom-1 rounded-md border border-violet-400/70 bg-violet-500/20 text-[10px] text-violet-800 dark:text-violet-200 px-2 flex items-center cursor-grab"
-                                style={{ left: `${left}%`, width: `${width}%` }}
-                                onMouseDown={(e) => startSubtitleDrag(e, entry, 'move')}
-                                onDoubleClick={(e) => {
-                                  e.stopPropagation();
-                                  seekTo(start);
-                                }}
-                                title={entry.text}
-                              >
-                                <button
-                                  type="button"
-                                  className="absolute left-0 top-0 bottom-0 w-1.5 bg-violet-500/80 cursor-ew-resize"
-                                  onMouseDown={(e) => startSubtitleDrag(e, entry, 'start')}
-                                  onClick={(e) => e.stopPropagation()}
-                                  aria-label="Mover inicio de subtítulo"
-                                />
-                                <span className="truncate">{entry.text}</span>
-                                <button
-                                  type="button"
-                                  className="absolute right-0 top-0 bottom-0 w-1.5 bg-violet-500/80 cursor-ew-resize"
-                                  onMouseDown={(e) => startSubtitleDrag(e, entry, 'end')}
-                                  onClick={(e) => e.stopPropagation()}
-                                  aria-label="Mover fin de subtítulo"
-                                />
+                              <div key={`lane-${entry.id}`} className="absolute top-1 bottom-1 rounded-md text-[10px] px-2 flex items-center cursor-grab select-none transition-shadow hover:shadow-md" style={{ left: `${left}%`, width: `${width}%`, background: `${accent}22`, border: `1px solid ${accent}88`, color: accent }} onMouseDown={(e) => startSubtitleDrag(e, entry, 'move')} onDoubleClick={(e) => { e.stopPropagation(); seekTo(start); }} title={entry.text}>
+                                <button type="button" className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize rounded-l-md" style={{ background: `${accent}99` }} onMouseDown={(e) => startSubtitleDrag(e, entry, 'start')} onClick={(e) => e.stopPropagation()} aria-label="Inicio" />
+                                <span className="truncate pl-0.5 font-medium">{entry.text}</span>
+                                <button type="button" className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize rounded-r-md" style={{ background: `${accent}99` }} onMouseDown={(e) => startSubtitleDrag(e, entry, 'end')} onClick={(e) => e.stopPropagation()} aria-label="Fin" />
                               </div>
                             );
                           })}
-                      </div>
-                    </div>
-
-                    {transitionPoints.length > 0 && (
-                      <div className="px-3 py-2 border-b border-slate-200 dark:border-slate-700">
-                        <div className="relative h-8 rounded-md border border-amber-200 dark:border-amber-700/60 bg-amber-50/80 dark:bg-amber-900/15 overflow-hidden">
-                          {transitionPoints.map((point, idx) => (
-                            <div
-                              key={`transition-${idx}-${point}`}
-                              className="absolute top-0 bottom-0 -translate-x-1/2 pointer-events-none"
-                              style={{ left: `${(point / Math.max(0.001, timelineDuration)) * 100}%` }}
-                            >
-                              <div className="mx-auto mt-0.5 w-2 h-2 rotate-45 bg-amber-500 border border-amber-200 dark:border-amber-800" />
-                              <div className="mx-auto mt-0.5 w-px h-[18px] bg-amber-500/85" />
-                            </div>
-                          ))}
-                          <div className="absolute left-2 top-1 text-[10px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
-                            Transiciones
-                          </div>
                         </div>
                       </div>
-                    )}
 
-                    {timelineMode === TIMELINE_MODE_ADVANCED && (
-                      <>
-                        <div className="px-3 py-2.5 border-b border-slate-200 dark:border-slate-700">
-                          <div className="h-8 rounded-md bg-violet-100 dark:bg-violet-900/25 border border-violet-200 dark:border-violet-800 flex items-center px-3">
-                            <Type size={14} className="text-violet-500 mr-2 shrink-0" />
-                            <span className="text-sm text-violet-700 dark:text-violet-300 truncate">
-                              {clip?.video_title_for_youtube_short || `Clip n.º ${clipIndex + 1}`}
-                            </span>
-                          </div>
-                        </div>
-                        <div className="px-3 py-3 border-b border-slate-200 dark:border-slate-700">
+                      {/* Waveform (Advanced mode) */}
+                      {timelineMode === TIMELINE_MODE_ADVANCED && (
+                        <div className="py-2 px-2">
                           <div className="h-12 rounded-md bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-end gap-[2px] px-2">
                             {timelineDensityBars.map((amp, idx) => (
-                              <div
-                                key={`density-${idx}`}
-                                className="flex-1 rounded-t-sm bg-slate-500/80 dark:bg-slate-400/80"
-                                style={{ height: `${Math.max(7, amp * 100)}%` }}
-                              />
+                              <div key={`density-${idx}`} className="flex-1 rounded-t-sm bg-slate-500/80 dark:bg-slate-400/80" style={{ height: `${Math.max(7, amp * 100)}%` }} />
                             ))}
                           </div>
                         </div>
-                      </>
-                    )}
+                      )}
 
-                    <div
-                      className="absolute top-0 bottom-0 w-[2px] bg-slate-800/85 dark:bg-white/90 pointer-events-none"
-                      style={{ left: `${(clamp(previewCurrentTime, 0, timelineDuration) / Math.max(0.001, timelineDuration)) * 100}%` }}
-                    />
-                    <div
-                      className="absolute top-1.5 w-3 h-3 rounded-full bg-slate-800 dark:bg-white border-2 border-white dark:border-slate-900 pointer-events-none -translate-x-1/2"
-                      style={{ left: `${(clamp(previewCurrentTime, 0, timelineDuration) / Math.max(0.001, timelineDuration)) * 100}%` }}
-                    />
+                      {/* Playhead */}
+                      <div className="absolute top-0 bottom-0 w-[2px] bg-slate-800/85 dark:bg-white/90 pointer-events-none" style={{ left: `${(clamp(previewCurrentTime, 0, timelineDuration) / Math.max(0.001, timelineDuration)) * 100}%` }} />
+                      <div className="absolute top-1.5 w-3 h-3 rounded-full bg-slate-800 dark:bg-white border-2 border-white dark:border-slate-900 pointer-events-none -translate-x-1/2" style={{ left: `${(clamp(previewCurrentTime, 0, timelineDuration) / Math.max(0.001, timelineDuration)) * 100}%` }} />
+                    </div>
                   </div>
                 </div>
 
-                <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
-                  Clip n.º {clipIndex + 1}
-                </div>
+                <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">Clip n.º {clipIndex + 1}</div>
               </div>
             </section>
           </div>
         </div>
-      </div>
-    </div>
+      </div >
+    </div >
   );
 }

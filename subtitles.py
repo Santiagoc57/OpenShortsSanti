@@ -606,9 +606,9 @@ def generate_styled_ass_from_srt(
         return False
 
     ass_alignment = _ass_alignment_from_position(alignment)
-    # The frontend uses a narrow container (~420px) but the backend renders at 1080px.
-    # To match the relative visual size in the React UI where font looks larger, we scale by 1.5.
-    final_fontsize = max(10, int(float(font_size) * 1.5))
+    # The frontend uses a narrow container (~360px) but the backend renders at 1080px.
+    # To match the relative visual size in the React UI where font looks larger, we scale by 3.0 (1080/360).
+    final_fontsize = max(10, int(float(font_size) * 3.0))
     safe_font_name = _sanitize_font_name(font_name)
     box_alpha = int(255 * (1 - max(0, min(100, int(box_opacity))) / 100))
     primary = _hex_to_ass_color(font_color, alpha=0)
@@ -642,7 +642,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         back=back,
         bold_flag=bold_flag,
         border_style=border_style,
-        stroke_width=max(0, int(stroke_width)),
+        stroke_width=max(0, int(float(stroke_width) * 2.5)),
         alignment=ass_alignment
     )
 
@@ -706,8 +706,8 @@ def generate_karaoke_ass_from_srt(
         return False
 
     ass_alignment = _ass_alignment_from_position(alignment)
-    # Equivalent 1.5x scaling for karaoke to match React UI.
-    final_fontsize = max(12, int(float(font_size) * 1.5))
+    # Equivalent 3.0x scaling for karaoke to match React UI (~360px -> 1080px).
+    final_fontsize = max(12, int(float(font_size) * 3.0))
     safe_font_name = _sanitize_font_name(font_name)
     box_alpha = int(255 * (1 - max(0, min(100, int(box_opacity))) / 100))
     primary = _hex_to_ass_color(font_color, alpha=0)
@@ -751,7 +751,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         bold_flag=bold_flag,
         style_spacing=f"{style_spacing:.2f}",
         border_style=border_style,
-        stroke_width=max(0, int(stroke_width)),
+        stroke_width=max(0, int(float(stroke_width) * 2.5)),
         alignment=ass_alignment
     )
 

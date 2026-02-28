@@ -25,7 +25,17 @@ import torch
 import os
 import numpy as np
 from tqdm import tqdm
-from autocrop import analyze_video_for_autocrop, is_variable_frame_rate, normalize_to_cfr
+from autocrop import (
+    detect_scenes,
+    SmoothedCameraman,
+    SpeakerTracker,
+    detect_face_candidates,
+    detect_person_yolo,
+    analyze_scenes_strategy,
+    is_variable_frame_rate,
+    normalize_to_cfr,
+    _DummyTime
+)
 import numpy as np
 from tqdm import tqdm
 import yt_dlp
@@ -102,7 +112,7 @@ STRICT EXCLUSIONS:
 - No clips < 15 s or > 60 s.
 
 OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst).
-LANGUAGE RULE (STRICT): all textual fields MUST be in Spanish (español neutro): score_reason, topic_tags, title_variants, social_variants.
+LANGUAGE RULE (STRICT): all textual fields MUST be in Spanish (español neutro): score_reason, hook_explanation, topic_tags, title_variants, social_variants.
 STYLE RULES:
 - Titles: Use "Sentence case" (e.g., "Así me recibe la gente en Argentina"), only the first letter and proper names in uppercase. NO excessive capitalization.
 - Emojis: You MAY use relevant emojis in titles and social variants to increase engagement.
@@ -118,6 +128,7 @@ STYLE RULES:
       "virality_score": <integer 0-100, where 100 is highest predicted performance>,
       "selection_confidence": <number between 0 and 1 indicating confidence in this selection>,
       "score_reason": "<razón corta en español de por qué este clip puede rendir>",
+      "hook_explanation": "<explicación del gancho inicial de los primeros 3 segundos y por qué atrapará al usuario>",
       "topic_tags": ["<hasta 5 etiquetas cortas en español, sin #, ej: politica, debate, economia>"],
       "title_variants": ["<array de 5 títulos distintos en español, máximo 100 caracteres cada uno, sentence case, emojis permitidos>"],
       "social_variants": ["<array de 5 descripciones sociales distintas en español, incluyendo CTA, emojis permitidos, orientas a views para TikTok/IGReels>"]
@@ -240,6 +251,11 @@ def normalize_shorts_payload(result_json):
         if not reason:
             reason = f"Ranking IA #{i+1}: buen gancho inicial y alto potencial de retención."
         clip['score_reason'] = str(reason).strip()[:220]
+
+        hook_exp = clip.get('hook_explanation')
+        if not hook_exp:
+            hook_exp = "Gancho visual o auditivo fuerte en los primeros segundos."
+        clip['hook_explanation'] = str(hook_exp).strip()[:200]
         
         # Variants logic
         t_vars = clip.get('title_variants') or clip.get('video_title_variants')
@@ -1353,10 +1369,47 @@ Technical Details: {str(e)}
     
     return downloaded_file, sanitized_title
 
+def create_general_frame(frame, output_width, output_height):
+    """
+    Creates a 'General Shot' frame: 
+    - Background: Blurred zoom of original
+    - Foreground: Original video scaled to fit width, centered vertically.
+    """
+    orig_h, orig_w = frame.shape[:2]
+    
+    # 1. Background (Fill Height)
+    # Crop center to aspect ratio
+    bg_scale = output_height / orig_h
+    bg_w = int(orig_w * bg_scale)
+    bg_resized = cv2.resize(frame, (bg_w, output_height))
+    
+    # Crop center of background
+    start_x = (bg_w - output_width) // 2
+    if start_x < 0: start_x = 0
+    background = bg_resized[:, start_x:start_x+output_width]
+    if background.shape[1] != output_width:
+        background = cv2.resize(background, (output_width, output_height))
+        
+    # Blur background
+    background = cv2.GaussianBlur(background, (51, 51), 0)
+    
+    # 2. Foreground (Fit Width)
+    scale = output_width / orig_w
+    fg_h = int(orig_h * scale)
+    foreground = cv2.resize(frame, (output_width, fg_h))
+    
+    # 3. Overlay
+    y_offset = (output_height - fg_h) // 2
+    
+    # Clone background to avoid modifying it
+    final_frame = background.copy()
+    final_frame[y_offset:y_offset+fg_h, :] = foreground
+    
+    return final_frame
+
 def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fast", ffmpeg_crf=23, aspect_ratio=DEFAULT_ASPECT_RATIO):
     """
-    Core logic to process video using AutoCrop scene detection and YOLOv8 tracking
-    targeting a configurable aspect ratio.
+    Core logic to convert horizontal video to vertical using scene detection and Active Speaker Tracking (MediaPipe).
     """
     script_start_time = time.time()
     
@@ -1383,32 +1436,40 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
         else:
             print("   ⚠️  Proceeding with original VFR file (audio sync may be affected).")
 
-    print("   🧠 Step 1: Analyzing Scenes and Tracking Targets...")
-    # This does scene detection and middle-frame YOLO analysis
-    scenes_plan = analyze_video_for_autocrop(input_video)
+    print("   🧠 Step 1: Detecting scenes...")
+    scenes, fps = detect_scenes(input_video)
     
-    if not scenes_plan:
-        print("   ❌ Failed to analyze scenes. Returning original video unchanged.")
-        try:
-            shutil.copyfile(input_video, final_output_video)
-            return os.path.exists(final_output_video)
-        except Exception as copy_err:
-            print(f"   ❌ Fallback copy failed: {copy_err}")
-            return False
-        
-    print(f"   ✅ Target Plan Generated for {len(scenes_plan)} scenes.")
+    if not scenes:
+        print("   ❌ No scenes were detected. Using full video as one scene.")
+        cap = cv2.VideoCapture(input_video)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        scenes = [(_DummyTime(0, fps), _DummyTime(total_frames, fps))]
 
-    print("\n   ✂️ Step 2: Processing video frames...")
-    
+    print(f"   ✅ Found {len(scenes)} scenes.")
+
+    print("\n   🧠 Step 2: Preparing Active Tracking...")
     cap = cv2.VideoCapture(input_video)
     original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
     
     aspect_label, target_ratio = normalize_aspect_ratio(aspect_ratio)
     OUTPUT_WIDTH, OUTPUT_HEIGHT = compute_output_dimensions(original_width, original_height, target_ratio)
     print(f"   Target aspect ratio: {aspect_label} ({OUTPUT_WIDTH}x{OUTPUT_HEIGHT})")
+
+    cameraman = SmoothedCameraman(OUTPUT_WIDTH, OUTPUT_HEIGHT, original_width, original_height)
+    cameraman.crop_width = int(cameraman.crop_height * target_ratio)
+    if cameraman.crop_width > original_width:
+        cameraman.crop_width = original_width
+        cameraman.crop_height = int(cameraman.crop_width / max(1e-6, target_ratio))
+    cameraman.safe_zone_radius = cameraman.crop_width * 0.25
+
+    print("\n   🤖 Step 3: Analyzing Scenes for Strategy (Single vs Group)...")
+    scene_strategies = analyze_scenes_strategy(input_video, scenes)
+    
+    print("\n   ✂️ Step 4: Processing video frames...")
     
     command = [
         'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
@@ -1422,46 +1483,56 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
 
     ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
+    cap = cv2.VideoCapture(input_video)
     frame_number = 0
     current_scene_index = 0
-    num_scenes = len(scenes_plan)
-    last_output_frame = None
     dropped_frames = 0
+    last_output_frame = None
     
-    with tqdm(total=total_frames, desc=f"   Processing [scene 1/{num_scenes}]", file=sys.stdout) as pbar:
+    scene_boundaries = []
+    for s_start, s_end in scenes:
+        scene_boundaries.append((s_start.get_frames(), s_end.get_frames()))
+
+    speaker_tracker = SpeakerTracker(cooldown_frames=30)
+
+    with tqdm(total=total_frames, desc="   Processing", file=sys.stdout) as pbar:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-                
-            frame_time_sec = frame_number / fps
-            
-            # Update Scene Index based on time
-            if current_scene_index < len(scenes_plan) - 1:
-                if frame_time_sec >= scenes_plan[current_scene_index + 1]['start_sec']:
+
+            if current_scene_index < len(scene_boundaries):
+                start_f, end_f = scene_boundaries[current_scene_index]
+                if frame_number >= end_f and current_scene_index < len(scene_boundaries) - 1:
                     current_scene_index += 1
-                    pbar.set_description(f"   Processing [scene {current_scene_index + 1}/{num_scenes}]")
-
-            scene_data = scenes_plan[current_scene_index]
-            strategy = scene_data['strategy']
-            crop_coords = scene_data['crop_coords']
-
+            
+            current_strategy = scene_strategies[current_scene_index] if current_scene_index < len(scene_strategies) else 'TRACK'
+            
             try:
-                if strategy == 'TRACK' and crop_coords:
-                    x, y, w, h = crop_coords
-                    cropped = frame[y:y+h, x:x+w]
-                    # Resize to exact output size
-                    output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
-                else:  
-                    # LETTERBOX
-                    scale_factor = OUTPUT_WIDTH / original_width
-                    scaled_height = int(original_height * scale_factor)
-                    scaled_frame = cv2.resize(frame, (OUTPUT_WIDTH, scaled_height))
+                if current_strategy == 'GENERAL':
+                    output_frame = create_general_frame(frame, OUTPUT_WIDTH, OUTPUT_HEIGHT)
+                    cameraman.current_center_x = original_width / 2
+                    cameraman.target_center_x = original_width / 2
+                else:
+                    if frame_number % 2 == 0:
+                        candidates = detect_face_candidates(frame)
+                        target_box = speaker_tracker.get_target(candidates, frame_number, original_width)
+                        if target_box:
+                            cameraman.update_target(target_box)
+                        else:
+                            person_box = detect_person_yolo(frame)
+                            if person_box:
+                                cameraman.update_target(person_box)
 
-                    output_frame = np.zeros((OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
-                    y_offset = (OUTPUT_HEIGHT - scaled_height) // 2
-                    output_frame[y_offset:y_offset + scaled_height, :] = scaled_frame
+                    is_scene_start = (frame_number == scene_boundaries[current_scene_index][0])
+                    x1, y1, x2, y2 = cameraman.get_crop_box(force_snap=is_scene_start)
                     
+                    if y2 > y1 and x2 > x1:
+                        cropped = frame[y1:y2, x1:x2]
+                        output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
+                    else:
+                        output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
+                
                 last_output_frame = output_frame
             except Exception as e:
                 dropped_frames += 1
@@ -1473,10 +1544,10 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
             ffmpeg_process.stdin.write(output_frame.tobytes())
             frame_number += 1
             pbar.update(1)
-            
+
     if dropped_frames > 0:
         print(f"  ⚠️  {dropped_frames} frame(s) could not be processed and were duplicated.")
-        
+
     ffmpeg_process.stdin.close()
     stderr_output = ffmpeg_process.stderr.read().decode()
     ffmpeg_process.wait()
@@ -2024,10 +2095,13 @@ def _probe_media_duration_seconds(file_path):
     return 0.0
 
 
-def transcribe_video(video_path, language=None, backend=None, model_name=None, word_timestamps=True, compute_type=None, cpu_threads=0, num_workers=1):
-    backend = (backend or os.getenv("WHISPER_BACKEND", "faster")).lower()
+def transcribe_video(video_path, language=None, backend=None, model_name=None, word_timestamps=True, compute_type=None, cpu_threads=0, num_workers=1, hf_token=None, enable_diarization=False):
+    """
+    Transcribe and Diarize using the selected backend (openai, faster, whisperx).
+    """
+    backend = str(backend or os.getenv("WHISPER_BACKEND", "faster")).lower().strip()
     model_name = model_name or os.getenv("WHISPER_MODEL", "large-v3")
-
+    
     if backend == "openai":
         print(f"🎙️  Transcribing video with OpenAI Whisper (model={model_name})...")
         import whisper
@@ -2072,15 +2146,91 @@ def transcribe_video(video_path, language=None, backend=None, model_name=None, w
         print("⚠️ WHISPER_DEVICE=cuda solicitado pero CUDA no está disponible. Fallback a CPU.")
         device = "cpu"
     elif requested_device in ("mps", "metal"):
-        # faster-whisper usa principalmente cpu/cuda. En Mac usamos CPU.
         device = "cpu"
     else:
         device = "cpu" if requested_device not in ("cuda", "cpu") else requested_device
 
     if not compute_type:
-        # Valores seguros por dispositivo
         compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "float16" if device == "cuda" else "int8")
 
+    if backend == "whisperx":
+        print(f"🎙️  Transcribing video with WhisperX (model={model_name}, device={device}, compute={compute_type})...")
+        import whisperx
+        import gc
+        
+        # 1. Transcribe
+        batch_size = 16 if device == "cuda" else 4
+        model = whisperx.load_model(model_name, device, compute_type=compute_type)
+        
+        audio = whisperx.load_audio(video_path)
+        result = model.transcribe(audio, batch_size=batch_size, language=language)
+        detected_language = result["language"]
+        
+        del model
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
+            
+        # 2. Align (For Perfect Karaoke)
+        print("🎯 Aligning words with audio for exact timestamps...")
+        model_a, metadata = whisperx.load_align_model(language_code=detected_language, device=device)
+        result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
+        
+        del model_a
+        gc.collect()
+        if device == "cuda":
+            torch.cuda.empty_cache()
+            
+        # 3. Diarize (Detect Speakers) if Token Provided AND explicitly enabled
+        if hf_token and enable_diarization:
+            print("👥 Detecting speakers (Diarization)...")
+            try:
+                diarize_model = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
+                diarize_segments = diarize_model(audio, min_speakers=1, max_speakers=8)
+                result = whisperx.assign_word_speakers(diarize_segments, result)
+            except Exception as e:
+                print(f"⚠️ Diarization failed: {e}. Falling back to default speakers.")
+        else:
+            if not enable_diarization:
+                print("ℹ️ Diarization disabled. Skipping pyannote (fast mode).")
+            else:
+                print("⚠️ No HuggingFace token provided. Skipping Speaker Diarization.")
+            
+        # 4. Format Output match existing schema
+        full_text = ""
+        transcript_segments = []
+        
+        for segment in result["segments"]:
+            seg_dict = {
+                'text': segment.get("text", "").strip(),
+                'start': segment.get("start", 0.0),
+                'end': segment.get("end", 0.0),
+                'speaker': segment.get("speaker", "SPEAKER_00"),
+                'words': []
+            }
+            
+            if "words" in segment:
+                for word in segment["words"]:
+                    if "start" not in word or "end" not in word:
+                        continue
+                    seg_dict['words'].append({
+                        'word': word.get("word", ""),
+                        'start': word["start"],
+                        'end': word["end"],
+                        'probability': word.get("score", 0.0),
+                        'speaker': word.get("speaker", segment.get("speaker", "SPEAKER_00"))
+                    })
+            
+            transcript_segments.append(seg_dict)
+            full_text += seg_dict['text'] + " "
+
+        return {
+            'text': full_text.strip(),
+            'segments': transcript_segments,
+            'language': detected_language
+        }
+
+    # Fallback to faster-whisper
     print(f"🎙️  Transcribing video with Faster-Whisper (model={model_name}, device={device}, compute={compute_type})...")
     from faster_whisper import WhisperModel
 
@@ -2126,7 +2276,7 @@ def transcribe_video(video_path, language=None, backend=None, model_name=None, w
 
         transcript_segments.append(seg_dict)
         full_text += segment.text + " "
-
+        
     return {
         'text': full_text.strip(),
         'segments': transcript_segments,
@@ -2285,7 +2435,8 @@ if __name__ == '__main__':
     parser.add_argument('--skip-analysis', action='store_true', help="Skip AI analysis and convert the whole video.")
     parser.add_argument('--language', type=str, default=None, help="Force transcription language (e.g., 'es', 'en').")
     parser.add_argument('--max-clips', type=int, default=None, help="Max number of clips to generate (1-15).")
-    parser.add_argument('--whisper-backend', type=str, default=None, help="Whisper backend: openai|faster.")
+    parser.add_argument('--whisper-backend', type=str, default=None, help="Whisper backend: openai|faster|whisperx.")
+    parser.add_argument('--enable-diarization', action='store_true', default=False, help="Run pyannote speaker diarization (slow on CPU, requires HF token).")
     parser.add_argument('--whisper-model', type=str, default=None, help="Whisper model: tiny|base|small|medium|large|large-v2|large-v3.")
     parser.add_argument('--word-timestamps', type=str, default="true", help="true/false for word-level timestamps.")
     parser.add_argument('--ffmpeg-preset', type=str, default="fast", help="FFmpeg preset: ultrafast|fast|medium.")
@@ -2297,6 +2448,7 @@ if __name__ == '__main__':
     parser.add_argument('--llm-model', type=str, default='gemini-2.5-flash-lite', help="Gemini model name.")
     parser.add_argument('--llm-provider', type=str, default='gemini', help="LLM provider: gemini or groq.")
     parser.add_argument('--groq-api-key', type=str, default=None, help="Groq API Key.")
+    parser.add_argument('--hf-token', type=str, default=None, help="HuggingFace token for WhisperX Diarization.")
     parser.add_argument('--build-trailer', action='store_true', help="If true, generates a Super Trailer from identified fragments.")
     parser.add_argument('--trailer-only', action='store_true', help="If true, skips clip rendering and generates only the Super Trailer.")
     parser.add_argument('--trailer-fragments-target', type=int, default=6, help="Desired number of highlighted segments for Super Trailer (2-12).")
@@ -2394,7 +2546,9 @@ if __name__ == '__main__':
             language=args.language,
             backend=args.whisper_backend,
             model_name=args.whisper_model,
-            word_timestamps=args.word_timestamps
+            word_timestamps=args.word_timestamps,
+            hf_token=args.hf_token,
+            enable_diarization=args.enable_diarization
         )
         
         # Get duration

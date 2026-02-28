@@ -1023,7 +1023,23 @@ def _smart_ref_decide_strategy(
     if count == 0:
         return "LETTERBOX", None
     if count == 1:
-        chosen = scene_analysis[0].get("face_box") or scene_analysis[0].get("person_box")
+        face = scene_analysis[0].get("face_box")
+        person = scene_analysis[0].get("person_box")
+        if face and person:
+            # Blend X: mostly person body (for stable shoulder framing), slightly pulled to face
+            fx_center = (float(face[0]) + float(face[2])) / 2.0
+            px_center = (float(person[0]) + float(person[2])) / 2.0
+            cx = (px_center * 0.7) + (fx_center * 0.3)
+            
+            # Blend Y: strongly prefer face (since portrait cut usually needs face centered) 
+            # with a very slight pull to person center so we don't cut off hats as much
+            fy_center = (float(face[1]) + float(face[3])) / 2.0
+            py_center = (float(person[1]) + float(person[3])) / 2.0
+            cy = (fy_center * 0.85) + (py_center * 0.15)
+            
+            chosen = [int(cx - 10), int(cy - 10), int(cx + 10), int(cy + 10)]
+        else:
+            chosen = face or person
         return "TRACK", chosen
 
     person_boxes = [obj.get("person_box") for obj in scene_analysis if isinstance(obj.get("person_box"), list)]
@@ -1052,10 +1068,13 @@ def _smart_ref_crop_box(
     target_ratio: float
 ) -> Tuple[int, int, int, int]:
     source_ratio = frame_w / max(1, frame_h)
+    
     if source_ratio >= target_ratio:
+        # Source is wider than target. Limit by height.
         crop_h = frame_h
         crop_w = _even_int(crop_h * target_ratio)
     else:
+        # Source is taller or narrower than target. Limit by width.
         crop_w = frame_w
         crop_h = _even_int(crop_w / max(1e-6, target_ratio))
 
@@ -1143,7 +1162,7 @@ def _smart_ref_detect_scene_ranges(
         normalized.append((normalized[-1][1], safe_total))
     return normalized
 
-def _smart_ref_analyze_scene(video_path: str, start_frame: int, end_frame: int) -> List[Dict[str, Any]]:
+def _smart_ref_analyze_scene_keyframes(video_path: str, start_frame: int, end_frame: int, fps: float, target_ratio: float, skip_frames: int = 30) -> List[Dict[str, Any]]:
     try:
         import cv2
     except Exception:
@@ -1152,26 +1171,80 @@ def _smart_ref_analyze_scene(video_path: str, start_frame: int, end_frame: int) 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return []
-    middle = max(0, int(start_frame + max(0, end_frame - start_frame) // 2))
-    cap.set(cv2.CAP_PROP_POS_FRAMES, middle)
-    ok, frame = cap.read()
-    cap.release()
-    if not ok or frame is None:
-        return []
-    return _smart_ref_detect_people(frame)
+        
+    in_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    in_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
 
-def _render_smart_reframe_video(
+    from autocrop import SpeakerTracker, detect_face_candidates, detect_person_yolo
+    speaker_tracker = SpeakerTracker(cooldown_frames=30)
+
+    keyframes = []
+    current_frame = start_frame
+    
+    # Ensure at least the middle frame is captured if the scene is short
+    if (end_frame - start_frame) < skip_frames:
+        current_frame = max(0, int(start_frame + max(0, end_frame - start_frame) // 2))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            candidates = detect_face_candidates(frame)
+            target_box = speaker_tracker.get_target(candidates, current_frame, in_w)
+            if not target_box:
+                target_box = detect_person_yolo(frame)
+                
+            if target_box:
+                x, y, w, h = target_box
+                mapped_box = [x, y, x + w, y + h]
+                strategy = "TRACK"
+            else:
+                mapped_box = None
+                strategy = "LETTERBOX"
+                
+            keyframes.append({
+                "time": current_frame / max(1.0, fps),
+                "strategy": strategy,
+                "target_box": mapped_box
+            })
+    else:
+        while current_frame <= end_frame:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+                
+            candidates = detect_face_candidates(frame)
+            target_box = speaker_tracker.get_target(candidates, current_frame, in_w)
+            if not target_box:
+                target_box = detect_person_yolo(frame)
+                
+            if target_box:
+                x, y, w, h = target_box
+                mapped_box = [x, y, x + w, y + h]
+                strategy = "TRACK"
+            else:
+                mapped_box = None
+                strategy = "LETTERBOX"
+            
+            keyframes.append({
+                "time": current_frame / max(1.0, fps),
+                "strategy": strategy,
+                "target_box": mapped_box
+            })
+            current_frame += max(1, skip_frames)
+
+    cap.release()
+    return keyframes
+
+def _build_smart_reframe_filter(
     input_video_path: str,
-    output_path: str,
     aspect_ratio: str,
-    scene_frame_skip: int = 1,
+    scene_frame_skip: int = 30,
     scene_downscale: int = 0
-) -> Dict[str, Any]:
+) -> Tuple[str, Dict[str, Any]]:
     try:
         import cv2
-        import numpy as np
     except Exception as e:
-        raise RuntimeError(f"OpenCV/Numpy unavailable for smart reframe: {e}") from e
+        raise RuntimeError(f"OpenCV unavailable for smart reframe analysis: {e}") from e
 
     cap = cv2.VideoCapture(input_video_path)
     if not cap.isOpened():
@@ -1181,8 +1254,9 @@ def _render_smart_reframe_video(
     in_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    cap.release()
+    
     if in_w <= 0 or in_h <= 0:
-        cap.release()
         raise RuntimeError("Invalid input dimensions for smart reframe.")
     if fps <= 0:
         fps = 30.0
@@ -1191,6 +1265,23 @@ def _render_smart_reframe_video(
 
     target_ratio = _aspect_ratio_to_float(aspect_ratio)
     out_w, out_h = _derive_output_dimensions(in_w, in_h, target_ratio)
+    
+    # Calculate fixed crop dimensions (Cover mode for Smart Reframe)
+    # Target ratio is usually 9 / 16 = 0.5625
+    source_ratio = in_w / max(1, in_h)
+    
+    if source_ratio >= target_ratio:
+        # Source is wider than target. Limit by height.
+        crop_h = in_h
+        crop_w = _even_int(crop_h * target_ratio)
+    else:
+        # Source is taller or narrower than target. Limit by width.
+        crop_w = in_w
+        crop_h = _even_int(crop_w / max(1e-6, target_ratio))
+        
+    crop_w = max(2, min(in_w, crop_w))
+    crop_h = max(2, min(in_h, crop_h))
+
     scene_ranges = _smart_ref_detect_scene_ranges(
         input_video_path,
         total_frames=total_frames,
@@ -1199,118 +1290,103 @@ def _render_smart_reframe_video(
     )
 
     scene_plan: List[Dict[str, Any]] = []
+    track_scenes = 0
+    letterbox_scenes = 0
+
     for start_f, end_f in scene_ranges:
-        analysis = _smart_ref_analyze_scene(input_video_path, start_f, end_f)
-        strategy, target_box = _smart_ref_decide_strategy(
-            analysis,
-            frame_w=in_w,
-            frame_h=in_h,
-            target_ratio=target_ratio
+        # 1. Gather all keyframes for the scene
+        keyframes = _smart_ref_analyze_scene_keyframes(
+            input_video_path, start_f, end_f, fps, target_ratio, skip_frames=scene_frame_skip
         )
+        
+        # 2. Assign absolute crop coordinates per keyframe
+        valid_keyframes = []
+        scene_strategy = "LETTERBOX" # Default if nothing found across scene
+        
+        for kf in keyframes:
+            if kf["strategy"] == "TRACK" and kf["target_box"]:
+                scene_strategy = "TRACK"
+                x1, y1, _, _ = _smart_ref_crop_box(kf["target_box"], in_w, in_h, target_ratio)
+                valid_keyframes.append({"time": kf["time"], "x": x1, "y": y1})
+                
+        if scene_strategy == "TRACK":
+            track_scenes += 1
+        else:
+            letterbox_scenes += 1
+            
         scene_plan.append({
-            "start_frame": int(start_f),
-            "end_frame": int(end_f),
-            "strategy": strategy,
-            "target_box": target_box
+            "start_time": start_f / fps,
+            "end_time": end_f / fps,
+            "strategy": scene_strategy,
+            "keyframes": valid_keyframes
         })
 
     if not scene_plan:
         scene_plan = [{
-            "start_frame": 0,
-            "end_frame": max(1, total_frames),
+            "start_time": 0.0,
+            "end_time": total_frames / fps,
             "strategy": "LETTERBOX",
-            "target_box": None
+            "keyframes": []
         }]
 
-    ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo",
-        "-vcodec", "rawvideo",
-        "-pix_fmt", "bgr24",
-        "-s", f"{out_w}x{out_h}",
-        "-r", f"{fps:.6f}",
-        "-i", "-",
-        "-i", input_video_path,
-        "-map", "0:v:0",
-        "-map", "1:a:0?",
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-crf", "23",
-        "-preset", "fast",
-        "-c:a", "aac",
-        "-movflags", "+faststart",
-        "-shortest",
-        output_path
-    ]
-    ffmpeg_process = subprocess.Popen(
-        ffmpeg_cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE
-    )
+    # Build FFmpeg Expression
+    # default center
+    def_x = (in_w - crop_w) // 2
+    def_y = (in_h - crop_h) // 2
+    
+    expr_x = str(def_x)
+    expr_y = str(def_y)
 
-    frame_index = 0
-    scene_index = 0
-    dropped_frames = 0
-    last_output_frame = None
-    broken_pipe = False
+    # We build the nested IF statements from back to front (end of video to start)
+    # format: if(between(t, start, end), lerp_expr, previous_expr)
+    for scene in reversed(scene_plan):
+        s_start = scene["start_time"]
+        s_end = scene["end_time"]
+        
+        if scene["strategy"] == "TRACK" and scene["keyframes"]:
+            kfs = scene["keyframes"]
+            
+            # Sub-expression for this scene's keyframes
+            scene_expr_x = str(kfs[-1]["x"])
+            scene_expr_y = str(kfs[-1]["y"])
+            
+            for i in range(len(kfs) - 2, -1, -1):
+                t1 = kfs[i]["time"]
+                x1, y1 = kfs[i]["x"], kfs[i]["y"]
+                t2 = kfs[i+1]["time"]
+                x2, y2 = kfs[i+1]["x"], kfs[i+1]["y"]
+                
+                # lerp(t, t1, t2, v1, v2) -> map the value
+                if t2 > t1:
+                    lerp_x = f"({x1}+({x2}-{x1})*(t-{t1})/({t2}-{t1}))"
+                    lerp_y = f"({y1}+({y2}-{y1})*(t-{t1})/({t2}-{t1}))"
+                else:
+                    lerp_x = str(x1)
+                    lerp_y = str(y1)
+                    
+                scene_expr_x = f"if(between(t,{t1},{t2}),{lerp_x},{scene_expr_x})"
+                scene_expr_y = f"if(between(t,{t1},{t2}),{lerp_y},{scene_expr_y})"
+            
+            # Wrap the scene expression into the global timeline
+            expr_x = f"if(between(t,{s_start},{s_end}),{scene_expr_x},{expr_x})"
+            expr_y = f"if(between(t,{s_start},{s_end}),{scene_expr_y},{expr_y})"
+        else:
+            # Letterbox or static center fallback for this scene
+            expr_x = f"if(between(t,{s_start},{s_end}),{def_x},{expr_x})"
+            expr_y = f"if(between(t,{s_start},{s_end}),{def_y},{expr_y})"
 
-    while cap.isOpened():
-        ok, frame = cap.read()
-        if not ok:
-            break
-        while scene_index < len(scene_plan) - 1 and frame_index >= scene_plan[scene_index + 1]["start_frame"]:
-            scene_index += 1
-
-        scene = scene_plan[scene_index]
-        try:
-            if scene["strategy"] == "TRACK" and scene["target_box"]:
-                x1, y1, x2, y2 = _smart_ref_crop_box(scene["target_box"], in_w, in_h, target_ratio)
-                cropped = frame[y1:y2, x1:x2]
-                if cropped.size == 0:
-                    raise RuntimeError("Empty crop region")
-                output_frame = cv2.resize(cropped, (out_w, out_h))
-            else:
-                output_frame = _smart_ref_letterbox_frame(frame, out_w, out_h, np)
-            last_output_frame = output_frame
-        except Exception:
-            dropped_frames += 1
-            if last_output_frame is not None:
-                output_frame = last_output_frame
-            else:
-                output_frame = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-
-        try:
-            if ffmpeg_process.stdin is None:
-                broken_pipe = True
-                break
-            ffmpeg_process.stdin.write(output_frame.tobytes())
-        except Exception:
-            broken_pipe = True
-            break
-        frame_index += 1
-
-    cap.release()
-    try:
-        if ffmpeg_process.stdin:
-            ffmpeg_process.stdin.close()
-    except Exception:
-        pass
-    stderr_text = ffmpeg_process.stderr.read().decode(errors="ignore") if ffmpeg_process.stderr else ""
-    ffmpeg_process.wait()
-    if ffmpeg_process.returncode != 0 or broken_pipe:
-        raise RuntimeError(stderr_text or "Smart reframe encoding failed.")
-
-    track_scenes = sum(1 for s in scene_plan if s["strategy"] == "TRACK")
-    letterbox_scenes = sum(1 for s in scene_plan if s["strategy"] == "LETTERBOX")
-    return {
+    # Final filter: Dynamic crop, then scale to target, then un-box if needed
+    vf_dynamic = f"crop=w={crop_w}:h={crop_h}:x='{expr_x}':y='{expr_y}',scale={out_w}:{out_h}"
+    
+    summary = {
         "scene_count": len(scene_plan),
         "track_scenes": track_scenes,
         "letterbox_scenes": letterbox_scenes,
-        "frame_skip": max(0, int(scene_frame_skip or 0)),
-        "downscale": max(0, int(scene_downscale or 0)),
-        "dropped_frames": int(dropped_frames)
+        "frame_skip": scene_frame_skip,
+        "downscale": scene_downscale,
     }
+    
+    return vf_dynamic, summary
 
 def _extract_waveform_peaks(media_path: str, buckets: int = 240, sample_rate: int = 11025) -> List[float]:
     safe_buckets = max(32, min(2000, int(buckets)))
@@ -1942,7 +2018,7 @@ def _generate_rewritten_title(
             prompt = (
                 "Reescribe SOLO el titulo para un clip corto vertical.\n"
                 "Devuelve una sola linea sin comillas.\n"
-                "Reglas: español neutro, 55-95 caracteres, gancho claro, sin emojis, sin hashtags, sin clickbait engañoso.\n"
+                "Reglas: español neutro, 55-95 caracteres, gancho claro, incluye siempre al menos un emoji, sin hashtags, sin clickbait engañoso.\n"
                 f"Evita repetir literalmente este titulo: {clean_avoid or clean_current or 'n/a'}.\n"
                 f"Titulo actual: {clean_current or 'n/a'}\n"
                 f"Contexto social: {clean_social or 'n/a'}\n"
@@ -1998,7 +2074,7 @@ def _generate_rewritten_title_variants(
             prompt = (
                 f"Genera exactamente {safe_target} títulos distintos para un clip vertical.\n"
                 "Responde SOLO como JSON array de strings y nada más.\n"
-                "Reglas: español neutro, 55-95 caracteres, puedes usar emojis relevantes, sin hashtags, sin comillas extra.\n"
+                "Reglas: español neutro, 55-95 caracteres, incluye siempre al menos un emoji relevante, sin hashtags, sin comillas extra.\n"
                 "Estilo: Usa 'Sentence case' (ej: 'Así me recibe la gente en Argentina'), evita mayúsculas en cada palabra.\n"
                 f"Evita repetir literalmente estos títulos: {blocked_line}\n"
                 f"Título base: {clean_current or 'n/a'}\n"
@@ -4107,7 +4183,7 @@ async def run_job(job_id, job_data):
                                  ready_clips.append(clip)
                         
                         if ready_clips:
-                             jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
+                             jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis, 'transcript': transcript_data}
                              if len(ready_clips) != last_partial_clip_count:
                                  last_partial_clip_count = len(ready_clips)
                                  _persist_job_state(job_id)
@@ -4211,7 +4287,7 @@ async def run_job(job_id, job_data):
                     synthetic_clip = _repair_trailer_clip_range(synthetic_clip, output_dir)
                     clips = [synthetic_clip]
 
-                result_payload = {'clips': clips, 'cost_analysis': cost_analysis}
+                result_payload = {'clips': clips, 'cost_analysis': cost_analysis, 'transcript': transcript_data}
                 if trailer_url:
                     result_payload['latest_trailer_url'] = trailer_url
                 jobs[job_id]['result'] = result_payload
@@ -4245,7 +4321,9 @@ async def process_endpoint(
     generation_mode: Optional[str] = Form(None),
     build_trailer: Optional[str] = Form(None),
     trailer_fragments_target: Optional[int] = Form(None),
+    enable_diarization: Optional[str] = Form(None),
     groq_api_key: Optional[str] = Form(None),
+    huggingface_token: Optional[str] = Form(None),
     max_auto_retries: Optional[int] = Form(None),
     retry_delay_seconds: Optional[int] = Form(None)
 ):
@@ -4276,6 +4354,9 @@ async def process_endpoint(
         if body.get("trailer_fragments_target") is not None:
             trailer_fragments_target = body.get("trailer_fragments_target")
         groq_api_key = body.get("groq_api_key") or groq_api_key
+        huggingface_token = body.get("huggingface_token") or huggingface_token
+        if body.get("enableDiarization") is not None:
+            enable_diarization = str(body.get("enableDiarization")).lower()
         if body.get("max_auto_retries") is not None:
             max_auto_retries = body.get("max_auto_retries")
         if body.get("retry_delay_seconds") is not None:
@@ -4343,6 +4424,9 @@ async def process_endpoint(
     if trailer_fragments_target is not None:
         cmd.extend(["--trailer-fragments-target", str(trailer_fragments_target)])
     
+    if huggingface_token:
+        cmd.extend(["--hf-token", huggingface_token])
+    
     if url:
         cmd.extend(["-u", url])
         cmd.append("--keep-original")
@@ -4387,6 +4471,8 @@ async def process_endpoint(
         cmd.extend(["--style-template", style_template])
     if content_profile:
         cmd.extend(["--content-profile", content_profile])
+    if enable_diarization and str(enable_diarization).lower() in ('true', '1', 'yes'):
+        cmd.extend(["--enable-diarization"])
 
     cmd.extend(["-o", job_output_dir])
 
@@ -4557,6 +4643,7 @@ from subtitles import (
     _sanitize_font_name,
     get_caption_font_catalog,
 )
+from translate import translate_video, get_supported_languages
 
 class EditRequest(BaseModel):
     job_id: str
@@ -4693,7 +4780,7 @@ class SubtitleRequest(BaseModel):
     job_id: str
     clip_index: int
     position: str = "bottom" # top, middle, bottom
-    font_size: int = 40
+    font_size: int = 50
     font_family: str = "Anton"
     font_color: str = "#FFFFFF"
     stroke_color: str = "#000000"
@@ -4713,7 +4800,7 @@ class SubtitleRequest(BaseModel):
 def _coerce_caption_style(
     *,
     position: Optional[str] = "bottom",
-    font_size: Optional[int] = 40,
+    font_size: Optional[int] = 50,
     font_family: Optional[str] = "Anton",
     font_color: Optional[str] = "#FFFFFF",
     stroke_color: Optional[str] = "#000000",
@@ -4746,7 +4833,7 @@ def _coerce_caption_style(
     resolved_font_family = _sanitize_font_name(font_family)
     return {
         "position": resolved_position,
-        "font_size": int(max(12, min(84, _safe_float(font_size, 40.0)))),
+        "font_size": int(max(12, min(84, _safe_float(font_size, 50.0)))),
         "font_family": str(resolved_font_family or "Anton"),
         "font_color": str(font_color or "#FFFFFF"),
         "stroke_color": str(stroke_color or "#000000"),
@@ -5309,112 +5396,9 @@ async def generate_fast_preview(req: FastPreviewRequest):
         captions_burned = False
 
         if bool(req.captions_on):
-            raw_srt = str(req.srt_content or "").strip()
-            effective_transcript, srt_clip_start, srt_clip_end = _resolve_clip_scoped_transcript_for_srt(
-                clip_data=clip_data,
-                fallback_transcript=transcript_data or {}
-            )
-            speaker_transcript_source: Dict[str, Any] = effective_transcript
-            speaker_shift_base = srt_clip_start
-            if not raw_srt:
-                temp_srt_name = f"fast_preview_srt_{req.clip_index}_{int(time.time())}_{uuid.uuid4().hex[:5]}.srt"
-                temp_srt_path = os.path.join(output_dir, temp_srt_name)
-                try:
-                    success = generate_srt(effective_transcript, srt_clip_start, srt_clip_end, temp_srt_path)
-                    if (not success) and (effective_transcript is not transcript_data) and isinstance(transcript_data, dict):
-                        fallback_srt_start = max(0.0, _safe_float(clip_data.get("start", 0.0), 0.0))
-                        fallback_srt_end = max(
-                            fallback_srt_start,
-                            _safe_float(clip_data.get("end", 0.0), 0.0)
-                        )
-                        success = generate_srt(
-                            transcript_data,
-                            fallback_srt_start,
-                            fallback_srt_end,
-                            temp_srt_path
-                        )
-                        if success:
-                            speaker_transcript_source = transcript_data
-                            speaker_shift_base = fallback_srt_start
-                    if not success:
-                        raise HTTPException(status_code=400, detail="No words found for this preview range.")
-                    with open(temp_srt_path, "r", encoding="utf-8") as f:
-                        raw_srt = f.read()
-                finally:
-                    if os.path.exists(temp_srt_path):
-                        try:
-                            os.remove(temp_srt_path)
-                        except Exception:
-                            pass
-
-            shift_candidates = [-requested_start]
-            if source_reason == "job_input_path":
-                shift_candidates.insert(0, clip_start - requested_start)
-            elif source_reason == "clip_uncut":
-                shift_candidates.append(clip_start - requested_start)
-
-            shifted_srt = ""
-            selected_shift = 0.0
-            seen_shift: Set[float] = set()
-            for shift in shift_candidates:
-                rounded_shift = round(float(shift), 6)
-                if rounded_shift in seen_shift:
-                    continue
-                seen_shift.add(rounded_shift)
-                shifted_srt = _shift_and_trim_srt(raw_srt, shift_seconds=rounded_shift, window_duration=out_duration)
-                if shifted_srt:
-                    selected_shift = rounded_shift
-                    break
-
-            if not shifted_srt:
-                raise HTTPException(status_code=400, detail="No words found for this preview range.")
-
-            subtitled_name = f"fast_preview_subtitled_clip_{req.clip_index+1}_{int(time.time())}_{uuid.uuid4().hex[:6]}.mp4"
-            subtitled_path = os.path.join(output_dir, subtitled_name)
-
-            style = _coerce_caption_style(
-                position=(req.caption_position if req.caption_position is not None else clip_data.get("caption_position")),
-                font_size=(req.caption_font_size if req.caption_font_size is not None else clip_data.get("caption_font_size")),
-                font_family=(req.caption_font_family if req.caption_font_family is not None else clip_data.get("caption_font_family")),
-                font_color=(req.caption_font_color if req.caption_font_color is not None else clip_data.get("caption_font_color")),
-                stroke_color=(req.caption_stroke_color if req.caption_stroke_color is not None else clip_data.get("caption_stroke_color")),
-                stroke_width=(req.caption_stroke_width if req.caption_stroke_width is not None else clip_data.get("caption_stroke_width")),
-                bold=(req.caption_bold if req.caption_bold is not None else clip_data.get("caption_bold", True)),
-                box_color=(req.caption_box_color if req.caption_box_color is not None else clip_data.get("caption_box_color")),
-                box_opacity=(req.caption_box_opacity if req.caption_box_opacity is not None else clip_data.get("caption_box_opacity")),
-                karaoke_mode=(req.caption_karaoke_mode if req.caption_karaoke_mode is not None else clip_data.get("caption_karaoke_mode", False)),
-                subtitle_animation=(req.caption_animation if req.caption_animation is not None else clip_data.get("caption_animation")),
-                speaker_color_mode=(req.caption_speaker_color_mode if req.caption_speaker_color_mode is not None else clip_data.get("caption_speaker_color_mode", False)),
-                speaker_color_palette=(req.caption_speaker_color_palette if req.caption_speaker_color_palette is not None else clip_data.get("caption_speaker_color_palette")),
-                offset_x=(req.caption_offset_x if req.caption_offset_x is not None else clip_data.get("caption_offset_x")),
-                offset_y=(req.caption_offset_y if req.caption_offset_y is not None else clip_data.get("caption_offset_y")),
-            )
-            speaker_segments = _build_caption_speaker_segments(
-                speaker_transcript_source,
-                shift_seconds=(-speaker_shift_base + selected_shift),
-                window_duration=out_duration
-            )
-
-            await _render_subtitled_video_with_ass(
-                input_path=out_path,
-                output_path=subtitled_path,
-                output_dir=output_dir,
-                clip_index=req.clip_index,
-                raw_srt_content=shifted_srt,
-                style=style,
-                speaker_segments=speaker_segments,
-                ass_prefix="fast_preview_subs",
-                empty_error_detail="No se pudo generar subtítulos para el preview rápido.",
-            )
-
-            try:
-                os.remove(out_path)
-            except Exception:
-                pass
-
-            final_out_path = subtitled_path
-            final_out_name = subtitled_name
-            captions_burned = True
+            # The frontend now natively overlays subtitles using SubtitleRenderer.jsx.
+            # We bypass the server-side burn to return the uncaptioned fast preview faster.
+            captions_burned = False
 
         final_w, final_h = _probe_video_dimensions(final_out_path)
         final_duration = _probe_media_duration_seconds(final_out_path)
@@ -5692,6 +5676,26 @@ class RecutRequest(BaseModel):
     auto_smart_reframe: Optional[bool] = False
     smart_scene_frame_skip: Optional[int] = 1
     smart_scene_downscale: Optional[int] = 0
+    # Phase 3 Single-Pass Subtitle Options
+    captions_on: Optional[bool] = False
+    caption_position: Optional[str] = None
+    caption_font_size: Optional[int] = None
+    caption_font_family: Optional[str] = None
+    caption_font_color: Optional[str] = None
+    caption_stroke_color: Optional[str] = None
+    caption_stroke_width: Optional[int] = None
+    caption_bold: Optional[bool] = None
+    caption_box_color: Optional[str] = None
+    caption_box_opacity: Optional[int] = None
+    caption_karaoke_mode: Optional[bool] = None
+    caption_animation: Optional[str] = None
+    caption_speaker_color_mode: Optional[bool] = None
+    caption_speaker_color_palette: Optional[List[str]] = None
+    caption_offset_x: Optional[float] = None
+    caption_offset_y: Optional[float] = None
+    srt_content: Optional[str] = None
+    viral_hook_text: Optional[str] = None
+    viral_hook_duration: Optional[float] = None
 
 def _parse_form_bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -5824,15 +5828,27 @@ async def recut_clip(req: RecutRequest):
         if in_w <= 0 or in_h <= 0:
             raise HTTPException(status_code=500, detail="Could not inspect recut dimensions.")
 
+        filter_complex = ""
+        out_pad = ""
+        out_w, out_h = 0, 0
+        
         if auto_smart_requested and layout_mode == "single":
             try:
-                smart_summary = _render_smart_reframe_video(
+                # Phase 5: Smooth Tracking Auto-Reframe (Dynamic FFmpeg expression)
+                filter_complex, smart_summary = _build_smart_reframe_filter(
                     input_video_path=temp_cut,
-                    output_path=out_path,
                     aspect_ratio=aspect_ratio,
                     scene_frame_skip=smart_scene_frame_skip,
                     scene_downscale=smart_scene_downscale
                 )
+                
+                target_ratio = _aspect_ratio_to_float(aspect_ratio)
+                out_w, out_h = _derive_output_dimensions(in_w, in_h, target_ratio)
+                
+                # Wrap the expression into a standard complex filter chain format
+                filter_complex = f"[0:v]{filter_complex}[out_v]"
+                out_pad = "[out_v]"
+                
                 auto_smart_applied = True
             except Exception as smart_error:
                 recut_warnings.append(
@@ -5840,55 +5856,187 @@ async def recut_clip(req: RecutRequest):
                 )
                 print(f"⚠️ SmartReframe fallback to manual: {smart_error}")
 
-        if not auto_smart_applied:
-            if layout_mode == "split":
-                filter_complex, out_w, out_h, out_label = _build_split_layout_filter_complex(
-                    in_w=in_w,
-                    in_h=in_h,
-                    aspect_ratio=aspect_ratio,
-                    fit_mode=fit_mode,
-                    zoom_a=split_zoom_a,
-                    offset_a_x=split_offset_a_x,
-                    offset_a_y=split_offset_a_y,
-                    zoom_b=split_zoom_b,
-                    offset_b_x=split_offset_b_x,
-                    offset_b_y=split_offset_b_y
+        # Phase 3 Single-Pass Subtitle Overlay Logic
+        subtitle_filter = ""
+        subtitle_path = None
+        if bool(req.captions_on):
+            raw_srt = str(req.srt_content or "").strip()
+            clip_data = {}
+            try:
+                with open(json_files[0], 'r') as f:
+                    data = json.load(f)
+                clips_list = data.get('shorts', [])
+                if req.clip_index < len(clips_list):
+                    clip_data = clips_list[req.clip_index]
+            except Exception:
+                pass
+                
+            effective_transcript, srt_clip_start, srt_clip_end = _resolve_clip_scoped_transcript_for_srt(
+                clip_data=clip_data,
+                fallback_transcript=data.get('transcript', {}) if 'data' in locals() else {}
+            )
+            speaker_transcript_source: Dict[str, Any] = effective_transcript
+            speaker_shift_base = srt_clip_start
+
+            if not raw_srt:
+                temp_srt_name = f"recut_srt_{req.clip_index}_{int(time.time())}_{uuid.uuid4().hex[:5]}.srt"
+                temp_srt_path = os.path.join(output_dir, temp_srt_name)
+                try:
+                    success = generate_srt(effective_transcript, srt_clip_start, srt_clip_end, temp_srt_path)
+                    fallback_data = data.get('transcript', {}) if 'data' in locals() else {}
+                    if (not success) and (effective_transcript is not fallback_data) and isinstance(fallback_data, dict):
+                        fallback_srt_start = max(0.0, _safe_float(clip_data.get("start", 0.0), 0.0))
+                        fallback_srt_end = max(fallback_srt_start, _safe_float(clip_data.get("end", 0.0), 0.0))
+                        success = generate_srt(fallback_data, fallback_srt_start, fallback_srt_end, temp_srt_path)
+                        if success:
+                            speaker_transcript_source = fallback_data
+                            speaker_shift_base = fallback_srt_start
+                    if success:
+                        with open(temp_srt_path, "r", encoding="utf-8") as f:
+                            raw_srt = f.read()
+                finally:
+                    if os.path.exists(temp_srt_path):
+                        try:
+                            os.remove(temp_srt_path)
+                        except Exception:
+                            pass
+
+            if raw_srt:
+                shifted_srt = _shift_and_trim_srt(
+                    raw_srt, 
+                    shift_seconds=0.0, # The cut video starts exactly at the clipped boundary
+                    window_duration=(req.end - req.start)
                 )
-                recut_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", temp_cut,
-                    "-filter_complex", filter_complex,
-                    "-map", f"[{out_label}]",
-                    "-map", "0:a?",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
-                    "-c:a", "aac",
-                    "-movflags", "+faststart",
-                    out_path
-                ]
-            else:
-                vf_filter, out_w, out_h = _build_manual_layout_filter(
-                    in_w=in_w,
-                    in_h=in_h,
-                    aspect_ratio=aspect_ratio,
-                    fit_mode=fit_mode,
-                    zoom=zoom,
-                    offset_x=offset_x,
-                    offset_y=offset_y
-                )
-                recut_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", temp_cut,
-                    "-filter_complex", vf_filter,
-                    "-map", "[out_v]",
-                    "-map", "0:a?",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
-                    "-c:a", "aac",
-                    "-movflags", "+faststart",
-                    out_path
-                ]
+                
+                if shifted_srt:
+                    from subtitles import generate_karaoke_ass_from_srt, generate_styled_ass_from_srt
+                
+                    style = _coerce_caption_style(
+                        position=req.caption_position,
+                        font_size=req.caption_font_size,
+                        font_family=req.caption_font_family,
+                        font_color=req.caption_font_color,
+                        stroke_color=req.caption_stroke_color,
+                        stroke_width=req.caption_stroke_width,
+                        bold=req.caption_bold,
+                        box_color=req.caption_box_color,
+                        box_opacity=req.caption_box_opacity,
+                        karaoke_mode=req.caption_karaoke_mode,
+                        subtitle_animation=req.caption_animation,
+                        speaker_color_mode=req.caption_speaker_color_mode,
+                        speaker_color_palette=req.caption_speaker_color_palette,
+                        offset_x=req.caption_offset_x,
+                        offset_y=req.caption_offset_y,
+                    )
+                    speaker_segments = _build_caption_speaker_segments(
+                        speaker_transcript_source,
+                        shift_seconds=(-speaker_shift_base),
+                        window_duration=(req.end - req.start)
+                    )
+                    
+                    subtitle_filename = f"reclip_subs_{req.clip_index}_{int(time.time())}_{uuid.uuid4().hex[:6]}.ass"
+                    subtitle_path = os.path.join(output_dir, subtitle_filename)
+                    
+                    try:
+                        if style.get("karaoke_mode"):
+                            generate_karaoke_ass_from_srt(
+                                shifted_srt, subtitle_path,
+                                alignment=style["position"], font_size=style["font_size"],
+                                font_name=style["font_family"], font_color=style["font_color"],
+                                active_word_color="auto", stroke_color=style["stroke_color"],
+                                stroke_width=style["stroke_width"], bold=style["bold"],
+                                box_color=style["box_color"], box_opacity=style["box_opacity"],
+                                pop_scale=118, subtitle_animation=style.get("subtitle_animation", "none"),
+                                speaker_color_mode=style.get("speaker_color_mode", False),
+                                speaker_segments=speaker_segments or [], speaker_palette=style.get("speaker_palette"),
+                                offset_x=style["offset_x"], offset_y=style["offset_y"]
+                            )
+                        else:
+                            generate_styled_ass_from_srt(
+                                shifted_srt, subtitle_path,
+                                alignment=style["position"], font_size=style["font_size"],
+                                font_name=style["font_family"], font_color=style["font_color"],
+                                stroke_color=style["stroke_color"], stroke_width=style["stroke_width"],
+                                bold=style["bold"], box_color=style["box_color"], box_opacity=style["box_opacity"],
+                                subtitle_animation=style.get("subtitle_animation", "none"),
+                                speaker_color_mode=style.get("speaker_color_mode", False),
+                                speaker_segments=speaker_segments or [], speaker_palette=style.get("speaker_palette"),
+                                offset_x=style["offset_x"], offset_y=style["offset_y"]
+                            )
+                        
+                        safe_srt_path = subtitle_path.replace('\\', '/').replace(':', '\\:')
+                        safe_fonts_dir = None
+                        fonts_dir = os.path.join(os.path.dirname(__file__), "dashboard", "public", "fonts")
+                        if os.path.isdir(fonts_dir):
+                            safe_fonts_dir = fonts_dir.replace('\\', '/').replace(':', '\\:')
+                            
+                        subtitle_filter = f"ass='{safe_srt_path}'"
+                        if safe_fonts_dir:
+                            subtitle_filter = f"{subtitle_filter}:fontsdir='{safe_fonts_dir}'"
+                    except Exception as e:
+                        print(f"Error generating subtitles during recut: {e}")
+
+        try:
+            if not auto_smart_applied:
+                if layout_mode == "split":
+                    filter_complex, out_w, out_h, out_label = _build_split_layout_filter_complex(
+                        in_w=in_w, in_h=in_h, aspect_ratio=aspect_ratio,
+                        fit_mode=fit_mode, zoom_a=split_zoom_a, offset_a_x=split_offset_a_x,
+                        offset_a_y=split_offset_a_y, zoom_b=split_zoom_b, offset_b_x=split_offset_b_x,
+                        offset_b_y=split_offset_b_y
+                    )
+                    out_pad = f"[{out_label}]"
+                    
+                else:
+                    filter_complex, out_w, out_h = _build_manual_layout_filter(
+                        in_w=in_w, in_h=in_h, aspect_ratio=aspect_ratio,
+                        fit_mode=fit_mode, zoom=zoom, offset_x=offset_x, offset_y=offset_y
+                    )
+                    out_pad = "[out_v]"
+                    
+            if subtitle_filter:
+                filter_complex = f"{filter_complex};{out_pad}{subtitle_filter}[final_out]"
+                out_pad = "[final_out]"
+
+            viral_hook_text = str(req.viral_hook_text or "").strip()
+            viral_hook_duration = req.viral_hook_duration if getattr(req, 'viral_hook_duration', None) and req.viral_hook_duration > 0 else 2.5
+            
+            if viral_hook_text:
+                safe_hook_text = viral_hook_text.replace("'", "\\'").replace(":", "\\:")
+                # We attempt to use the Anton font from dashboard for the viral hook
+                fonts_dir = os.path.join(os.path.dirname(__file__), "dashboard", "public", "fonts")
+                font_file = os.path.join(fonts_dir, "Anton.ttf")
+                font_param = ""
+                if os.path.exists(font_file):
+                    safe_font_file = font_file.replace("\\", "/").replace(":", "\\:")
+                    font_param = f":fontfile='{safe_font_file}'"
+                
+                # Add text at top (y=h*0.15)
+                hook_filter = f"drawtext=text='{safe_hook_text}'{font_param}:fontcolor=white:fontsize=out_w*0.065:box=1:boxcolor=black@0.65:boxborderw=15:x=(w-text_w)/2:y=h*0.15:enable='between(t,0,{viral_hook_duration})'"
+                filter_complex = f"{filter_complex};{out_pad}{hook_filter}[hook_out]"
+                out_pad = "[hook_out]"
+
+            recut_cmd = [
+                "ffmpeg", "-y",
+                "-i", temp_cut,
+                "-filter_complex", filter_complex,
+                "-map", out_pad,
+                "-map", "0:a?",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "fast",
+                "-c:a", "aac",
+                "-movflags", "+faststart",
+                out_path
+            ]
+
             recut_run = subprocess.run(recut_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             if recut_run.returncode != 0:
                 raise HTTPException(status_code=500, detail=recut_run.stderr.decode() or "Failed to apply manual layout recut.")
+        finally:
+            if subtitle_path and os.path.exists(subtitle_path):
+                try:
+                    os.remove(subtitle_path)
+                except Exception:
+                    pass
     finally:
         if os.path.exists(temp_cut):
             os.remove(temp_cut)
@@ -8125,7 +8273,104 @@ async def evaluate_clip_search(
         "details": details
     }
 
+class TranslateRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    target_language: str
+    source_language: Optional[str] = None
+    input_filename: Optional[str] = None
+
+@app.get("/api/translate/languages")
+async def get_languages():
+    """Return supported languages for translation."""
+    return {"languages": get_supported_languages()}
+
+@app.post("/api/translate")
+async def translate_clip(
+    req: TranslateRequest,
+    x_elevenlabs_key: Optional[str] = Header(None, alias="X-ElevenLabs-Key")
+):
+    """Translate a video clip to a different language using ElevenLabs dubbing."""
+    if not x_elevenlabs_key:
+        raise HTTPException(status_code=400, detail="Missing X-ElevenLabs-Key header")
+
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = jobs[req.job_id]
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+
+    if not json_files:
+        raise HTTPException(status_code=404, detail="Metadata not found")
+
+    with open(json_files[0], 'r') as f:
+        data = json.load(f)
+
+    clips = data.get('shorts', [])
+    if req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip_data = clips[req.clip_index]
+
+    # Video Path
+    if req.input_filename:
+        filename = os.path.basename(req.input_filename)
+    else:
+        filename = clip_data.get('video_url', '').split('/')[-1]
+        if not filename:
+             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+             filename = f"{base_name}_clip_{req.clip_index+1}.mp4"
+
+    input_path = os.path.join(output_dir, filename)
+    if not os.path.exists(input_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
+
+    # Output video with language suffix
+    base, ext = os.path.splitext(filename)
+    output_filename = f"translated_{req.target_language}_{base}{ext}"
+    output_path = os.path.join(output_dir, output_filename)
+
+    try:
+        # Run translation in thread pool (blocking API calls)
+        def run_translate():
+            return translate_video(
+                video_path=input_path,
+                output_path=output_path,
+                target_language=req.target_language,
+                api_key=x_elevenlabs_key,
+                source_language=req.source_language,
+            )
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, run_translate)
+
+    except Exception as e:
+        print(f"❌ Translation Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Update InMemory Jobs
+    if req.clip_index < len(job['result']['clips']):
+         job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
+
+    # Update Metadata on Disk
+    try:
+        if req.clip_index < len(clips):
+            clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
+            data['shorts'] = clips
+            with open(json_files[0], 'w') as f:
+                json.dump(data, f, indent=4)
+                print(f"✅ Metadata updated with translated video for clip {req.clip_index}")
+    except Exception as e:
+        print(f"⚠️ Failed to update metadata.json: {e}")
+
+    return {
+        "success": True,
+        "new_video_url": f"/videos/{req.job_id}/{output_filename}"
+    }
+
 class SocialPostRequest(BaseModel):
+
     job_id: str
     clip_index: int
     api_key: str

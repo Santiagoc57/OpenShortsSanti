@@ -21,4 +21,5 @@ temp_*.mp4
 
 .config
 
+output/.tmp_mutonby/
 output/

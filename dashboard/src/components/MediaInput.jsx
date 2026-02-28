@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Youtube, Upload, FileVideo, X, CheckCircle2, Settings2, Clapperboard, Zap, Bot, SlidersHorizontal, Smartphone, Monitor } from 'lucide-react';
+import { createPortal } from 'react-dom';
 
 const MEDIA_INPUT_STORAGE_KEY = 'mediaInputPresetV2';
 
 const ALLOWED_VALUES = {
     language: ['es', 'en', 'fr', 'de', 'it', 'pt', 'auto'],
-    whisperBackend: ['openai', 'faster'],
+    whisperBackend: ['openai', 'faster', 'whisperx'],
     whisperModel: ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3'],
     ffmpegPreset: ['ultrafast', 'fast', 'medium'],
     aspectRatio: ['9:16', '16:9'],
@@ -40,6 +41,14 @@ const MODEL_OPTIONS_BY_BACKEND = {
         { value: 'medium', label: 'medium (alta precisión)' },
         { value: 'large-v2', label: 'large-v2 (muy alta precisión)' },
         { value: 'large-v3', label: 'large-v3 (recomendado Colab / Español)' }
+    ],
+    whisperx: [
+        { value: 'tiny', label: 'tiny (muy rápido)' },
+        { value: 'base', label: 'base (equilibrado)' },
+        { value: 'small', label: 'small (mejor precisión)' },
+        { value: 'medium', label: 'medium (alta precisión)' },
+        { value: 'large-v2', label: 'large-v2 (muy alta precisión)' },
+        { value: 'large-v3', label: 'large-v3 (WhisperX PRO)' }
     ]
 };
 
@@ -243,6 +252,18 @@ const WHISPER_OPTION_PRESETS = [
             ffmpegPreset: 'medium',
             ffmpegCrf: 21
         }
+    },
+    {
+        id: 'whisperx_pro',
+        name: 'WhisperX Pro',
+        subtitle: 'whisperx + large-v3 + Diarización',
+        settings: {
+            whisperBackend: 'whisperx',
+            whisperModel: 'large-v3',
+            wordTimestamps: true,
+            ffmpegPreset: 'fast',
+            ffmpegCrf: 22
+        }
     }
 ];
 
@@ -317,6 +338,7 @@ export default function MediaInput({
     const [whisperBackend, setWhisperBackend] = useState(initialConfig?.whisperBackend ?? 'faster');
     const [whisperModel, setWhisperModel] = useState(initialConfig?.whisperModel ?? 'large-v3');
     const [wordTimestamps, setWordTimestamps] = useState(initialConfig?.wordTimestamps ?? true);
+    const [enableDiarization, setEnableDiarization] = useState(initialConfig?.enableDiarization ?? false);
     const [ffmpegPreset, setFfmpegPreset] = useState(initialConfig?.ffmpegPreset ?? 'fast');
     const [ffmpegCrf, setFfmpegCrf] = useState(initialConfig?.ffmpegCrf ?? 23);
     const [aspectRatio, setAspectRatio] = useState(initialConfig?.aspectRatio ?? '9:16');
@@ -347,6 +369,7 @@ export default function MediaInput({
             selectedContentPreset,
             selectedWhisperOption,
             generationMode,
+            enableDiarization,
             llmModel
         };
         window.localStorage.setItem(MEDIA_INPUT_STORAGE_KEY, JSON.stringify(payload));
@@ -357,6 +380,7 @@ export default function MediaInput({
         whisperBackend,
         whisperModel,
         wordTimestamps,
+        enableDiarization,
         ffmpegPreset,
         ffmpegCrf,
         aspectRatio,
@@ -446,6 +470,7 @@ export default function MediaInput({
             whisperBackend,
             whisperModel,
             wordTimestamps,
+            enableDiarization: whisperBackend === 'whisperx' ? enableDiarization : false,
             ffmpegPreset,
             ffmpegCrf,
             aspectRatio,
@@ -577,10 +602,10 @@ export default function MediaInput({
                 </button>
             </div>
 
-            {showConfigModal && (
+            {showConfigModal && createPortal(
                 <div className="fixed inset-0 z-[110] p-4 md:p-6 overflow-y-auto flex items-center justify-center">
-                    {/* Animated Mesh Gradient Overlay */}
-                    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-md animate-mesh" />
+                    {/* Simple Blurred Overlay */}
+                    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm" />
 
                     {/* Modal Container with Entrance Animation */}
                     <div className="relative w-full max-w-4xl rounded-3xl border border-white/20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-2xl shadow-[0_32px_120px_rgba(0,0,0,0.5)] overflow-hidden flex flex-col max-h-[90vh] animate-modal-in">
@@ -942,7 +967,27 @@ export default function MediaInput({
                                                 >
                                                     <option value="faster">faster-whisper (predeterminado)</option>
                                                     <option value="openai">openai-whisper (compatibilidad)</option>
+                                                    <option value="whisperx">whisperx (Speaker Diarization)</option>
                                                 </select>
+
+                                                {/* Diarization opt-in — only visible when whisperx is selected */}
+                                                {whisperBackend === 'whisperx' && (
+                                                    <div className="mt-3 rounded-xl border border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 flex items-start gap-3">
+                                                        <input
+                                                            id="enable-diarization"
+                                                            type="checkbox"
+                                                            checked={enableDiarization}
+                                                            onChange={(e) => setEnableDiarization(e.target.checked)}
+                                                            className="mt-0.5 h-4 w-4 rounded accent-amber-500 cursor-pointer"
+                                                        />
+                                                        <label htmlFor="enable-diarization" className="cursor-pointer">
+                                                            <span className="block text-sm font-semibold text-amber-800 dark:text-amber-300">👥 Detectar hablantes (Diarización)</span>
+                                                            <span className="block text-[11px] text-amber-700 dark:text-amber-400 mt-0.5">
+                                                                Muy lento en CPU (~5–10 min). Actívalo solo si tienes múltiples personas y necesitas colores por hablante.
+                                                            </span>
+                                                        </label>
+                                                    </div>
+                                                )}
                                             </div>
                                             <div className="space-y-2">
                                                 <label className={modalLabelClass}>Modelo Whisper</label>
@@ -1035,7 +1080,8 @@ export default function MediaInput({
                             </button>
                         </div>
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
         </>
     );

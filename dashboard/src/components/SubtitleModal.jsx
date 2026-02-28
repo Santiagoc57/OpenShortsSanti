@@ -17,23 +17,10 @@ const DEFAULT_SUBTITLE_STYLE = {
 
 const CAPTION_STYLE_PRESETS = [
     {
-        id: 'deep_diver',
-        name: 'Deep Diver',
-        subtitle_position: 'bottom',
-        subtitle_font_size: 40,
-        subtitle_font_family: 'Montserrat',
-        subtitle_font_color: '#FFFFFF',
-        subtitle_stroke_color: '#111827',
-        subtitle_stroke_width: 1,
-        subtitle_bold: true,
-        subtitle_box_color: '#111827',
-        subtitle_box_opacity: 72
-    },
-    {
         id: 'karaoke_pro',
         name: 'Karaoke Pro',
         subtitle_position: 'bottom',
-        subtitle_font_size: 40,
+        subtitle_font_size: 50,
         subtitle_font_family: 'Anton',
         subtitle_font_color: '#FFFFFF',
         subtitle_stroke_color: '#000000',
@@ -43,10 +30,23 @@ const CAPTION_STYLE_PRESETS = [
         subtitle_box_opacity: 0
     },
     {
+        id: 'deep_diver',
+        name: 'Deep Diver',
+        subtitle_position: 'bottom',
+        subtitle_font_size: 50,
+        subtitle_font_family: 'Montserrat',
+        subtitle_font_color: '#FFFFFF',
+        subtitle_stroke_color: '#111827',
+        subtitle_stroke_width: 1,
+        subtitle_bold: true,
+        subtitle_box_color: '#111827',
+        subtitle_box_opacity: 72
+    },
+    {
         id: 'mozi_pop',
         name: 'Mozi Pop',
         subtitle_position: 'bottom',
-        subtitle_font_size: 40,
+        subtitle_font_size: 50,
         subtitle_font_family: 'Archivo Black',
         subtitle_font_color: '#FFFFFF',
         subtitle_stroke_color: '#0A0A0A',
@@ -59,7 +59,7 @@ const CAPTION_STYLE_PRESETS = [
         id: 'think_media',
         name: 'Think Media',
         subtitle_position: 'bottom',
-        subtitle_font_size: 40,
+        subtitle_font_size: 50,
         subtitle_font_family: 'Bebas Neue',
         subtitle_font_color: '#FFFFFF',
         subtitle_stroke_color: '#0A0A0A',
@@ -72,7 +72,7 @@ const CAPTION_STYLE_PRESETS = [
         id: 'highlighter_box',
         name: 'Highlighter Box',
         subtitle_position: 'middle',
-        subtitle_font_size: 40,
+        subtitle_font_size: 50,
         subtitle_font_family: 'Oswald',
         subtitle_font_color: '#E0F2FE',
         subtitle_stroke_color: '#0F172A',
@@ -85,7 +85,7 @@ const CAPTION_STYLE_PRESETS = [
         id: 'white_card',
         name: 'Caja Blanca',
         subtitle_position: 'middle',
-        subtitle_font_size: 40,
+        subtitle_font_size: 50,
         subtitle_font_family: 'Montserrat',
         subtitle_font_color: '#111111',
         subtitle_stroke_color: '#111111',
@@ -98,7 +98,7 @@ const CAPTION_STYLE_PRESETS = [
         id: 'focus_bold',
         name: 'Focus',
         subtitle_position: 'bottom',
-        subtitle_font_size: 40,
+        subtitle_font_size: 50,
         subtitle_font_family: 'Teko',
         subtitle_font_color: '#EAFB23',
         subtitle_stroke_color: '#101010',
@@ -229,29 +229,29 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                     className={`flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative w-full mx-auto max-h-[600px] ${isLandscape ? 'max-w-[640px]' : 'max-w-[360px]'}`}
                     style={{ aspectRatio: isLandscape ? '16 / 9' : '9 / 16' }}
                 >
-                     <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
-                     
-                     {/* Subtitle Overlay Preview */}
-                     <div className={`absolute w-full px-8 text-center transition-all duration-300 pointer-events-none flex flex-col items-center justify-center
+                    <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
+
+                    {/* Subtitle Overlay Preview */}
+                    <div className={`absolute w-full px-8 text-center transition-all duration-300 pointer-events-none flex flex-col items-center justify-center
                         ${position === 'top' ? 'top-20' : ''}
                         ${position === 'middle' ? 'top-0 bottom-0' : ''}
                         ${position === 'bottom' ? 'bottom-20' : ''}
                      `}>
-                        <span 
+                        <span
                             className="bg-black/50 text-white font-bold px-2 py-1 rounded shadow-lg backdrop-blur-sm border border-white/10 text-center"
-                            style={{ 
+                            style={{
                                 fontSize: `${Math.max(12, fontSize * 0.6)}px`,
                                 fontFamily,
                                 fontWeight: bold ? 700 : 400,
                                 color: fontColor,
                                 backgroundColor: boxOpacity > 0 ? toRgba(boxColor, boxOpacity) : 'transparent',
                                 textShadow: `0 0 ${strokeWidth}px ${strokeColor}`,
-                                maxWidth: '80%' 
-                            }} 
+                                maxWidth: '80%'
+                            }}
                         >
-                            Así se verán tus subtítulos<br/>en el video
+                            Así se verán tus subtítulos<br />en el video
                         </span>
-                     </div>
+                    </div>
                 </div>
 
                 {/* Right: Controls */}
@@ -291,7 +291,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         <div>
                             <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Posición</label>
                             <div className="grid grid-cols-1 gap-2">
-                                <button 
+                                <button
                                     onClick={() => setPosition('top')}
                                     className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${position === 'top' ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
                                 >
@@ -300,8 +300,8 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     </div>
                                     <span className="font-medium">Arriba</span>
                                 </button>
-                                
-                                <button 
+
+                                <button
                                     onClick={() => setPosition('middle')}
                                     className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${position === 'middle' ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
                                 >
@@ -310,8 +310,8 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     </div>
                                     <span className="font-medium">Centro</span>
                                 </button>
-                                
-                                <button 
+
+                                <button
                                     onClick={() => setPosition('bottom')}
                                     className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${position === 'bottom' ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
                                 >
@@ -353,7 +353,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                             min="16"
                                             max="80"
                                             value={fontSize}
-                                            onChange={(e) => setFontSize(Number(e.target.value || 40))}
+                                            onChange={(e) => setFontSize(Number(e.target.value || 50))}
                                             className="input-field text-xs"
                                         />
                                     </div>
@@ -472,7 +472,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Type size={20} />}
                         {isProcessing ? 'Generando...' : 'Generar subtítulos'}
                     </button>
-                    
+
                     <p className="text-[10px] text-zinc-500 text-center mt-3">
                         Usa timestamps por palabra para sincronizar con precisión.
                     </p>

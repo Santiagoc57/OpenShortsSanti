@@ -301,6 +301,8 @@ function App() {
   };
 
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
+  const [elevenLabsKey, setElevenLabsKey] = useState(localStorage.getItem('elevenlabs_key') || '');
+  const [huggingfaceToken, setHuggingfaceToken] = useState(localStorage.getItem('hf_token') || '');
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
@@ -507,6 +509,14 @@ function App() {
     // For now keeping gemini plain for compatibility unless requested.
     if (apiKey) localStorage.setItem('gemini_key', apiKey);
   }, [apiKey]);
+
+  useEffect(() => {
+    if (elevenLabsKey) localStorage.setItem('elevenlabs_key', elevenLabsKey);
+  }, [elevenLabsKey]);
+
+  useEffect(() => {
+    if (huggingfaceToken) localStorage.setItem('hf_token', huggingfaceToken);
+  }, [huggingfaceToken]);
 
   useEffect(() => {
     localStorage.removeItem('groq_key_v1');
@@ -869,7 +879,8 @@ function App() {
           llm_provider: data.llm_provider,
           generation_mode: generationMode,
           build_trailer: buildTrailer,
-          trailer_fragments_target: trailerFragmentsTarget
+          trailer_fragments_target: trailerFragmentsTarget,
+          huggingface_token: huggingfaceToken
         });
       } else {
         const formData = new FormData();
@@ -890,6 +901,7 @@ function App() {
         formData.append('generation_mode', generationMode);
         formData.append('build_trailer', String(buildTrailer));
         if (trailerFragmentsTarget) formData.append('trailer_fragments_target', String(trailerFragmentsTarget));
+        if (huggingfaceToken) formData.append('huggingface_token', huggingfaceToken);
         body = formData;
       }
 
@@ -1924,6 +1936,8 @@ function App() {
     pollingPauseBeforeStudioRef.current = Boolean(isPollingPaused);
     setIsPollingPaused(true);
     setFocusedClipIndex(null);
+    setActiveTab('projects');
+    setProjectsViewMode('detail');
     setStudioContext({
       jobId,
       clip,
@@ -2264,6 +2278,58 @@ function App() {
                       </div>
                       <p className="text-xs text-slate-500 dark:text-slate-400">
                         Se guarda localmente en tu navegador y se envía al backend solo al procesar.
+                      </p>
+                    </div>
+                    <div className="space-y-3 pt-4 border-t border-slate-200 dark:border-slate-700">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="text-sm font-medium text-slate-800 dark:text-slate-200">HuggingFace Token (Para WhisperX / Diarization)</label>
+                        <span className={`text-xs px-2 py-0.5 rounded-full border ${String(huggingfaceToken || '').trim()
+                          ? 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-800'
+                          : 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800'
+                          }`}>
+                          {String(huggingfaceToken || '').trim() ? 'Activo' : 'Sin token'}
+                        </span>
+                      </div>
+                      <div className="relative">
+                        <Shield size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="password"
+                          value={huggingfaceToken}
+                          onChange={(e) => setHuggingfaceToken(e.target.value)}
+                          className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-primary/40 focus:border-primary"
+                          placeholder="Ingresa tu token de HuggingFace"
+                        />
+                      </div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Necesario para detectar automáticamente a múltiples locutores y separarlos por colores. <strong>Debe tener acceso a `pyannote/speaker-diarization-3.1`.</strong>
+                      </p>
+                    </div>
+
+                    <div className="space-y-3 pt-4 border-t border-slate-200 dark:border-slate-700">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="text-sm font-medium text-slate-800 dark:text-slate-200">ElevenLabs API Key (Voice Dubbing)</label>
+                        <span className={`text-xs px-2 py-0.5 rounded-full border ${String(elevenLabsKey || '').trim()
+                          ? 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-800'
+                          : 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800'
+                          }`}>
+                          {String(elevenLabsKey || '').trim() ? 'Activa' : 'Sin clave'}
+                        </span>
+                      </div>
+                      <div className="relative">
+                        <Shield size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="password"
+                          value={elevenLabsKey}
+                          onChange={(e) => {
+                            setElevenLabsKey(e.target.value);
+                            localStorage.setItem('elevenlabs_key', e.target.value);
+                          }}
+                          className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-primary/40 focus:border-primary"
+                          placeholder="Ingresa tu API Key de ElevenLabs"
+                        />
+                      </div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Necesaria para la función de "Dub Voice" (traducción de voz con IA). Obtén tu clave en <a href="https://elevenlabs.io" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">elevenlabs.io</a>.
                       </p>
                     </div>
 
@@ -2910,6 +2976,7 @@ function App() {
                 onClipPatched={handleStudioClipPatched}
                 onApplied={handleStudioApplied}
                 fontCatalog={captionFontOptions}
+                transcriptSegments={transcriptSegments}
               />
             </div>
           )}
@@ -3052,11 +3119,10 @@ function App() {
                             <button
                               type="button"
                               onClick={() => setClipsViewMode('list')}
-                              className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
-                                clipsViewMode === 'list'
-                                  ? 'bg-primary/15 text-primary'
-                                  : 'text-slate-500 dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-white/10'
-                              }`}
+                              className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${clipsViewMode === 'list'
+                                ? 'bg-primary/15 text-primary'
+                                : 'text-slate-500 dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-white/10'
+                                }`}
                               title="Vista lista"
                             >
                               <List size={12} />
@@ -3065,11 +3131,10 @@ function App() {
                             <button
                               type="button"
                               onClick={() => setClipsViewMode('gallery')}
-                              className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
-                                clipsViewMode === 'gallery'
-                                  ? 'bg-primary/15 text-primary'
-                                  : 'text-slate-500 dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-white/10'
-                              }`}
+                              className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${clipsViewMode === 'gallery'
+                                ? 'bg-primary/15 text-primary'
+                                : 'text-slate-500 dark:text-zinc-400 hover:bg-slate-100 dark:hover:bg-white/10'
+                                }`}
                               title="Vista galería"
                             >
                               <LayoutGrid size={12} />
@@ -3105,127 +3170,127 @@ function App() {
                   {!showTrailerFocusLayout && sortedClips.length > 0 && (
                     <div className="mb-4 shrink-0 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50/80 dark:bg-white/[0.02] p-3.5 space-y-3">
                       <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Orden:</span>
-                      <select
-                        value={clipSort}
-                        onChange={(e) => setClipSort(e.target.value)}
-                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
-                      >
-                        <option value="top">Mayor puntaje</option>
-                        <option value="balanced">Línea de tiempo</option>
-                        <option value="safe">Más seguros</option>
-                      </select>
-                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500 ml-1">Filtro:</span>
-                      <select
-                        value={clipFilter}
-                        onChange={(e) => setClipFilter(e.target.value)}
-                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
-                      >
-                        <option value="all">Todos</option>
-                        <option value="top">Alto (80+)</option>
-                        <option value="medium">Medio (65-79)</option>
-                        <option value="low">Bajo (&lt;65)</option>
-                      </select>
-                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Etiqueta:</span>
-                      <select
-                        value={clipTagFilter}
-                        onChange={(e) => setClipTagFilter(e.target.value)}
-                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
-                      >
-                        <option value="all">Todas</option>
-                        {availableTags.map((tag) => (
-                          <option key={tag} value={tag}>{tag}</option>
-                        ))}
-                      </select>
-                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Estrategia:</span>
-                      <select
-                        value={batchStrategy}
-                        onChange={(e) => applyBatchStrategy(e.target.value)}
-                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
-                      >
-                        <option value="growth">Crecimiento</option>
-                        <option value="balanced">Balanceada</option>
-                        <option value="conservative">Conservadora</option>
-                        <option value="custom">Personalizada</option>
-                      </select>
-                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500 ml-1">N clips:</span>
-                      <input
-                        type="number"
-                        min="1"
-                        max="10"
-                        value={batchTopCount}
-                        onChange={(e) => {
-                          setBatchStrategy('custom');
-                          setBatchTopCount(Math.max(1, Math.min(10, Number(e.target.value || 1))));
-                        }}
-                        className="w-16 text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
-                      />
-                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Inicia en:</span>
-                      <select
-                        value={batchStartDelayMinutes}
-                        onChange={(e) => {
-                          setBatchStrategy('custom');
-                          setBatchStartDelayMinutes(Number(e.target.value));
-                        }}
-                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
-                      >
-                        <option value={0}>ahora</option>
-                        <option value={5}>5m</option>
-                        <option value={15}>15m</option>
-                        <option value={30}>30m</option>
-                        <option value={60}>60m</option>
-                      </select>
-                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Cada:</span>
-                      <select
-                        value={batchIntervalMinutes}
-                        onChange={(e) => {
-                          setBatchStrategy('custom');
-                          setBatchIntervalMinutes(Number(e.target.value));
-                        }}
-                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
-                      >
-                        <option value={15}>15m</option>
-                        <option value={30}>30m</option>
-                        <option value={60}>60m</option>
-                        <option value={120}>120m</option>
-                        <option value={240}>240m</option>
-                      </select>
-                      <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Alcance:</span>
-                      <select
-                        value={batchScope}
-                        onChange={(e) => {
-                          setBatchStrategy('custom');
-                          setBatchScope(e.target.value);
-                        }}
-                        className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
-                      >
-                        <option value="visible">Visible</option>
-                        <option value="global">Global</option>
-                      </select>
-                      <button
-                        onClick={handleQueueTopClips}
-                        disabled={isBatchScheduling || (batchScope === 'global' ? sortedClips.length === 0 : visibleClips.length === 0)}
-                        className="ml-1 text-xs bg-violet-100 dark:bg-primary/20 border border-violet-300 dark:border-primary/40 text-violet-700 dark:text-primary rounded-md px-2 py-1.5 hover:bg-violet-200 dark:hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                        title="Programa lote usando N clips e intervalo actual"
-                      >
-                        {isBatchScheduling ? 'Encolando...' : `Encolar ${Math.max(1, Math.min(10, Number(batchTopCount) || 1))}`}
-                      </button>
-                      <button
-                        onClick={handleExportPack}
-                        disabled={isExportingPack || !jobId}
-                        className="text-xs bg-emerald-100 dark:bg-emerald-500/20 border border-emerald-300 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 rounded-md px-2 py-1.5 hover:bg-emerald-200 dark:hover:bg-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                        title="Exportar paquete para agencia (zip)"
-                      >
-                        {isExportingPack ? 'Exportando...' : 'Exportar paquete'}
-                      </button>
-                      <button
-                        onClick={handleGenerateTrailer}
-                        disabled={isGeneratingTrailer || !jobId || status !== 'complete'}
-                        className="text-xs bg-amber-100 dark:bg-amber-500/20 border border-amber-300 dark:border-amber-500/40 text-amber-700 dark:text-amber-300 rounded-md px-2 py-1.5 hover:bg-amber-200 dark:hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                        title="Genera un Super Trailer (Súper Resumen) con fragmentos explosivos y transiciones"
-                      >
-                        {isGeneratingTrailer ? 'Generando trailer...' : 'Generar Super Trailer ⚡'}
-                      </button>
+                        <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Orden:</span>
+                        <select
+                          value={clipSort}
+                          onChange={(e) => setClipSort(e.target.value)}
+                          className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
+                        >
+                          <option value="top">Mayor puntaje</option>
+                          <option value="balanced">Línea de tiempo</option>
+                          <option value="safe">Más seguros</option>
+                        </select>
+                        <span className="text-xs font-medium text-slate-500 dark:text-zinc-500 ml-1">Filtro:</span>
+                        <select
+                          value={clipFilter}
+                          onChange={(e) => setClipFilter(e.target.value)}
+                          className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
+                        >
+                          <option value="all">Todos</option>
+                          <option value="top">Alto (80+)</option>
+                          <option value="medium">Medio (65-79)</option>
+                          <option value="low">Bajo (&lt;65)</option>
+                        </select>
+                        <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Etiqueta:</span>
+                        <select
+                          value={clipTagFilter}
+                          onChange={(e) => setClipTagFilter(e.target.value)}
+                          className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
+                        >
+                          <option value="all">Todas</option>
+                          {availableTags.map((tag) => (
+                            <option key={tag} value={tag}>{tag}</option>
+                          ))}
+                        </select>
+                        <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Estrategia:</span>
+                        <select
+                          value={batchStrategy}
+                          onChange={(e) => applyBatchStrategy(e.target.value)}
+                          className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
+                        >
+                          <option value="growth">Crecimiento</option>
+                          <option value="balanced">Balanceada</option>
+                          <option value="conservative">Conservadora</option>
+                          <option value="custom">Personalizada</option>
+                        </select>
+                        <span className="text-xs font-medium text-slate-500 dark:text-zinc-500 ml-1">N clips:</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="10"
+                          value={batchTopCount}
+                          onChange={(e) => {
+                            setBatchStrategy('custom');
+                            setBatchTopCount(Math.max(1, Math.min(10, Number(e.target.value || 1))));
+                          }}
+                          className="w-16 text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
+                        />
+                        <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Inicia en:</span>
+                        <select
+                          value={batchStartDelayMinutes}
+                          onChange={(e) => {
+                            setBatchStrategy('custom');
+                            setBatchStartDelayMinutes(Number(e.target.value));
+                          }}
+                          className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
+                        >
+                          <option value={0}>ahora</option>
+                          <option value={5}>5m</option>
+                          <option value={15}>15m</option>
+                          <option value={30}>30m</option>
+                          <option value={60}>60m</option>
+                        </select>
+                        <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Cada:</span>
+                        <select
+                          value={batchIntervalMinutes}
+                          onChange={(e) => {
+                            setBatchStrategy('custom');
+                            setBatchIntervalMinutes(Number(e.target.value));
+                          }}
+                          className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
+                        >
+                          <option value={15}>15m</option>
+                          <option value={30}>30m</option>
+                          <option value={60}>60m</option>
+                          <option value={120}>120m</option>
+                          <option value={240}>240m</option>
+                        </select>
+                        <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Alcance:</span>
+                        <select
+                          value={batchScope}
+                          onChange={(e) => {
+                            setBatchStrategy('custom');
+                            setBatchScope(e.target.value);
+                          }}
+                          className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
+                        >
+                          <option value="visible">Visible</option>
+                          <option value="global">Global</option>
+                        </select>
+                        <button
+                          onClick={handleQueueTopClips}
+                          disabled={isBatchScheduling || (batchScope === 'global' ? sortedClips.length === 0 : visibleClips.length === 0)}
+                          className="ml-1 text-xs bg-violet-100 dark:bg-primary/20 border border-violet-300 dark:border-primary/40 text-violet-700 dark:text-primary rounded-md px-2 py-1.5 hover:bg-violet-200 dark:hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Programa lote usando N clips e intervalo actual"
+                        >
+                          {isBatchScheduling ? 'Encolando...' : `Encolar ${Math.max(1, Math.min(10, Number(batchTopCount) || 1))}`}
+                        </button>
+                        <button
+                          onClick={handleExportPack}
+                          disabled={isExportingPack || !jobId}
+                          className="text-xs bg-emerald-100 dark:bg-emerald-500/20 border border-emerald-300 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300 rounded-md px-2 py-1.5 hover:bg-emerald-200 dark:hover:bg-emerald-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Exportar paquete para agencia (zip)"
+                        >
+                          {isExportingPack ? 'Exportando...' : 'Exportar paquete'}
+                        </button>
+                        <button
+                          onClick={handleGenerateTrailer}
+                          disabled={isGeneratingTrailer || !jobId || status !== 'complete'}
+                          className="text-xs bg-amber-100 dark:bg-amber-500/20 border border-amber-300 dark:border-amber-500/40 text-amber-700 dark:text-amber-300 rounded-md px-2 py-1.5 hover:bg-amber-200 dark:hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Genera un Super Trailer (Súper Resumen) con fragmentos explosivos y transiciones"
+                        >
+                          {isGeneratingTrailer ? 'Generando trailer...' : 'Generar Super Trailer ⚡'}
+                        </button>
                       </div>
                     </div>
                   )}
@@ -3429,6 +3494,62 @@ function App() {
                           </div>
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {/* Settings section */}
+                  {showSettings && (
+                    <div className="mb-4 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-3.5 shadow-sm">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Settings size={14} className="text-slate-400 dark:text-zinc-400" />
+                        <span className="text-xs text-slate-700 dark:text-zinc-300 font-medium">Ajustes</span>
+                      </div>
+
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center justify-between">
+                          <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Gemini API Key (Opcional)</label>
+                          <span className={`text-xs px-2 py-0.5 rounded-full border ${String(apiKey || '').trim()
+                            ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400'
+                            : 'border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-400'
+                            }`}>
+                            {String(apiKey || '').trim() ? 'Activa' : 'Sin clave'}
+                          </span>
+                        </div>
+                        <input
+                          type="password"
+                          placeholder="Introduce tu API Key de Gemini para funciones avanzadas"
+                          value={apiKey}
+                          onChange={(e) => {
+                            setApiKey(e.target.value);
+                            localStorage.setItem('gemini_key', e.target.value);
+                          }}
+                          className="mt-1 block w-full rounded-md border border-slate-300 dark:border-slate-600 px-3 py-2 bg-white dark:bg-slate-700 text-sm shadow-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                        />
+                        <p className="text-xs text-slate-500">Puedes obtener tu API Key en <a href="https://ai.google.dev/" target="_blank" rel="noopener noreferrer" className="text-violet-500 hover:underline">Google AI Studio</a>.</p>
+                      </div>
+
+                      <div className="flex flex-col gap-1 mt-4">
+                        <div className="flex items-center justify-between">
+                          <label className="text-sm font-medium text-slate-700 dark:text-slate-300">ElevenLabs API Key (Opcional)</label>
+                          <span className={`text-xs px-2 py-0.5 rounded-full border ${String(elevenLabsKey || '').trim()
+                            ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400'
+                            : 'border-slate-200 bg-slate-50 text-slate-500 dark:border-slate-700 dark:bg-slate-800/50 dark:text-slate-400'
+                            }`}>
+                            {String(elevenLabsKey || '').trim() ? 'Activa' : 'Sin clave'}
+                          </span>
+                        </div>
+                        <input
+                          type="password"
+                          placeholder="Introduce tu API Key de ElevenLabs para voice dubbing"
+                          value={elevenLabsKey}
+                          onChange={(e) => {
+                            setElevenLabsKey(e.target.value);
+                            localStorage.setItem('elevenlabs_key', e.target.value);
+                          }}
+                          className="mt-1 block w-full rounded-md border border-slate-300 dark:border-slate-600 px-3 py-2 bg-white dark:bg-slate-700 text-sm shadow-sm focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                        />
+                        <p className="text-xs text-slate-500">Puedes obtener tu API Key en <a href="https://elevenlabs.io" target="_blank" rel="noopener noreferrer" className="text-violet-500 hover:underline">ElevenLabs</a> para traducción de voz.</p>
+                      </div>
                     </div>
                   )}
 
@@ -3762,11 +3883,10 @@ function App() {
                       </div>
                     ) : (
                       visibleClips.length > 0 ? (
-                        <div className={`grid pb-10 ${
-                          clipsViewMode === 'gallery'
-                            ? 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5'
-                            : 'grid-cols-1 gap-4'
-                        }`}>
+                        <div className={`grid pb-10 ${clipsViewMode === 'gallery'
+                          ? 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5'
+                          : 'grid-cols-1 gap-4'
+                          }`}>
                           {visibleClips.map((clip, i) => {
                             const clipRefIndex = Number(clip?.clip_index);
                             const focusMatch = Number.isFinite(clipRefIndex) && clipRefIndex === focusedClipIndex;
@@ -3787,6 +3907,7 @@ function App() {
                                   uploadPostKey={uploadPostKey}
                                   uploadUserId={uploadUserId}
                                   geminiApiKey={apiKey}
+                                  elevenLabsKey={elevenLabsKey}
                                   onOpenStudio={openClipStudio}
                                   onPlay={(time) => handleClipPlay(time)}
                                   onPause={handleClipPause}

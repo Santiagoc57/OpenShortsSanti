@@ -36,8 +36,9 @@ pip install llvmlite==0.41.1 numba==0.58.1 opencv-contrib-python==4.10.0.84 --on
 pip install -r requirements.txt
 
 # 7. Arrancar el servidor
+cd "/Users/santiagocordoba/GITHUBS/-- 05 Openshorts-main 2"
 source .venv/bin/activate
-uvicorn app:app --host 0.0.0.0 --port 8000
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 > **Deja esta ventana abierta**, verás los logs de procesamiento aquí. No cierres la terminal.
