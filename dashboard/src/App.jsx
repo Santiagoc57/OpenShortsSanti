@@ -302,6 +302,7 @@ function App() {
 
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
   const [elevenLabsKey, setElevenLabsKey] = useState(localStorage.getItem('elevenlabs_key') || '');
+  const [showSettings, setShowSettings] = useState(false);
   const [huggingfaceToken, setHuggingfaceToken] = useState(localStorage.getItem('hf_token') || '');
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
