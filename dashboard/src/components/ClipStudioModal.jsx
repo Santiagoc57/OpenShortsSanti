@@ -551,6 +551,27 @@ const resolveViralHookFontSize = (clip, fallback = CAPTION_PRESETS[0].style.font
   return clamp(Number(fallback || CAPTION_PRESETS[0].style.fontSize), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
 };
 
+const resolveViralHookStyle = (clip, fallbackStyle = CAPTION_PRESETS[0].style) => {
+  const style = fallbackStyle && typeof fallbackStyle === 'object' ? fallbackStyle : CAPTION_PRESETS[0].style;
+  const resolvedFontSize = resolveViralHookFontSize(clip, style.fontSize);
+  const rawStrokeWidth = Number(clip?.viral_hook_stroke_width ?? clip?.caption_stroke_width ?? style.strokeWidth ?? 0);
+  const rawBoxOpacity = Number(clip?.viral_hook_box_opacity ?? clip?.caption_box_opacity ?? style.boxOpacity ?? 0);
+  const rawBold = (typeof clip?.viral_hook_bold === 'boolean')
+    ? clip.viral_hook_bold
+    : (typeof clip?.caption_bold === 'boolean' ? clip.caption_bold : Boolean(style.bold));
+
+  return {
+    fontSize: resolvedFontSize,
+    fontFamily: normalizeSubtitleFontFamily(clip?.viral_hook_font_family || clip?.caption_font_family || style.fontFamily || 'Anton'),
+    fontColor: String(clip?.viral_hook_font_color || clip?.caption_font_color || style.fontColor || '#FFFFFF'),
+    strokeColor: String(clip?.viral_hook_stroke_color || clip?.caption_stroke_color || style.strokeColor || '#000000'),
+    strokeWidth: clamp(rawStrokeWidth, 0, 8),
+    bold: Boolean(rawBold),
+    boxColor: String(clip?.viral_hook_box_color || clip?.caption_box_color || style.boxColor || '#000000'),
+    boxOpacity: clamp(rawBoxOpacity, 0, 100)
+  };
+};
+
 export default function ClipStudioModal({
   isOpen,
   standalone = false,
@@ -582,6 +603,7 @@ export default function ClipStudioModal({
   const [captionsOn, setCaptionsOn] = useState(true);
   const [showCaptionSettings, setShowCaptionSettings] = useState(false);
   const [selectedPreset, setSelectedPreset] = useState(CAPTION_PRESETS[0].id);
+  const [selectedViralHookPreset, setSelectedViralHookPreset] = useState('');
   const [position, setPosition] = useState(CAPTION_PRESETS[0].style.position);
   const [fontSize, setFontSize] = useState(CAPTION_PRESETS[0].style.fontSize);
   const [fontFamily, setFontFamily] = useState(CAPTION_PRESETS[0].style.fontFamily);
@@ -745,7 +767,14 @@ export default function ClipStudioModal({
   const [viralHookEnabled, setViralHookEnabled] = useState(() => Boolean(resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl)));
   const [viralHookStart, setViralHookStart] = useState(Math.max(0, Number(clip?.viral_hook_start || 0)));
   const [viralHookDuration, setViralHookDuration] = useState(VIRAL_HOOK_DEFAULT_DURATION);
-  const [viralHookFontSize, setViralHookFontSize] = useState(() => resolveViralHookFontSize(clip));
+  const [viralHookFontSize, setViralHookFontSize] = useState(() => resolveViralHookStyle(clip).fontSize);
+  const [viralHookFontFamily, setViralHookFontFamily] = useState(() => resolveViralHookStyle(clip).fontFamily);
+  const [viralHookFontColor, setViralHookFontColor] = useState(() => resolveViralHookStyle(clip).fontColor);
+  const [viralHookStrokeColor, setViralHookStrokeColor] = useState(() => resolveViralHookStyle(clip).strokeColor);
+  const [viralHookStrokeWidth, setViralHookStrokeWidth] = useState(() => resolveViralHookStyle(clip).strokeWidth);
+  const [viralHookBold, setViralHookBold] = useState(() => resolveViralHookStyle(clip).bold);
+  const [viralHookBoxColor, setViralHookBoxColor] = useState(() => resolveViralHookStyle(clip).boxColor);
+  const [viralHookBoxOpacity, setViralHookBoxOpacity] = useState(() => resolveViralHookStyle(clip).boxOpacity);
 
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewCurrentTime, setPreviewCurrentTime] = useState(0);
@@ -970,13 +999,13 @@ export default function ClipStudioModal({
     [viralHookEnabled, viralHookText]
   );
   const previewViralHookBoxBg = useMemo(() => {
-    const normalizedOpacity = clamp(Number(boxOpacity || 0), 0, 100);
+    const normalizedOpacity = clamp(Number(viralHookBoxOpacity || 0), 0, 100);
     const effectiveOpacity = normalizedOpacity > 0 ? normalizedOpacity : 68;
-    return toRgba(boxColor, effectiveOpacity);
-  }, [boxColor, boxOpacity]);
+    return toRgba(viralHookBoxColor, effectiveOpacity);
+  }, [viralHookBoxColor, viralHookBoxOpacity]);
   const previewViralHookStrokeWidth = useMemo(
-    () => clamp(Number(strokeWidth || 0) * 0.45, 0, 4),
-    [strokeWidth]
+    () => clamp(Number(viralHookStrokeWidth || 0) * 0.45, 0, 4),
+    [viralHookStrokeWidth]
   );
   const previewViralHookFontSize = useMemo(
     () => clamp(Math.round(Number(viralHookFontSize || CAPTION_PRESETS[0].style.fontSize) * 0.62), 14, 42),
@@ -1119,7 +1148,20 @@ export default function ClipStudioModal({
     setKaraokeMode(Boolean(preset.karaokeMode));
     setSubtitleAnimation(String(preset.style?.animation || 'none'));
     setSpeakerColorMode(Boolean(preset.style?.speakerColorMode));
+  };
+
+  const applyViralHookPreset = (presetId) => {
+    const preset = CAPTION_PRESETS.find((p) => p.id === presetId);
+    if (!preset) return;
+    setSelectedViralHookPreset(presetId);
     setViralHookFontSize(clamp(Number(preset.style?.fontSize || CAPTION_PRESETS[0].style.fontSize), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX));
+    setViralHookFontFamily(normalizeSubtitleFontFamily(preset.style?.fontFamily || CAPTION_PRESETS[0].style.fontFamily));
+    setViralHookFontColor(String(preset.style?.fontColor || CAPTION_PRESETS[0].style.fontColor));
+    setViralHookStrokeColor(String(preset.style?.strokeColor || CAPTION_PRESETS[0].style.strokeColor));
+    setViralHookStrokeWidth(clamp(Number(preset.style?.strokeWidth ?? CAPTION_PRESETS[0].style.strokeWidth), 0, 8));
+    setViralHookBold(Boolean(preset.style?.bold ?? CAPTION_PRESETS[0].style.bold));
+    setViralHookBoxColor(String(preset.style?.boxColor || CAPTION_PRESETS[0].style.boxColor));
+    setViralHookBoxOpacity(clamp(Number(preset.style?.boxOpacity ?? CAPTION_PRESETS[0].style.boxOpacity), 0, 100));
   };
 
   useEffect(() => {
@@ -1426,11 +1468,20 @@ export default function ClipStudioModal({
     setDubbingTargetLanguage(String(clip?.dub_target_language || 'es').trim().toLowerCase() || 'es');
     setDubbingSourceLanguage(String(clip?.dub_source_language || 'auto').trim().toLowerCase() || 'auto');
     const nextViralHookDefault = resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl);
+    const nextViralHookStyle = resolveViralHookStyle(clip);
     setViralHookText(nextViralHookDefault);
     setViralHookEnabled(Boolean(nextViralHookDefault));
     setViralHookStart(Math.max(0, Number(clip?.viral_hook_start || 0)));
     setViralHookDuration(clamp(Number(clip?.viral_hook_duration || VIRAL_HOOK_DEFAULT_DURATION), 0.4, 8));
-    setViralHookFontSize(resolveViralHookFontSize(clip));
+    setViralHookFontSize(nextViralHookStyle.fontSize);
+    setViralHookFontFamily(nextViralHookStyle.fontFamily);
+    setViralHookFontColor(nextViralHookStyle.fontColor);
+    setViralHookStrokeColor(nextViralHookStyle.strokeColor);
+    setViralHookStrokeWidth(nextViralHookStyle.strokeWidth);
+    setViralHookBold(nextViralHookStyle.bold);
+    setViralHookBoxColor(nextViralHookStyle.boxColor);
+    setViralHookBoxOpacity(nextViralHookStyle.boxOpacity);
+    setSelectedViralHookPreset('');
     setPunctuationOn(true);
     setEmojiOn(true);
     setShowCaptionSettings(false);
@@ -1534,6 +1585,13 @@ export default function ClipStudioModal({
     clip?.viral_hook_duration,
     clip?.viral_hook_start,
     clip?.viral_hook_font_size,
+    clip?.viral_hook_font_family,
+    clip?.viral_hook_font_color,
+    clip?.viral_hook_stroke_color,
+    clip?.viral_hook_stroke_width,
+    clip?.viral_hook_bold,
+    clip?.viral_hook_box_color,
+    clip?.viral_hook_box_opacity,
     clip?.dub_target_language,
     clip?.dub_source_language,
     clip?.transcript_segments,
@@ -1734,6 +1792,13 @@ export default function ClipStudioModal({
     let appliedViralHookStart = viralHookEnabled ? Number(viralHookTimelineStart || 0) : 0;
     let appliedViralHookDuration = viralHookEnabled ? Number(viralHookTimelineDuration || 0) : 0;
     let appliedViralHookFontSize = clamp(Number(viralHookFontSize || CAPTION_PRESETS[0].style.fontSize), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
+    let appliedViralHookFontFamily = normalizeSubtitleFontFamily(viralHookFontFamily);
+    let appliedViralHookFontColor = String(viralHookFontColor || '#FFFFFF');
+    let appliedViralHookStrokeColor = String(viralHookStrokeColor || '#000000');
+    let appliedViralHookStrokeWidth = clamp(Number(viralHookStrokeWidth || 0), 0, 8);
+    let appliedViralHookBold = Boolean(viralHookBold);
+    let appliedViralHookBoxColor = String(viralHookBoxColor || '#000000');
+    let appliedViralHookBoxOpacity = clamp(Number(viralHookBoxOpacity || 0), 0, 100);
     let subtitleSrtPayload = srtContent || null;
 
     try {
@@ -1801,12 +1866,30 @@ export default function ClipStudioModal({
       const existingViralHookText = String(clip?.viral_hook_text || '').trim();
       const existingViralHookStart = Math.max(0, Number(clip?.viral_hook_start || 0));
       const existingViralHookDuration = Math.max(0, Number(clip?.viral_hook_duration || 0));
-      const existingViralHookFontSize = resolveViralHookFontSize(clip, appliedViralHookFontSize);
+      const existingViralHookStyle = resolveViralHookStyle(clip, {
+        fontSize: appliedViralHookFontSize,
+        fontFamily: appliedViralHookFontFamily,
+        fontColor: appliedViralHookFontColor,
+        strokeColor: appliedViralHookStrokeColor,
+        strokeWidth: appliedViralHookStrokeWidth,
+        bold: appliedViralHookBold,
+        boxColor: appliedViralHookBoxColor,
+        boxOpacity: appliedViralHookBoxOpacity
+      });
       const viralHookChanged = (
         appliedViralHookText !== existingViralHookText
         || Math.abs(appliedViralHookStart - existingViralHookStart) > 0.01
         || Math.abs(appliedViralHookDuration - existingViralHookDuration) > 0.01
-        || (Boolean(appliedViralHookText) && Math.abs(appliedViralHookFontSize - existingViralHookFontSize) > 0.01)
+        || (Boolean(appliedViralHookText) && (
+          Math.abs(appliedViralHookFontSize - Number(existingViralHookStyle.fontSize || appliedViralHookFontSize)) > 0.01
+          || appliedViralHookFontFamily !== String(existingViralHookStyle.fontFamily || appliedViralHookFontFamily)
+          || appliedViralHookFontColor !== String(existingViralHookStyle.fontColor || appliedViralHookFontColor)
+          || appliedViralHookStrokeColor !== String(existingViralHookStyle.strokeColor || appliedViralHookStrokeColor)
+          || Math.abs(appliedViralHookStrokeWidth - Number(existingViralHookStyle.strokeWidth || appliedViralHookStrokeWidth)) > 0.01
+          || appliedViralHookBold !== Boolean(existingViralHookStyle.bold)
+          || appliedViralHookBoxColor !== String(existingViralHookStyle.boxColor || appliedViralHookBoxColor)
+          || Math.abs(appliedViralHookBoxOpacity - Number(existingViralHookStyle.boxOpacity || appliedViralHookBoxOpacity)) > 0.01
+        ))
       );
 
       // We always attempt to fetch fresh subtitle SRT data if we are overriding it or if timestamps changed
@@ -1877,7 +1960,14 @@ export default function ClipStudioModal({
           viral_hook_text: appliedViralHookText,
           viral_hook_start: appliedViralHookStart,
           viral_hook_duration: appliedViralHookDuration,
-          viral_hook_font_size: appliedViralHookFontSize
+          viral_hook_font_size: appliedViralHookFontSize,
+          viral_hook_font_family: appliedViralHookFontFamily,
+          viral_hook_font_color: appliedViralHookFontColor,
+          viral_hook_stroke_color: appliedViralHookStrokeColor,
+          viral_hook_stroke_width: appliedViralHookStrokeWidth,
+          viral_hook_bold: appliedViralHookBold,
+          viral_hook_box_color: appliedViralHookBoxColor,
+          viral_hook_box_opacity: appliedViralHookBoxOpacity
         };
 
         const recutRes = await apiFetch('/api/recut', {
@@ -1924,6 +2014,34 @@ export default function ClipStudioModal({
         if (Number.isFinite(Number(recutData?.viral_hook_font_size))) {
           appliedViralHookFontSize = clamp(Number(recutData.viral_hook_font_size), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
           setViralHookFontSize(appliedViralHookFontSize);
+        }
+        if (typeof recutData?.viral_hook_font_family === 'string' && String(recutData.viral_hook_font_family).trim()) {
+          appliedViralHookFontFamily = normalizeSubtitleFontFamily(recutData.viral_hook_font_family);
+          setViralHookFontFamily(appliedViralHookFontFamily);
+        }
+        if (typeof recutData?.viral_hook_font_color === 'string' && String(recutData.viral_hook_font_color).trim()) {
+          appliedViralHookFontColor = String(recutData.viral_hook_font_color).trim();
+          setViralHookFontColor(appliedViralHookFontColor);
+        }
+        if (typeof recutData?.viral_hook_stroke_color === 'string' && String(recutData.viral_hook_stroke_color).trim()) {
+          appliedViralHookStrokeColor = String(recutData.viral_hook_stroke_color).trim();
+          setViralHookStrokeColor(appliedViralHookStrokeColor);
+        }
+        if (Number.isFinite(Number(recutData?.viral_hook_stroke_width))) {
+          appliedViralHookStrokeWidth = clamp(Number(recutData.viral_hook_stroke_width), 0, 8);
+          setViralHookStrokeWidth(appliedViralHookStrokeWidth);
+        }
+        if (typeof recutData?.viral_hook_bold === 'boolean') {
+          appliedViralHookBold = Boolean(recutData.viral_hook_bold);
+          setViralHookBold(appliedViralHookBold);
+        }
+        if (typeof recutData?.viral_hook_box_color === 'string' && String(recutData.viral_hook_box_color).trim()) {
+          appliedViralHookBoxColor = String(recutData.viral_hook_box_color).trim();
+          setViralHookBoxColor(appliedViralHookBoxColor);
+        }
+        if (Number.isFinite(Number(recutData?.viral_hook_box_opacity))) {
+          appliedViralHookBoxOpacity = clamp(Number(recutData.viral_hook_box_opacity), 0, 100);
+          setViralHookBoxOpacity(appliedViralHookBoxOpacity);
         }
       }
 
@@ -2015,6 +2133,13 @@ export default function ClipStudioModal({
           viral_hook_start: appliedViralHookStart,
           viral_hook_duration: appliedViralHookDuration,
           viral_hook_font_size: appliedViralHookFontSize,
+          viral_hook_font_family: appliedViralHookFontFamily,
+          viral_hook_font_color: appliedViralHookFontColor,
+          viral_hook_stroke_color: appliedViralHookStrokeColor,
+          viral_hook_stroke_width: appliedViralHookStrokeWidth,
+          viral_hook_bold: appliedViralHookBold,
+          viral_hook_box_color: appliedViralHookBoxColor,
+          viral_hook_box_opacity: appliedViralHookBoxOpacity,
           ...(dubbingEnabled
             ? {
               dub_target_language: appliedDubTargetLanguage,
@@ -3127,7 +3252,7 @@ export default function ClipStudioModal({
                       <Sparkles size={18} className="text-amber-500" /> Viral Hook Overlay
                     </h3>
                     <p className="text-xs text-zinc-500 mt-1">
-                      Muestra un título-resumen en la parte superior del video (en caja) para captar atención. Usa el mismo preset/estilo de subtítulos activo. Por defecto sale de 0.0s a 3.0s.
+                      Muestra un título-resumen en la parte superior del video (en caja) para captar atención. Tiene estilo independiente de subtítulos. Por defecto sale de 0.0s a 3.0s.
                     </p>
                   </div>
 
@@ -3152,7 +3277,7 @@ export default function ClipStudioModal({
                     <div className="flex flex-col gap-2">
                       <div className="flex items-center justify-between gap-2">
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-200 text-left">Preset de estilo</label>
-                        <span className="text-[11px] text-slate-500 dark:text-slate-400">Mismos presets de subtítulos</span>
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400">Presets aplicados solo al hook</span>
                       </div>
                       <div className="grid grid-cols-2 gap-2">
                         {CAPTION_PRESETS.map((preset) => (
@@ -3160,14 +3285,14 @@ export default function ClipStudioModal({
                             key={`viral-preset-${preset.id}`}
                             type="button"
                             onClick={() => {
-                              applyPreset(preset.id);
+                              applyViralHookPreset(preset.id);
                               setSavedPulse(false);
                             }}
-                            className={`rounded-md border px-2 py-1.5 text-left text-xs font-medium transition-colors ${selectedPreset === preset.id
+                            className={`rounded-md border px-2 py-1.5 text-left text-xs font-medium transition-colors ${selectedViralHookPreset === preset.id
                               ? 'border-violet-400 bg-violet-50 text-violet-700 dark:border-violet-500/70 dark:bg-violet-900/30 dark:text-violet-200'
                               : 'border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/50'
                               }`}
-                            title={`Aplicar preset ${preset.name} al estilo de subtítulos y hook`}
+                            title={`Aplicar preset ${preset.name} al estilo del hook`}
                           >
                             {preset.name}
                           </button>
@@ -3262,11 +3387,116 @@ export default function ClipStudioModal({
                         disabled={!viralHookEnabled}
                         onChange={(e) => {
                           setViralHookFontSize(clamp(Number(e.target.value), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX));
+                          setSelectedViralHookPreset('');
                           setSavedPulse(false);
                         }}
                         className="w-full accent-violet-600"
                       />
                     </div>
+
+                    <details className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/40 px-3 py-2">
+                      <summary className="cursor-pointer select-none text-xs font-semibold text-slate-600 dark:text-slate-300">
+                        Ajustes avanzados del Hook
+                      </summary>
+                      <div className="mt-3 space-y-3">
+                        <div className="grid grid-cols-2 gap-3">
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300">Fuente
+                            <select
+                              value={viralHookFontFamily}
+                              onChange={(e) => {
+                                setViralHookFontFamily(normalizeSubtitleFontFamily(e.target.value));
+                                setSelectedViralHookPreset('');
+                                setSavedPulse(false);
+                              }}
+                              className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm"
+                            >
+                              {captionFontOptions.map((font) => (
+                                <option key={`viral-hook-font-${font.value}`} value={font.value}>
+                                  {font.label}
+                                  {font.available === false ? ' (no disponible)' : ''}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300">Grosor contorno
+                            <input
+                              type="number"
+                              min="0"
+                              max="8"
+                              value={viralHookStrokeWidth}
+                              onChange={(e) => {
+                                setViralHookStrokeWidth(clamp(Number(e.target.value || 0), 0, 8));
+                                setSelectedViralHookPreset('');
+                                setSavedPulse(false);
+                              }}
+                              className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm"
+                            />
+                          </label>
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300">Color texto
+                            <input
+                              type="color"
+                              value={viralHookFontColor}
+                              onChange={(e) => {
+                                setViralHookFontColor(e.target.value);
+                                setSelectedViralHookPreset('');
+                                setSavedPulse(false);
+                              }}
+                              className="mt-1 h-10 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-1"
+                            />
+                          </label>
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300">Color contorno
+                            <input
+                              type="color"
+                              value={viralHookStrokeColor}
+                              onChange={(e) => {
+                                setViralHookStrokeColor(e.target.value);
+                                setSelectedViralHookPreset('');
+                                setSavedPulse(false);
+                              }}
+                              className="mt-1 h-10 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-1"
+                            />
+                          </label>
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300">Color caja
+                            <input
+                              type="color"
+                              value={viralHookBoxColor}
+                              onChange={(e) => {
+                                setViralHookBoxColor(e.target.value);
+                                setSelectedViralHookPreset('');
+                                setSavedPulse(false);
+                              }}
+                              className="mt-1 h-10 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-1"
+                            />
+                          </label>
+                          <label className="text-xs text-zinc-600 dark:text-zinc-300">Caja (%)
+                            <input
+                              type="number"
+                              min="0"
+                              max="100"
+                              value={viralHookBoxOpacity}
+                              onChange={(e) => {
+                                setViralHookBoxOpacity(clamp(Number(e.target.value || 0), 0, 100));
+                                setSelectedViralHookPreset('');
+                                setSavedPulse(false);
+                              }}
+                              className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm"
+                            />
+                          </label>
+                        </div>
+                        <label className="inline-flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+                          <input
+                            type="checkbox"
+                            checked={viralHookBold}
+                            onChange={(e) => {
+                              setViralHookBold(e.target.checked);
+                              setSelectedViralHookPreset('');
+                              setSavedPulse(false);
+                            }}
+                          />
+                          Negrita
+                        </label>
+                      </div>
+                    </details>
                   </div>
                 </div>
               )}
@@ -3959,11 +4189,11 @@ export default function ClipStudioModal({
                         <p
                           className="text-center leading-snug break-words"
                           style={{
-                            color: fontColor,
-                            fontFamily: String(fontFamily || 'Anton'),
-                            fontWeight: bold ? 700 : 600,
+                            color: viralHookFontColor,
+                            fontFamily: String(viralHookFontFamily || 'Anton'),
+                            fontWeight: viralHookBold ? 700 : 600,
                             fontSize: `${previewViralHookFontSize}px`,
-                            WebkitTextStroke: `${previewViralHookStrokeWidth}px ${strokeColor}`
+                            WebkitTextStroke: `${previewViralHookStrokeWidth}px ${viralHookStrokeColor}`
                           }}
                         >
                           {previewViralHookText}

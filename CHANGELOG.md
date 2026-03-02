@@ -11,6 +11,16 @@
 - Para qué sirve:
   - Permite ajustar con precisión el tamaño del título-hook desde la UI y mantener ese tamaño en el render final/exportado.
 
+### Mejorado: Hook Viral con ajustes avanzados propios (independiente de subtítulos)
+- Qué cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` el panel de Hook ahora tiene ajustes avanzados dedicados: `Fuente`, `Color texto`, `Color contorno`, `Grosor contorno`, `Color caja`, `Caja (%)` y `Negrita`.
+  - Los presets mostrados en Hook ahora aplican solo al estilo del Hook (ya no modifican los subtítulos).
+  - El preview del Hook usa exclusivamente sus estados de estilo propios.
+  - En `app.py` (`RecutRequest` y `/api/recut`) se agregaron y procesaron campos de estilo del hook: `viral_hook_font_family`, `viral_hook_font_color`, `viral_hook_stroke_color`, `viral_hook_stroke_width`, `viral_hook_bold`, `viral_hook_box_color`, `viral_hook_box_opacity` (además de `viral_hook_font_size`).
+  - Se persisten esos campos en metadata y `job.result.clips`, y se devuelven en la respuesta del recut.
+- Para qué sirve:
+  - Permite diseñar el Hook Viral con control completo sin depender del estilo de subtítulos, manteniendo consistencia entre preview y export.
+
 ### Ajustado: se quitó el texto superior sobre la vista previa del video en Clip Studio
 - Qué cambiamos:
   - En `dashboard/src/components/ClipStudioModal.jsx` se eliminó la línea de texto descriptiva que aparecía arriba del video en el panel de preview.

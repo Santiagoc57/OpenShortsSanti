@@ -5760,6 +5760,13 @@ class RecutRequest(BaseModel):
     viral_hook_start: Optional[float] = None
     viral_hook_duration: Optional[float] = None
     viral_hook_font_size: Optional[int] = None
+    viral_hook_font_family: Optional[str] = None
+    viral_hook_font_color: Optional[str] = None
+    viral_hook_stroke_color: Optional[str] = None
+    viral_hook_stroke_width: Optional[int] = None
+    viral_hook_bold: Optional[bool] = None
+    viral_hook_box_color: Optional[str] = None
+    viral_hook_box_opacity: Optional[int] = None
 
 def _parse_form_bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -5940,10 +5947,23 @@ async def recut_clip(req: RecutRequest):
             offset_x=req.caption_offset_x,
             offset_y=req.caption_offset_y,
         )
-        hook_style = dict(caption_style)
-        hook_style["position"] = "top"
-        hook_style["offset_x"] = 0.0
-        hook_style["offset_y"] = 0.0
+        hook_style = _coerce_caption_style(
+            position="top",
+            font_size=(req.viral_hook_font_size if req.viral_hook_font_size is not None else caption_style.get("font_size")),
+            font_family=(req.viral_hook_font_family if req.viral_hook_font_family else caption_style.get("font_family")),
+            font_color=(req.viral_hook_font_color if req.viral_hook_font_color else caption_style.get("font_color")),
+            stroke_color=(req.viral_hook_stroke_color if req.viral_hook_stroke_color else caption_style.get("stroke_color")),
+            stroke_width=(req.viral_hook_stroke_width if req.viral_hook_stroke_width is not None else caption_style.get("stroke_width")),
+            bold=(req.viral_hook_bold if req.viral_hook_bold is not None else caption_style.get("bold")),
+            box_color=(req.viral_hook_box_color if req.viral_hook_box_color else caption_style.get("box_color")),
+            box_opacity=(req.viral_hook_box_opacity if req.viral_hook_box_opacity is not None else caption_style.get("box_opacity")),
+            karaoke_mode=False,
+            subtitle_animation="none",
+            speaker_color_mode=False,
+            speaker_color_palette=None,
+            offset_x=0.0,
+            offset_y=0.0,
+        )
         if bool(req.captions_on):
             raw_srt = str(req.srt_content or "").strip()
             clip_data = {}
@@ -6071,19 +6091,7 @@ async def recut_clip(req: RecutRequest):
             clip_window_duration = max(0.1, _safe_float((req.end - req.start), 0.1))
             viral_hook_start = max(0.0, _safe_float(getattr(req, "viral_hook_start", 0.0), 0.0))
             viral_hook_duration = max(0.0, _safe_float(getattr(req, "viral_hook_duration", 3.0), 3.0))
-            viral_hook_font_size = max(
-                12,
-                min(
-                    84,
-                    int(
-                        _safe_float(
-                            getattr(req, "viral_hook_font_size", hook_style.get("font_size", 50)),
-                            _safe_float(hook_style.get("font_size", 50), 50)
-                        )
-                    )
-                )
-            )
-            hook_style["font_size"] = viral_hook_font_size
+            viral_hook_font_size = int(max(12, min(84, _safe_float(hook_style.get("font_size", 50), 50))))
             if viral_hook_start >= clip_window_duration:
                 viral_hook_start = max(0.0, clip_window_duration - 0.1)
 
@@ -6093,7 +6101,7 @@ async def recut_clip(req: RecutRequest):
                 viral_hook_duration = min(viral_hook_duration, max(0.1, clip_window_duration - viral_hook_start))
                 viral_hook_end = viral_hook_start + viral_hook_duration
                 safe_hook_text = viral_hook_text.replace("'", "\\'").replace(":", "\\:")
-                # Hook visual style follows the active subtitle preset/style.
+                # Hook visual style is independent from subtitle style.
                 hook_font_family = str(hook_style.get("font_family") or "Anton")
                 hook_font_color = str(hook_style.get("font_color") or "#FFFFFF")
                 hook_stroke_color = str(hook_style.get("stroke_color") or "#000000")
@@ -6211,6 +6219,13 @@ async def recut_clip(req: RecutRequest):
                 clips[req.clip_index]['viral_hook_start'] = round(max(0.0, _safe_float(viral_hook_start, 0.0)), 3)
                 clips[req.clip_index]['viral_hook_duration'] = round(max(0.0, _safe_float(viral_hook_duration, 0.0)), 3)
                 clips[req.clip_index]['viral_hook_font_size'] = int(max(12, min(84, _safe_float(viral_hook_font_size, 50))))
+                clips[req.clip_index]['viral_hook_font_family'] = str(hook_style.get("font_family") or "Anton")
+                clips[req.clip_index]['viral_hook_font_color'] = str(hook_style.get("font_color") or "#FFFFFF")
+                clips[req.clip_index]['viral_hook_stroke_color'] = str(hook_style.get("stroke_color") or "#000000")
+                clips[req.clip_index]['viral_hook_stroke_width'] = int(max(0, min(8, _safe_float(hook_style.get("stroke_width", 0), 0.0))))
+                clips[req.clip_index]['viral_hook_bold'] = bool(hook_style.get("bold", True))
+                clips[req.clip_index]['viral_hook_box_color'] = str(hook_style.get("box_color") or "#000000")
+                clips[req.clip_index]['viral_hook_box_opacity'] = int(max(0, min(100, _safe_float(hook_style.get("box_opacity", 0), 0.0))))
                 if smart_summary:
                     clips[req.clip_index]['layout_smart_summary'] = smart_summary
                 elif 'layout_smart_summary' in clips[req.clip_index]:
@@ -6242,6 +6257,13 @@ async def recut_clip(req: RecutRequest):
         job['result']['clips'][req.clip_index]['viral_hook_start'] = round(max(0.0, _safe_float(viral_hook_start, 0.0)), 3)
         job['result']['clips'][req.clip_index]['viral_hook_duration'] = round(max(0.0, _safe_float(viral_hook_duration, 0.0)), 3)
         job['result']['clips'][req.clip_index]['viral_hook_font_size'] = int(max(12, min(84, _safe_float(viral_hook_font_size, 50))))
+        job['result']['clips'][req.clip_index]['viral_hook_font_family'] = str(hook_style.get("font_family") or "Anton")
+        job['result']['clips'][req.clip_index]['viral_hook_font_color'] = str(hook_style.get("font_color") or "#FFFFFF")
+        job['result']['clips'][req.clip_index]['viral_hook_stroke_color'] = str(hook_style.get("stroke_color") or "#000000")
+        job['result']['clips'][req.clip_index]['viral_hook_stroke_width'] = int(max(0, min(8, _safe_float(hook_style.get("stroke_width", 0), 0.0))))
+        job['result']['clips'][req.clip_index]['viral_hook_bold'] = bool(hook_style.get("bold", True))
+        job['result']['clips'][req.clip_index]['viral_hook_box_color'] = str(hook_style.get("box_color") or "#000000")
+        job['result']['clips'][req.clip_index]['viral_hook_box_opacity'] = int(max(0, min(100, _safe_float(hook_style.get("box_opacity", 0), 0.0))))
         if smart_summary:
             job['result']['clips'][req.clip_index]['layout_smart_summary'] = smart_summary
         elif 'layout_smart_summary' in job['result']['clips'][req.clip_index]:
@@ -6261,6 +6283,13 @@ async def recut_clip(req: RecutRequest):
         "viral_hook_start": round(max(0.0, _safe_float(viral_hook_start, 0.0)), 3),
         "viral_hook_duration": round(max(0.0, _safe_float(viral_hook_duration, 0.0)), 3),
         "viral_hook_font_size": int(max(12, min(84, _safe_float(viral_hook_font_size, 50)))),
+        "viral_hook_font_family": str(hook_style.get("font_family") or "Anton"),
+        "viral_hook_font_color": str(hook_style.get("font_color") or "#FFFFFF"),
+        "viral_hook_stroke_color": str(hook_style.get("stroke_color") or "#000000"),
+        "viral_hook_stroke_width": int(max(0, min(8, _safe_float(hook_style.get("stroke_width", 0), 0.0)))),
+        "viral_hook_bold": bool(hook_style.get("bold", True)),
+        "viral_hook_box_color": str(hook_style.get("box_color") or "#000000"),
+        "viral_hook_box_opacity": int(max(0, min(100, _safe_float(hook_style.get("box_opacity", 0), 0.0)))),
         "smart_reframe_summary": smart_summary,
         "warnings": recut_warnings
     }
