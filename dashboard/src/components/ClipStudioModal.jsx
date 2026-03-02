@@ -954,6 +954,19 @@ export default function ClipStudioModal({
     () => (viralHookEnabled ? String(viralHookText || '').trim() : ''),
     [viralHookEnabled, viralHookText]
   );
+  const previewViralHookBoxBg = useMemo(() => {
+    const normalizedOpacity = clamp(Number(boxOpacity || 0), 0, 100);
+    const effectiveOpacity = normalizedOpacity > 0 ? normalizedOpacity : 68;
+    return toRgba(boxColor, effectiveOpacity);
+  }, [boxColor, boxOpacity]);
+  const previewViralHookStrokeWidth = useMemo(
+    () => clamp(Number(strokeWidth || 0) * 0.45, 0, 4),
+    [strokeWidth]
+  );
+  const previewViralHookFontSize = useMemo(
+    () => clamp(Math.round(Number(fontSize || 50) * 0.62), 14, 42),
+    [fontSize]
+  );
   const showPreviewViralHook = useMemo(() => {
     if (!previewViralHookText) return false;
     const t = Number(previewCurrentTime || 0);
@@ -3087,7 +3100,7 @@ export default function ClipStudioModal({
                       <Sparkles size={18} className="text-amber-500" /> Viral Hook Overlay
                     </h3>
                     <p className="text-xs text-zinc-500 mt-1">
-                      Muestra un título-resumen en la parte superior del video (en caja) para captar atención. Por defecto sale de 0.0s a 3.0s.
+                      Muestra un título-resumen en la parte superior del video (en caja) para captar atención. Usa el mismo preset/estilo de subtítulos activo. Por defecto sale de 0.0s a 3.0s.
                     </p>
                   </div>
 
@@ -3870,8 +3883,17 @@ export default function ClipStudioModal({
                   )}
                   {showPreviewViralHook && (
                     <div className="pointer-events-none absolute left-1/2 top-[8%] -translate-x-1/2 w-[86%] z-[4] flex justify-center">
-                      <div className="max-w-full rounded-md border border-white/20 bg-black/68 px-3 py-2 shadow-lg">
-                        <p className="text-center text-white font-semibold leading-snug text-[13px] md:text-[18px] break-words">
+                      <div className="max-w-full rounded-md border border-white/20 px-3 py-2 shadow-lg" style={{ backgroundColor: previewViralHookBoxBg }}>
+                        <p
+                          className="text-center leading-snug break-words"
+                          style={{
+                            color: fontColor,
+                            fontFamily: String(fontFamily || 'Anton'),
+                            fontWeight: bold ? 700 : 600,
+                            fontSize: `${previewViralHookFontSize}px`,
+                            WebkitTextStroke: `${previewViralHookStrokeWidth}px ${strokeColor}`
+                          }}
+                        >
                           {previewViralHookText}
                         </p>
                       </div>

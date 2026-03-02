@@ -5922,6 +5922,27 @@ async def recut_clip(req: RecutRequest):
         # Phase 3 Single-Pass Subtitle Overlay Logic
         subtitle_filter = ""
         subtitle_path = None
+        caption_style = _coerce_caption_style(
+            position=req.caption_position,
+            font_size=req.caption_font_size,
+            font_family=req.caption_font_family,
+            font_color=req.caption_font_color,
+            stroke_color=req.caption_stroke_color,
+            stroke_width=req.caption_stroke_width,
+            bold=req.caption_bold,
+            box_color=req.caption_box_color,
+            box_opacity=req.caption_box_opacity,
+            karaoke_mode=req.caption_karaoke_mode,
+            subtitle_animation=req.caption_animation,
+            speaker_color_mode=req.caption_speaker_color_mode,
+            speaker_color_palette=req.caption_speaker_color_palette,
+            offset_x=req.caption_offset_x,
+            offset_y=req.caption_offset_y,
+        )
+        hook_style = dict(caption_style)
+        hook_style["position"] = "top"
+        hook_style["offset_x"] = 0.0
+        hook_style["offset_y"] = 0.0
         if bool(req.captions_on):
             raw_srt = str(req.srt_content or "").strip()
             clip_data = {}
@@ -5974,23 +5995,7 @@ async def recut_clip(req: RecutRequest):
                 if shifted_srt:
                     from subtitles import generate_karaoke_ass_from_srt, generate_styled_ass_from_srt
                 
-                    style = _coerce_caption_style(
-                        position=req.caption_position,
-                        font_size=req.caption_font_size,
-                        font_family=req.caption_font_family,
-                        font_color=req.caption_font_color,
-                        stroke_color=req.caption_stroke_color,
-                        stroke_width=req.caption_stroke_width,
-                        bold=req.caption_bold,
-                        box_color=req.caption_box_color,
-                        box_opacity=req.caption_box_opacity,
-                        karaoke_mode=req.caption_karaoke_mode,
-                        subtitle_animation=req.caption_animation,
-                        speaker_color_mode=req.caption_speaker_color_mode,
-                        speaker_color_palette=req.caption_speaker_color_palette,
-                        offset_x=req.caption_offset_x,
-                        offset_y=req.caption_offset_y,
-                    )
+                    style = caption_style
                     speaker_segments = _build_caption_speaker_segments(
                         speaker_transcript_source,
                         shift_seconds=(-speaker_shift_base),
@@ -6074,18 +6079,67 @@ async def recut_clip(req: RecutRequest):
                 viral_hook_duration = min(viral_hook_duration, max(0.1, clip_window_duration - viral_hook_start))
                 viral_hook_end = viral_hook_start + viral_hook_duration
                 safe_hook_text = viral_hook_text.replace("'", "\\'").replace(":", "\\:")
-                # We attempt to use the Anton font from dashboard for the viral hook
+                # Hook visual style follows the active subtitle preset/style.
+                hook_font_family = str(hook_style.get("font_family") or "Anton")
+                hook_font_color = str(hook_style.get("font_color") or "#FFFFFF")
+                hook_stroke_color = str(hook_style.get("stroke_color") or "#000000")
+                hook_box_color = str(hook_style.get("box_color") or "#000000")
+                hook_font_size = max(12, min(96, int(_safe_float(hook_style.get("font_size", 50), 50))))
+                hook_stroke_width = max(0.0, min(8.0, _safe_float(hook_style.get("stroke_width", 0), 0.0)))
+                hook_box_opacity = max(0, min(100, int(_safe_float(hook_style.get("box_opacity", 0), 0.0))))
+
+                def _normalize_hook_hex(raw_value: str, fallback: str) -> str:
+                    value = str(raw_value or "").strip()
+                    if re.fullmatch(r"#?[0-9a-fA-F]{6}", value):
+                        return f"#{value.lstrip('#')}"
+                    return fallback
+
+                hook_font_color = _normalize_hook_hex(hook_font_color, "#FFFFFF")
+                hook_stroke_color = _normalize_hook_hex(hook_stroke_color, "#000000")
+                hook_box_color = _normalize_hook_hex(hook_box_color, "#000000")
+
+                hook_font_scale = max(0.030, min(0.110, float(hook_font_size) / 780.0))
+                hook_border_width = max(0.0, min(4.0, hook_stroke_width * 0.45))
+                hook_box_alpha = (hook_box_opacity / 100.0) if hook_box_opacity > 0 else 0.68
+                hook_box_alpha = max(0.35, min(0.95, hook_box_alpha))
+
+                resolved_hook_font = _sanitize_font_name(hook_font_family, fallback="Anton")
                 fonts_dir = os.path.join(os.path.dirname(__file__), "dashboard", "public", "fonts")
-                font_file = os.path.join(fonts_dir, "Anton.ttf")
+                normalized_hook_font_key = unicodedata.normalize("NFD", str(resolved_hook_font).lower())
+                normalized_hook_font_key = "".join(ch for ch in normalized_hook_font_key if unicodedata.category(ch) != "Mn")
+                normalized_hook_font_key = re.sub(r"\s+", " ", normalized_hook_font_key).strip()
+                font_file_candidates: List[str] = []
+                if "montserrat" in normalized_hook_font_key:
+                    font_file_candidates.append("Montserrat-Bold.ttf")
+                elif "archivo" in normalized_hook_font_key:
+                    font_file_candidates.append("ArchivoBlack-Regular.ttf")
+                elif "bebas" in normalized_hook_font_key:
+                    font_file_candidates.append("BebasNeue-Regular.ttf")
+                elif "oswald" in normalized_hook_font_key:
+                    font_file_candidates.append("Oswald-Variable.ttf")
+                elif "teko" in normalized_hook_font_key:
+                    font_file_candidates.append("Teko-Variable.ttf")
+                else:
+                    font_file_candidates.append("Anton-Regular.ttf")
+                font_file_candidates.extend(["Anton-Regular.ttf", "Anton.ttf"])
+
+                font_file = ""
+                for font_candidate in font_file_candidates:
+                    candidate_path = os.path.join(fonts_dir, font_candidate)
+                    if os.path.exists(candidate_path):
+                        font_file = candidate_path
+                        break
                 font_param = ""
-                if os.path.exists(font_file):
+                if font_file and os.path.exists(font_file):
                     safe_font_file = font_file.replace("\\", "/").replace(":", "\\:")
                     font_param = f":fontfile='{safe_font_file}'"
                 
                 # Add text near the top for the requested start/end window.
                 hook_filter = (
-                    f"drawtext=text='{safe_hook_text}'{font_param}:fontcolor=white:fontsize=out_w*0.065:"
-                    f"box=1:boxcolor=black@0.68:boxborderw=15:x=(w-text_w)/2:y=h*0.08:"
+                    f"drawtext=text='{safe_hook_text}'{font_param}:fontcolor=0x{hook_font_color.lstrip('#')}:"
+                    f"fontsize=out_w*{hook_font_scale:.5f}:"
+                    f"borderw={hook_border_width:.2f}:bordercolor=0x{hook_stroke_color.lstrip('#')}:"
+                    f"box=1:boxcolor=0x{hook_box_color.lstrip('#')}@{hook_box_alpha:.2f}:boxborderw=15:x=(w-text_w)/2:y=h*0.08:"
                     f"enable='between(t,{viral_hook_start:.3f},{viral_hook_end:.3f})'"
                 )
                 filter_complex = f"{filter_complex};{out_pad}{hook_filter}[hook_out]"

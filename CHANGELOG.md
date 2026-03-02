@@ -1013,3 +1013,11 @@
   - Se ajustó la regla de prompt para emoji opcional (máximo 1) en lugar de obligatorio.
 - Para que sirve:
   - Los títulos alternativos quedan alineados con un framework de hooks virales consistente y más orientado a CTR.
+
+### Ajustado: Viral Hook ahora hereda presets/estilo de subtítulos
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` el preview del hook viral ahora usa el estilo activo de subtítulos: fuente, color, trazo, peso y caja.
+  - En `app.py` (`POST /api/recut`) el render del hook viral también toma el mismo estilo de subtítulos (`caption_*`) para mantener paridad entre preview y export.
+  - Se agregó resolución de fuente para hook basada en la familia del preset (Montserrat/Anton/Archivo Black/Bebas/Oswald/Teko, con fallback).
+- Para que sirve:
+  - Aplicar un preset de subtítulos impacta también el hook viral sin duplicar controles ni estilos separados.
