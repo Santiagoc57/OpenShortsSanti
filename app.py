@@ -6002,13 +6002,13 @@ async def recut_clip(req: RecutRequest):
             viral_hook_text = str(req.viral_hook_text or "").strip()
             clip_window_duration = max(0.1, _safe_float((req.end - req.start), 0.1))
             viral_hook_start = max(0.0, _safe_float(getattr(req, "viral_hook_start", 0.0), 0.0))
-            viral_hook_duration = max(0.0, _safe_float(getattr(req, "viral_hook_duration", 2.5), 2.5))
+            viral_hook_duration = max(0.0, _safe_float(getattr(req, "viral_hook_duration", 3.0), 3.0))
             if viral_hook_start >= clip_window_duration:
                 viral_hook_start = max(0.0, clip_window_duration - 0.1)
 
             if viral_hook_text:
                 if viral_hook_duration <= 0:
-                    viral_hook_duration = 2.5
+                    viral_hook_duration = 3.0
                 viral_hook_duration = min(viral_hook_duration, max(0.1, clip_window_duration - viral_hook_start))
                 viral_hook_end = viral_hook_start + viral_hook_duration
                 safe_hook_text = viral_hook_text.replace("'", "\\'").replace(":", "\\:")
@@ -6020,10 +6020,10 @@ async def recut_clip(req: RecutRequest):
                     safe_font_file = font_file.replace("\\", "/").replace(":", "\\:")
                     font_param = f":fontfile='{safe_font_file}'"
                 
-                # Add text at top (y=h*0.15) for the requested start/end window.
+                # Add text near the top for the requested start/end window.
                 hook_filter = (
                     f"drawtext=text='{safe_hook_text}'{font_param}:fontcolor=white:fontsize=out_w*0.065:"
-                    f"box=1:boxcolor=black@0.65:boxborderw=15:x=(w-text_w)/2:y=h*0.15:"
+                    f"box=1:boxcolor=black@0.68:boxborderw=15:x=(w-text_w)/2:y=h*0.08:"
                     f"enable='between(t,{viral_hook_start:.3f},{viral_hook_end:.3f})'"
                 )
                 filter_complex = f"{filter_complex};{out_pad}{hook_filter}[hook_out]"

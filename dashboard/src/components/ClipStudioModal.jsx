@@ -500,6 +500,7 @@ const LAYOUT_PAN_MIN_ZOOM = 1.06;
 const LAYOUT_PAN_SENSITIVITY = 120;
 const CAPTION_OFFSET_FACTOR = 0.35;
 const CAPTION_CENTER_SNAP_THRESHOLD = 2.2;
+const VIRAL_HOOK_DEFAULT_DURATION = 3.0;
 const TIMELINE_ZOOM_MIN = 0.55;
 const TIMELINE_ZOOM_MAX = 2.2;
 const TIMELINE_ZOOM_DEFAULT = 0.9;
@@ -729,7 +730,7 @@ export default function ClipStudioModal({
   const [viralHookText, setViralHookText] = useState(() => resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl));
   const [viralHookEnabled, setViralHookEnabled] = useState(() => Boolean(resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl)));
   const [viralHookStart, setViralHookStart] = useState(Math.max(0, Number(clip?.viral_hook_start || 0)));
-  const [viralHookDuration, setViralHookDuration] = useState(2.5);
+  const [viralHookDuration, setViralHookDuration] = useState(VIRAL_HOOK_DEFAULT_DURATION);
 
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewCurrentTime, setPreviewCurrentTime] = useState(0);
@@ -949,6 +950,15 @@ export default function ClipStudioModal({
     () => clamp(viralHookTimelineStart + viralHookTimelineDuration, viralHookTimelineStart + 0.4, timelineDuration),
     [viralHookTimelineStart, viralHookTimelineDuration, timelineDuration]
   );
+  const previewViralHookText = useMemo(
+    () => (viralHookEnabled ? String(viralHookText || '').trim() : ''),
+    [viralHookEnabled, viralHookText]
+  );
+  const showPreviewViralHook = useMemo(() => {
+    if (!previewViralHookText) return false;
+    const t = Number(previewCurrentTime || 0);
+    return t >= viralHookTimelineStart && t <= viralHookTimelineEnd;
+  }, [previewViralHookText, previewCurrentTime, viralHookTimelineStart, viralHookTimelineEnd]);
 
   const selectionStartRel = useMemo(() => {
     return clamp(Number(layoutStart || baseClipStart) - baseClipStart, 0, timelineDuration);
@@ -960,7 +970,7 @@ export default function ClipStudioModal({
   }, [layoutEnd, baseClipEnd, baseClipStart, selectionStartRel, timelineDuration]);
 
   useEffect(() => {
-    setViralHookDuration((prev) => clamp(Number(prev || 2.5), 0.4, Math.max(0.4, timelineDuration)));
+    setViralHookDuration((prev) => clamp(Number(prev || VIRAL_HOOK_DEFAULT_DURATION), 0.4, Math.max(0.4, timelineDuration)));
   }, [timelineDuration]);
 
   useEffect(() => {
@@ -1390,7 +1400,7 @@ export default function ClipStudioModal({
     setViralHookText(nextViralHookDefault);
     setViralHookEnabled(Boolean(nextViralHookDefault));
     setViralHookStart(Math.max(0, Number(clip?.viral_hook_start || 0)));
-    setViralHookDuration(clamp(Number(clip?.viral_hook_duration || 2.5), 0.4, 8));
+    setViralHookDuration(clamp(Number(clip?.viral_hook_duration || VIRAL_HOOK_DEFAULT_DURATION), 0.4, 8));
     setPunctuationOn(true);
     setEmojiOn(true);
     setShowCaptionSettings(false);
@@ -3077,7 +3087,7 @@ export default function ClipStudioModal({
                       <Sparkles size={18} className="text-amber-500" /> Viral Hook Overlay
                     </h3>
                     <p className="text-xs text-zinc-500 mt-1">
-                      Muestra un texto impactante centrado arriba en los primeros segundos del video para captar atención.
+                      Muestra un título-resumen en la parte superior del video (en caja) para captar atención. Por defecto sale de 0.0s a 3.0s.
                     </p>
                   </div>
 
@@ -3857,6 +3867,15 @@ export default function ClipStudioModal({
                         <div className="pointer-events-none absolute left-0 right-0 top-1/2 -translate-y-1/2 h-[1px] bg-cyan-300/90 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]" />
                       )}
                     </>
+                  )}
+                  {showPreviewViralHook && (
+                    <div className="pointer-events-none absolute left-1/2 top-[8%] -translate-x-1/2 w-[86%] z-[4] flex justify-center">
+                      <div className="max-w-full rounded-md border border-white/20 bg-black/68 px-3 py-2 shadow-lg">
+                        <p className="text-center text-white font-semibold leading-snug text-[13px] md:text-[18px] break-words">
+                          {previewViralHookText}
+                        </p>
+                      </div>
+                    </div>
                   )}
 
                   {captionsOn && !fastPreviewCaptionsBurned && subtitleEntries && subtitleEntries.length > 0 && (

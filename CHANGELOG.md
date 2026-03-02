@@ -996,3 +996,11 @@
   - La sección `Música` quedó solo con controles de música (archivo, volumen y ducking).
 - Para que sirve:
   - Separa claramente música y doblaje, y deja el doblaje en su propio botón como se solicitó.
+
+### Ajustado: Viral Hook como título-resumen en caja superior (0s-3s)
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se agregó preview visual del hook dentro del video: aparece arriba, centrado y dentro de una caja oscura durante su ventana de tiempo.
+  - La duración por defecto del hook en frontend pasó de `2.5s` a `3.0s`.
+  - En `app.py` (`POST /api/recut`) la duración por defecto del hook también pasó a `3.0s` y su posición vertical se movió más arriba (`y=h*0.08`) manteniendo caja de fondo.
+- Para que sirve:
+  - El hook se comporta como título de contexto del video y se ve claramente en los primeros 3 segundos en la parte superior.
