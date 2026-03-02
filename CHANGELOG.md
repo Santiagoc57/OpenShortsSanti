@@ -1,5 +1,68 @@
 # Registro de Cambios
 
+## 2026-03-02
+
+### Ajustado: se quitó el texto superior sobre la vista previa del video en Clip Studio
+- Qué cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se eliminó la línea de texto descriptiva que aparecía arriba del video en el panel de preview.
+- Para qué sirve:
+  - Evita que se vea texto adicional “sobre” el video durante edición y reduce confusión con el hook viral.
+
+### Mejorado: timeline con íconos + toggle de significado y pista de Hook Viral editable
+- Qué cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` la barra lateral de tracks (`Video/Subs/Audio`) ahora muestra solo íconos por defecto.
+  - Se agregó toggle `Leyenda ON/OFF` para mostrar u ocultar el texto de cada track.
+  - Se añadió un track nuevo `Hook` en la timeline con controles tipo subtítulo: mover bloque, arrastrar inicio y fin.
+- Para qué sirve:
+  - Reduce ruido visual y permite ver solo íconos.
+  - El usuario ahora puede controlar el hook viral desde la timeline como una capa editable.
+
+### Mejorado: control completo del Viral Hook (activar, texto, inicio y duración)
+- Qué cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se añadió `Activar hook viral`, control de `Inicio` y `Duración`.
+  - El texto del hook se auto-activa al escribir.
+  - El payload de `recut` ahora envía `viral_hook_text`, `viral_hook_start` y `viral_hook_duration`.
+  - En `app.py` (`RecutRequest` y `/api/recut`) se agregó soporte para `viral_hook_start`, con normalización al rango del clip y `drawtext enable=between(t,start,end)`.
+  - Se persisten `viral_hook_text`, `viral_hook_start`, `viral_hook_duration` en metadata y estado de job.
+- Para qué sirve:
+  - El hook deja de estar fijo en `t=0` y pasa a ser ubicable en cualquier punto del clip.
+
+### Nuevo: guías magnéticas al arrastrar subtítulos en preview
+- Qué cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se implementó snap magnético al centro al arrastrar subtítulos.
+  - Se muestran líneas guía (vertical/horizontal) cuando el subtítulo se alinea con el centro.
+- Para qué sirve:
+  - Facilita ubicar subtítulos en el centro con precisión visual (estilo editores pro).
+
+### Mejorado: panel de transcripción con modo limpio y descripciones de escena
+- Qué cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se agregaron toggles:
+    - `Solo transcripción` (vista continua sin tarjetas).
+    - `Descripciones de escena` (si vienen en el transcript).
+  - El normalizador de transcript conserva `scene_description` cuando existe en los segmentos.
+- Para qué sirve:
+  - Permite alternar entre lectura continua y modo segmentado, y habilitar contexto visual cuando esté disponible.
+
+### Ajustado: tamaño de subtítulo por defecto en presets/fallback a 50
+- Qué cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se ajustó el fallback de tamaño de fuente a `50`.
+  - Los presets de subtítulos se mantienen en `fontSize: 50`.
+- Para qué sirve:
+  - Alinea el comportamiento por defecto con el criterio solicitado de tamaño 50.
+
+### Ajustado: sección Música ahora integra Doblaje ElevenLabs
+- Qué cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se eliminó el bloque `Subtitular (atajo)` del panel Música.
+  - Se agregó un bloque de `Doblaje ElevenLabs` bajo el ícono de Música con:
+    - toggle `Activar doblaje IA`,
+    - selector de `Idioma destino`,
+    - selector de `Idioma origen (Auto detectar o manual)`,
+    - indicador de estado de API key.
+  - Al aplicar cambios, si el doblaje está activo, el frontend ejecuta `POST /api/translate` con `X-ElevenLabs-Key`.
+  - En `dashboard/src/App.jsx` y `dashboard/src/components/ResultCard.jsx` se pasa la API key de ElevenLabs al `ClipStudioModal`.
+- Para qué sirve:
+  - Las opciones de doblaje quedan en el lugar esperado (sección Música) y forman parte del flujo de `Aplicar`.
+
 ## 2026-02-23
 
 ### Nuevo: catálogo de fuentes de subtítulos servido por backend
@@ -891,3 +954,12 @@
 - Para que sirve:
   - El usuario puede decidir estilo visual desde UI sin editar backend.
   - Reduce diferencias entre lo que se configura y lo que se exporta.
+
+### Ajustado: Timeline sin botón de Leyenda y sidebar solo íconos
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se eliminó el botón `Leyenda ON/OFF` del control bar de timeline.
+  - Se retiró el estado `showTrackLegend` y sus resets asociados.
+  - El sidebar izquierdo de tracks quedó fijo en ancho compacto (`w-[52px]`) con solo íconos para Video/Subs/Hook/Audio.
+- Para que sirve:
+  - Los clips abren por defecto sin leyenda textual en la timeline.
+  - Se simplifica la UI y se evita que aparezca el control de leyenda que ya no se desea usar.

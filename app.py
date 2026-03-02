@@ -5695,6 +5695,7 @@ class RecutRequest(BaseModel):
     caption_offset_y: Optional[float] = None
     srt_content: Optional[str] = None
     viral_hook_text: Optional[str] = None
+    viral_hook_start: Optional[float] = None
     viral_hook_duration: Optional[float] = None
 
 def _parse_form_bool(value: Any, default: bool = False) -> bool:
@@ -5999,9 +6000,17 @@ async def recut_clip(req: RecutRequest):
                 out_pad = "[final_out]"
 
             viral_hook_text = str(req.viral_hook_text or "").strip()
-            viral_hook_duration = req.viral_hook_duration if getattr(req, 'viral_hook_duration', None) and req.viral_hook_duration > 0 else 2.5
-            
+            clip_window_duration = max(0.1, _safe_float((req.end - req.start), 0.1))
+            viral_hook_start = max(0.0, _safe_float(getattr(req, "viral_hook_start", 0.0), 0.0))
+            viral_hook_duration = max(0.0, _safe_float(getattr(req, "viral_hook_duration", 2.5), 2.5))
+            if viral_hook_start >= clip_window_duration:
+                viral_hook_start = max(0.0, clip_window_duration - 0.1)
+
             if viral_hook_text:
+                if viral_hook_duration <= 0:
+                    viral_hook_duration = 2.5
+                viral_hook_duration = min(viral_hook_duration, max(0.1, clip_window_duration - viral_hook_start))
+                viral_hook_end = viral_hook_start + viral_hook_duration
                 safe_hook_text = viral_hook_text.replace("'", "\\'").replace(":", "\\:")
                 # We attempt to use the Anton font from dashboard for the viral hook
                 fonts_dir = os.path.join(os.path.dirname(__file__), "dashboard", "public", "fonts")
@@ -6011,8 +6020,12 @@ async def recut_clip(req: RecutRequest):
                     safe_font_file = font_file.replace("\\", "/").replace(":", "\\:")
                     font_param = f":fontfile='{safe_font_file}'"
                 
-                # Add text at top (y=h*0.15)
-                hook_filter = f"drawtext=text='{safe_hook_text}'{font_param}:fontcolor=white:fontsize=out_w*0.065:box=1:boxcolor=black@0.65:boxborderw=15:x=(w-text_w)/2:y=h*0.15:enable='between(t,0,{viral_hook_duration})'"
+                # Add text at top (y=h*0.15) for the requested start/end window.
+                hook_filter = (
+                    f"drawtext=text='{safe_hook_text}'{font_param}:fontcolor=white:fontsize=out_w*0.065:"
+                    f"box=1:boxcolor=black@0.65:boxborderw=15:x=(w-text_w)/2:y=h*0.15:"
+                    f"enable='between(t,{viral_hook_start:.3f},{viral_hook_end:.3f})'"
+                )
                 filter_complex = f"{filter_complex};{out_pad}{hook_filter}[hook_out]"
                 out_pad = "[hook_out]"
 
@@ -6064,6 +6077,9 @@ async def recut_clip(req: RecutRequest):
                 clips[req.clip_index]['layout_split_offset_b_x'] = round(split_offset_b_x, 3)
                 clips[req.clip_index]['layout_split_offset_b_y'] = round(split_offset_b_y, 3)
                 clips[req.clip_index]['layout_auto_smart'] = bool(auto_smart_applied)
+                clips[req.clip_index]['viral_hook_text'] = viral_hook_text
+                clips[req.clip_index]['viral_hook_start'] = round(max(0.0, _safe_float(viral_hook_start, 0.0)), 3)
+                clips[req.clip_index]['viral_hook_duration'] = round(max(0.0, _safe_float(viral_hook_duration, 0.0)), 3)
                 if smart_summary:
                     clips[req.clip_index]['layout_smart_summary'] = smart_summary
                 elif 'layout_smart_summary' in clips[req.clip_index]:
@@ -6091,6 +6107,9 @@ async def recut_clip(req: RecutRequest):
         job['result']['clips'][req.clip_index]['layout_split_offset_b_x'] = round(split_offset_b_x, 3)
         job['result']['clips'][req.clip_index]['layout_split_offset_b_y'] = round(split_offset_b_y, 3)
         job['result']['clips'][req.clip_index]['layout_auto_smart'] = bool(auto_smart_applied)
+        job['result']['clips'][req.clip_index]['viral_hook_text'] = viral_hook_text
+        job['result']['clips'][req.clip_index]['viral_hook_start'] = round(max(0.0, _safe_float(viral_hook_start, 0.0)), 3)
+        job['result']['clips'][req.clip_index]['viral_hook_duration'] = round(max(0.0, _safe_float(viral_hook_duration, 0.0)), 3)
         if smart_summary:
             job['result']['clips'][req.clip_index]['layout_smart_summary'] = smart_summary
         elif 'layout_smart_summary' in job['result']['clips'][req.clip_index]:
@@ -6106,6 +6125,9 @@ async def recut_clip(req: RecutRequest):
         "split_layout_applied": layout_mode == "split" and not auto_smart_applied,
         "auto_smart_reframe_requested": bool(auto_smart_requested),
         "auto_smart_reframe_applied": bool(auto_smart_applied),
+        "viral_hook_text": viral_hook_text,
+        "viral_hook_start": round(max(0.0, _safe_float(viral_hook_start, 0.0)), 3),
+        "viral_hook_duration": round(max(0.0, _safe_float(viral_hook_duration, 0.0)), 3),
         "smart_reframe_summary": smart_summary,
         "warnings": recut_warnings
     }

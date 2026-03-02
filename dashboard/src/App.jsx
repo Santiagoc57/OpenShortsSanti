@@ -2977,6 +2977,7 @@ function App() {
                 onClipPatched={handleStudioClipPatched}
                 onApplied={handleStudioApplied}
                 fontCatalog={captionFontOptions}
+                elevenLabsKey={elevenLabsKey}
                 transcriptSegments={transcriptSegments}
               />
             </div>

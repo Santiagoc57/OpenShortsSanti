@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { X, FileText, Captions, Type, LayoutTemplate, Music2, Search, Sparkles, Loader2, Play, Pause, Pencil, SlidersHorizontal, ZoomOut, ZoomIn, Crosshair, Menu, Lightbulb, Download } from 'lucide-react';
+import { X, FileText, Captions, Type, LayoutTemplate, Music2, Search, Sparkles, Loader2, Play, Pause, Pencil, SlidersHorizontal, ZoomOut, ZoomIn, Crosshair, Menu, Lightbulb, Download, Languages } from 'lucide-react';
 import { apiFetch, getApiUrl } from '../config';
 import SubtitleRenderer from './SubtitleRenderer';
 
@@ -183,6 +183,40 @@ const SECTION_ITEMS = [
   { id: 'music', label: 'Música', icon: Music2 }
 ];
 
+const DEFAULT_DUBBING_LANGUAGES = {
+  en: 'English',
+  es: 'Spanish',
+  fr: 'French',
+  de: 'German',
+  it: 'Italian',
+  pt: 'Portuguese',
+  pl: 'Polish',
+  hi: 'Hindi',
+  ja: 'Japanese',
+  ko: 'Korean',
+  zh: 'Chinese',
+  ar: 'Arabic',
+  ru: 'Russian',
+  tr: 'Turkish',
+  nl: 'Dutch',
+  sv: 'Swedish',
+  id: 'Indonesian',
+  fil: 'Filipino',
+  ms: 'Malay',
+  vi: 'Vietnamese',
+  th: 'Thai',
+  uk: 'Ukrainian',
+  el: 'Greek',
+  cs: 'Czech',
+  fi: 'Finnish',
+  ro: 'Romanian',
+  da: 'Danish',
+  bg: 'Bulgarian',
+  hr: 'Croatian',
+  sk: 'Slovak',
+  ta: 'Tamil'
+};
+
 const SUBTITLE_EMOJIS = ['🔥', '😈', '🤯', '😂', '😱', '🚨', '✅', '💸', '🎯', '💥', '👏', '🙏'];
 const ACTIVE_WORD_COLOR = '#39FF14';
 const EMOJI_RULES = [
@@ -234,7 +268,7 @@ const readStoredBrandKitSubtitleStyle = () => {
     if (!parsed || typeof parsed !== 'object') return null;
     return {
       position: ['top', 'middle', 'bottom'].includes(parsed.subtitle_position) ? parsed.subtitle_position : null,
-      fontSize: clampNum(parsed.subtitle_font_size, 40, 12, 84),
+      fontSize: clampNum(parsed.subtitle_font_size, 50, 12, 84),
       fontFamily: normalizeSubtitleFontFamily(parsed.subtitle_font_family),
       fontColor: String(parsed.subtitle_font_color || '#FFFFFF'),
       strokeColor: String(parsed.subtitle_stroke_color || '#000000'),
@@ -333,13 +367,6 @@ const stripSubtitlePunctuation = (value) => {
 const formatSubtitleText = (text, emphasize = false, punctuationOn = true) => {
   const base = punctuationOn ? String(text || '').trim() : stripSubtitlePunctuation(text);
   return emphasize ? base.toUpperCase() : base;
-};
-
-const truncateInline = (value, maxChars = 84) => {
-  const clean = String(value || '').replace(/\s+/g, ' ').trim();
-  if (!clean) return '';
-  if (clean.length <= maxChars) return clean;
-  return `${clean.slice(0, Math.max(1, maxChars - 3)).trim()}...`;
 };
 
 const SettingToggle = ({ label, checked, onChange, tooltip }) => (
@@ -471,6 +498,7 @@ const LAYOUT_OFFSET_FACTOR = 1.0;
 const LAYOUT_PAN_MIN_ZOOM = 1.06;
 const LAYOUT_PAN_SENSITIVITY = 120;
 const CAPTION_OFFSET_FACTOR = 0.35;
+const CAPTION_CENTER_SNAP_THRESHOLD = 2.2;
 const TIMELINE_ZOOM_MIN = 0.55;
 const TIMELINE_ZOOM_MAX = 2.2;
 const TIMELINE_ZOOM_DEFAULT = 0.9;
@@ -505,7 +533,8 @@ export default function ClipStudioModal({
   currentVideoUrl,
   onApplied,
   onClipPatched,
-  fontCatalog = DEFAULT_FONT_OPTIONS
+  fontCatalog = DEFAULT_FONT_OPTIONS,
+  elevenLabsKey = ''
 }) {
   const [section, setSection] = useState('transcript');
   const [isApplying, setIsApplying] = useState(false);
@@ -519,6 +548,8 @@ export default function ClipStudioModal({
 
   const [transcriptSegments, setTranscriptSegments] = useState([]);
   const [transcriptQuery, setTranscriptQuery] = useState('');
+  const [transcriptPlainMode, setTranscriptPlainMode] = useState(false);
+  const [transcriptSceneDescriptionsOn, setTranscriptSceneDescriptionsOn] = useState(true);
 
   const [captionsOn, setCaptionsOn] = useState(true);
   const [showCaptionSettings, setShowCaptionSettings] = useState(false);
@@ -540,6 +571,7 @@ export default function ClipStudioModal({
   const [captionOffsetX, setCaptionOffsetX] = useState(clamp(Number(clip?.caption_offset_x || 0), -100, 100));
   const [captionOffsetY, setCaptionOffsetY] = useState(clamp(Number(clip?.caption_offset_y || 0), -100, 100));
   const [isDraggingCaption, setIsDraggingCaption] = useState(false);
+  const [captionCenterGuides, setCaptionCenterGuides] = useState({ x: false, y: false });
 
   const [subtitleEntries, setSubtitleEntries] = useState([]);
   const [subtitleSearch, setSubtitleSearch] = useState('');
@@ -609,6 +641,21 @@ export default function ClipStudioModal({
     });
     return out.length > 0 ? out : DEFAULT_FONT_OPTIONS;
   }, [fontCatalog]);
+  const resolvedElevenLabsKey = useMemo(() => {
+    const direct = String(elevenLabsKey || '').trim();
+    if (direct) return direct;
+    if (typeof window === 'undefined') return '';
+    try {
+      return String(window.localStorage.getItem('elevenlabs_key') || '').trim();
+    } catch (_) {
+      return '';
+    }
+  }, [elevenLabsKey]);
+  const hasElevenLabsKey = Boolean(resolvedElevenLabsKey);
+  const dubbingLanguageOptions = useMemo(
+    () => Object.entries(dubbingLanguages || {}).sort((a, b) => String(a[1]).localeCompare(String(b[1]))),
+    [dubbingLanguages]
+  );
 
   const handleLayoutAspectChange = useCallback((nextAspectRaw) => {
     const nextAspect = nextAspectRaw === '16:9' ? '16:9' : '9:16';
@@ -660,8 +707,15 @@ export default function ClipStudioModal({
   const [musicFile, setMusicFile] = useState(null);
   const [musicVolume, setMusicVolume] = useState(0.18);
   const [duckVoice, setDuckVoice] = useState(true);
+  const [dubbingEnabled, setDubbingEnabled] = useState(false);
+  const [dubbingTargetLanguage, setDubbingTargetLanguage] = useState('es');
+  const [dubbingSourceLanguage, setDubbingSourceLanguage] = useState('auto');
+  const [dubbingLanguages, setDubbingLanguages] = useState(DEFAULT_DUBBING_LANGUAGES);
+  const [isLoadingDubbingLanguages, setIsLoadingDubbingLanguages] = useState(false);
 
   const [viralHookText, setViralHookText] = useState('');
+  const [viralHookEnabled, setViralHookEnabled] = useState(Boolean(String(clip?.viral_hook_text || '').trim()));
+  const [viralHookStart, setViralHookStart] = useState(Math.max(0, Number(clip?.viral_hook_start || 0)));
   const [viralHookDuration, setViralHookDuration] = useState(2.5);
 
   const [previewPlaying, setPreviewPlaying] = useState(false);
@@ -691,6 +745,7 @@ export default function ClipStudioModal({
   const timelineViewportRef = useRef(null);
   const timelineTrackRef = useRef(null);
   const subtitleDragRef = useRef(null);
+  const viralHookDragRef = useRef(null);
   const selectionDragRef = useRef(null);
   const panDragRef = useRef(null);
   const captionDragRef = useRef(null);
@@ -807,31 +862,6 @@ export default function ClipStudioModal({
     return `Clip n.o ${Number(clipIndex || 0) + 1}`;
   }, [previewTitleOverride, clip?.video_title_for_youtube_short, clip?.title, clip?.video_url, currentVideoUrl, clipIndex]);
 
-  const previewSocialDescription = useMemo(() => {
-    return [
-      String(clip?.video_description_for_tiktok || '').trim(),
-      String(clip?.video_description_for_instagram || '').trim(),
-      String(clip?.score_reason || '').trim()
-    ].find(Boolean) || '';
-  }, [clip?.video_description_for_tiktok, clip?.video_description_for_instagram, clip?.score_reason]);
-
-  const transcriptForPreview = useMemo(() => {
-    if (!Array.isArray(filteredTranscript) || filteredTranscript.length === 0) return '';
-    const merged = filteredTranscript
-      .map((seg) => String(seg?.text || '').trim())
-      .filter(Boolean)
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (!merged) return '';
-    return merged.length > 420 ? `${merged.slice(0, 417).trim()}...` : merged;
-  }, [filteredTranscript]);
-
-  const previewHeaderSubline = useMemo(() => {
-    if (!previewSocialDescription) return 'Sin descripción social para este clip.';
-    return truncateInline(previewSocialDescription, 220);
-  }, [previewSocialDescription]);
-
   const filteredSubtitleEntries = useMemo(() => {
     const q = String(subtitleSearch || '').trim().toLowerCase();
     if (!q) return subtitleEntries;
@@ -896,6 +926,15 @@ export default function ClipStudioModal({
     const fallback = Math.max(1, baseClipEnd - baseClipStart);
     return fallback;
   }, [previewDuration, baseClipStart, baseClipEnd]);
+  const viralHookTimelineDuration = useMemo(() => clamp(Number(viralHookDuration || 0), 0.4, Math.max(0.4, timelineDuration)), [viralHookDuration, timelineDuration]);
+  const viralHookTimelineStart = useMemo(
+    () => clamp(Number(viralHookStart || 0), 0, Math.max(0, timelineDuration - viralHookTimelineDuration)),
+    [viralHookStart, timelineDuration, viralHookTimelineDuration]
+  );
+  const viralHookTimelineEnd = useMemo(
+    () => clamp(viralHookTimelineStart + viralHookTimelineDuration, viralHookTimelineStart + 0.4, timelineDuration),
+    [viralHookTimelineStart, viralHookTimelineDuration, timelineDuration]
+  );
 
   const selectionStartRel = useMemo(() => {
     return clamp(Number(layoutStart || baseClipStart) - baseClipStart, 0, timelineDuration);
@@ -905,6 +944,14 @@ export default function ClipStudioModal({
     const raw = Number(layoutEnd || baseClipEnd) - baseClipStart;
     return clamp(raw, selectionStartRel + 0.08, timelineDuration);
   }, [layoutEnd, baseClipEnd, baseClipStart, selectionStartRel, timelineDuration]);
+
+  useEffect(() => {
+    setViralHookDuration((prev) => clamp(Number(prev || 2.5), 0.4, Math.max(0.4, timelineDuration)));
+  }, [timelineDuration]);
+
+  useEffect(() => {
+    setViralHookStart((prev) => clamp(Number(prev || 0), 0, Math.max(0, timelineDuration - viralHookTimelineDuration)));
+  }, [timelineDuration, viralHookTimelineDuration]);
 
   const transitionPoints = useMemo(() => {
     const points = Array.isArray(clip?.transition_points) ? clip.transition_points : [];
@@ -1022,6 +1069,31 @@ export default function ClipStudioModal({
     setSpeakerColorMode(Boolean(preset.style?.speakerColorMode));
   };
 
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    const loadDubbingLanguages = async () => {
+      setIsLoadingDubbingLanguages(true);
+      try {
+        const res = await apiFetch('/api/translate/languages');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        if (data?.languages && typeof data.languages === 'object' && !Array.isArray(data.languages)) {
+          setDubbingLanguages(data.languages);
+        }
+      } catch (_) {
+        // Keep fallback list when endpoint is unavailable.
+      } finally {
+        if (!cancelled) setIsLoadingDubbingLanguages(false);
+      }
+    };
+    loadDubbingLanguages();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
   const loadTranscript = async () => {
     const clipTranscriptSegments = Array.isArray(clip?.transcript_segments) ? clip.transcript_segments : [];
     setIsLoadingTranscript(true);
@@ -1055,6 +1127,13 @@ export default function ClipStudioModal({
             : [];
           const text = String(seg.text || '').trim() || words.map((w) => w.word).join(' ').trim();
           if (!text) return null;
+          const sceneDescription = String(
+            seg.scene_description
+            || seg.sceneDescription
+            || seg.visual_description
+            || seg.description
+            || ''
+          ).trim();
           return {
             segment_index: Number.isFinite(Number(seg.segment_index)) ? Number(seg.segment_index) : idx,
             start: Number(segStart.toFixed(3)),
@@ -1063,7 +1142,8 @@ export default function ClipStudioModal({
             speaker: seg.speaker ? String(seg.speaker).trim() : null,
             word_count: words.length,
             text,
-            words
+            words,
+            scene_description: sceneDescription || null
           };
         })
         .filter(Boolean);
@@ -1080,7 +1160,21 @@ export default function ClipStudioModal({
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       const segments = Array.isArray(data?.segments) ? data.segments : [];
-      setTranscriptSegments(segments);
+      const normalizedSegments = segments.map((seg, idx) => {
+        const sceneDescription = String(
+          seg?.scene_description
+          || seg?.sceneDescription
+          || seg?.visual_description
+          || seg?.description
+          || ''
+        ).trim();
+        return {
+          ...seg,
+          segment_index: Number.isFinite(Number(seg?.segment_index)) ? Number(seg.segment_index) : idx,
+          scene_description: sceneDescription || null
+        };
+      });
+      setTranscriptSegments(normalizedSegments);
     } catch (e) {
       setError(`No se pudo cargar transcript: ${e.message}`);
       setTimeout(() => setError(''), 3500);
@@ -1275,9 +1369,18 @@ export default function ClipStudioModal({
     setMusicFile(null);
     setMusicVolume(0.18);
     setDuckVoice(true);
+    setDubbingEnabled(false);
+    setDubbingTargetLanguage(String(clip?.dub_target_language || 'es').trim().toLowerCase() || 'es');
+    setDubbingSourceLanguage(String(clip?.dub_source_language || 'auto').trim().toLowerCase() || 'auto');
+    setViralHookText(String(clip?.viral_hook_text || ''));
+    setViralHookEnabled(Boolean(String(clip?.viral_hook_text || '').trim()));
+    setViralHookStart(Math.max(0, Number(clip?.viral_hook_start || 0)));
+    setViralHookDuration(clamp(Number(clip?.viral_hook_duration || 2.5), 0.4, 8));
     setPunctuationOn(true);
     setEmojiOn(true);
     setShowCaptionSettings(false);
+    setTranscriptPlainMode(false);
+    setTranscriptSceneDescriptionsOn(true);
     setEmojiPickerForId('');
     setEmojiSuggestFeedback('');
     setTimelineZoom(TIMELINE_ZOOM_DEFAULT);
@@ -1372,6 +1475,11 @@ export default function ClipStudioModal({
     clip?.caption_karaoke_mode,
     clip?.caption_animation,
     clip?.caption_speaker_color_mode,
+    clip?.viral_hook_text,
+    clip?.viral_hook_duration,
+    clip?.viral_hook_start,
+    clip?.dub_target_language,
+    clip?.dub_source_language,
     clip?.transcript_segments,
     clip?.transcript_timebase,
     clip?.video_title_for_youtube_short,
@@ -1562,6 +1670,11 @@ export default function ClipStudioModal({
     let appliedCaptionKaraokeMode = Boolean(karaokeMode);
     let appliedCaptionAnimation = String(subtitleAnimation || 'none');
     let appliedCaptionSpeakerColorMode = Boolean(speakerColorMode);
+    let appliedDubTargetLanguage = dubbingEnabled ? String(dubbingTargetLanguage || 'es').trim().toLowerCase() : '';
+    let appliedDubSourceLanguage = dubbingEnabled ? String(dubbingSourceLanguage || 'auto').trim().toLowerCase() : 'auto';
+    let appliedViralHookText = viralHookEnabled ? String(viralHookText || '').trim() : '';
+    let appliedViralHookStart = viralHookEnabled ? Number(viralHookTimelineStart || 0) : 0;
+    let appliedViralHookDuration = viralHookEnabled ? Number(viralHookTimelineDuration || 0) : 0;
     let subtitleSrtPayload = srtContent || null;
 
     try {
@@ -1622,6 +1735,14 @@ export default function ClipStudioModal({
         || appliedCaptionAnimation !== String(clip?.caption_animation || appliedCaptionAnimation)
         || appliedCaptionSpeakerColorMode !== Boolean(clip?.caption_speaker_color_mode ?? appliedCaptionSpeakerColorMode)
       );
+      const existingViralHookText = String(clip?.viral_hook_text || '').trim();
+      const existingViralHookStart = Math.max(0, Number(clip?.viral_hook_start || 0));
+      const existingViralHookDuration = Math.max(0, Number(clip?.viral_hook_duration || 0));
+      const viralHookChanged = (
+        appliedViralHookText !== existingViralHookText
+        || Math.abs(appliedViralHookStart - existingViralHookStart) > 0.01
+        || Math.abs(appliedViralHookDuration - existingViralHookDuration) > 0.01
+      );
 
       // We always attempt to fetch fresh subtitle SRT data if we are overriding it or if timestamps changed
       const clipRangeChangedByRecut = (
@@ -1652,7 +1773,7 @@ export default function ClipStudioModal({
         }
       }
 
-      if (needsRecut || captionsChanged) {
+      if (needsRecut || captionsChanged || viralHookChanged) {
         const payload = {
           job_id: jobId,
           clip_index: clipIndex,
@@ -1688,8 +1809,9 @@ export default function ClipStudioModal({
           caption_offset_x: appliedCaptionOffsetX,
           caption_offset_y: appliedCaptionOffsetY,
           srt_content: subtitleSrtPayload,
-          viral_hook_text: viralHookText,
-          viral_hook_duration: viralHookDuration
+          viral_hook_text: appliedViralHookText,
+          viral_hook_start: appliedViralHookStart,
+          viral_hook_duration: appliedViralHookDuration
         };
 
         const recutRes = await apiFetch('/api/recut', {
@@ -1720,6 +1842,19 @@ export default function ClipStudioModal({
           appliedLayoutAutoSmart = Boolean(recutData.auto_smart_reframe_applied);
           setLayoutAutoSmart(appliedLayoutAutoSmart);
         }
+        if (typeof recutData?.viral_hook_text === 'string') {
+          appliedViralHookText = String(recutData.viral_hook_text || '').trim();
+          setViralHookText(appliedViralHookText);
+          setViralHookEnabled(Boolean(appliedViralHookText));
+        }
+        if (Number.isFinite(Number(recutData?.viral_hook_start))) {
+          appliedViralHookStart = Math.max(0, Number(recutData.viral_hook_start));
+          setViralHookStart(appliedViralHookStart);
+        }
+        if (Number.isFinite(Number(recutData?.viral_hook_duration))) {
+          appliedViralHookDuration = Math.max(0, Number(recutData.viral_hook_duration));
+          setViralHookDuration(appliedViralHookDuration);
+        }
       }
 
       if (musicEnabled && musicFile) {
@@ -1740,6 +1875,36 @@ export default function ClipStudioModal({
         if (musicData?.new_video_url) {
           resultingUrl = getApiUrl(musicData.new_video_url);
           workingFile = extractFilename(musicData.new_video_url);
+        }
+      }
+
+      if (dubbingEnabled) {
+        if (!hasElevenLabsKey) {
+          throw new Error('Falta la API Key de ElevenLabs en Configuración para aplicar doblaje.');
+        }
+        if (!appliedDubTargetLanguage) {
+          appliedDubTargetLanguage = 'es';
+        }
+
+        const translateRes = await apiFetch('/api/translate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-ElevenLabs-Key': resolvedElevenLabsKey
+          },
+          body: JSON.stringify({
+            job_id: jobId,
+            clip_index: Number(clipIndex),
+            target_language: appliedDubTargetLanguage,
+            source_language: appliedDubSourceLanguage !== 'auto' ? appliedDubSourceLanguage : null,
+            input_filename: workingFile || null
+          })
+        });
+        if (!translateRes.ok) throw new Error(await parseApiErrorDetail(translateRes));
+        const translateData = await translateRes.json();
+        if (translateData?.new_video_url) {
+          resultingUrl = getApiUrl(translateData.new_video_url);
+          workingFile = extractFilename(translateData.new_video_url);
         }
       }
 
@@ -1775,7 +1940,16 @@ export default function ClipStudioModal({
           caption_box_opacity: appliedCaptionBoxOpacity,
           caption_karaoke_mode: appliedCaptionKaraokeMode,
           caption_animation: appliedCaptionAnimation,
-          caption_speaker_color_mode: appliedCaptionSpeakerColorMode
+          caption_speaker_color_mode: appliedCaptionSpeakerColorMode,
+          viral_hook_text: appliedViralHookText,
+          viral_hook_start: appliedViralHookStart,
+          viral_hook_duration: appliedViralHookDuration,
+          ...(dubbingEnabled
+            ? {
+              dub_target_language: appliedDubTargetLanguage,
+              dub_source_language: appliedDubSourceLanguage !== 'auto' ? appliedDubSourceLanguage : null
+            }
+            : {})
         }
       });
       if (downloadAfter && resultingUrl) {
@@ -1966,6 +2140,20 @@ export default function ClipStudioModal({
     };
   };
 
+  const startViralHookDrag = (event, mode = 'move') => {
+    if (!viralHookEnabled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const pointerTime = getTimelineTimeFromClientX(event.clientX);
+    if (pointerTime === null) return;
+    viralHookDragRef.current = {
+      mode,
+      pointerTime,
+      originalStart: Number(viralHookTimelineStart || 0),
+      originalEnd: Number(viralHookTimelineEnd || viralHookTimelineDuration)
+    };
+  };
+
   const startSelectionDrag = (event, mode = 'move') => {
     event.preventDefault();
     event.stopPropagation();
@@ -2060,6 +2248,41 @@ export default function ClipStudioModal({
         }));
       }
 
+      if (viralHookDragRef.current) {
+        const drag = viralHookDragRef.current;
+        const pointerTime = getTimelineTimeFromClientX(event.clientX);
+        if (pointerTime !== null) {
+          const delta = pointerTime - drag.pointerTime;
+          const minDuration = 0.4;
+          const origStart = Number(drag.originalStart || 0);
+          const origEnd = Number(drag.originalEnd || origStart + minDuration);
+          const duration = Math.max(minDuration, origEnd - origStart);
+          let nextStart = origStart;
+          let nextEnd = origEnd;
+
+          if (drag.mode === 'move') {
+            nextStart = clamp(origStart + delta, 0, Math.max(0, timelineDuration - duration));
+            nextStart = snapToNearest(nextStart);
+            nextStart = clamp(nextStart, 0, Math.max(0, timelineDuration - duration));
+            nextEnd = nextStart + duration;
+          } else if (drag.mode === 'start') {
+            nextStart = clamp(origStart + delta, 0, origEnd - minDuration);
+            nextStart = snapToNearest(nextStart);
+            nextStart = clamp(nextStart, 0, origEnd - minDuration);
+            nextEnd = origEnd;
+          } else {
+            nextStart = origStart;
+            nextEnd = clamp(origEnd + delta, origStart + minDuration, timelineDuration);
+            nextEnd = snapToNearest(nextEnd);
+            nextEnd = clamp(nextEnd, origStart + minDuration, timelineDuration);
+          }
+
+          setViralHookStart(Number(nextStart.toFixed(3)));
+          setViralHookDuration(Number(Math.max(minDuration, nextEnd - nextStart).toFixed(3)));
+          setSavedPulse(false);
+        }
+      }
+
       if (selectionDragRef.current) {
         const drag = selectionDragRef.current;
         const pointerTime = getTimelineTimeFromClientX(event.clientX);
@@ -2107,8 +2330,22 @@ export default function ClipStudioModal({
         const dy = Number(event.clientY || 0) - drag.startClientY;
         const deltaEffectiveX = (dx / Math.max(1, drag.width)) * 100;
         const deltaEffectiveY = (dy / Math.max(1, drag.height)) * 100;
-        const nextX = drag.startOffsetX + (deltaEffectiveX / CAPTION_OFFSET_FACTOR);
-        const nextY = drag.startOffsetY + (deltaEffectiveY / CAPTION_OFFSET_FACTOR);
+        let nextX = drag.startOffsetX + (deltaEffectiveX / CAPTION_OFFSET_FACTOR);
+        let nextY = drag.startOffsetY + (deltaEffectiveY / CAPTION_OFFSET_FACTOR);
+
+        let guideX = false;
+        let guideY = false;
+        const centeredYRaw = (50 - captionAnchorTopPercent) / CAPTION_OFFSET_FACTOR;
+        if (Math.abs(nextX * CAPTION_OFFSET_FACTOR) <= CAPTION_CENTER_SNAP_THRESHOLD) {
+          nextX = 0;
+          guideX = true;
+        }
+        if (Math.abs((nextY - centeredYRaw) * CAPTION_OFFSET_FACTOR) <= CAPTION_CENTER_SNAP_THRESHOLD) {
+          nextY = centeredYRaw;
+          guideY = true;
+        }
+
+        setCaptionCenterGuides({ x: guideX, y: guideY });
         setCaptionOffsetX(clamp(nextX, -100, 100));
         setCaptionOffsetY(clamp(nextY, -100, 100));
         setSavedPulse(false);
@@ -2119,6 +2356,9 @@ export default function ClipStudioModal({
       if (subtitleDragRef.current) {
         subtitleDragRef.current = null;
         setSavedPulse(false);
+      }
+      if (viralHookDragRef.current) {
+        viralHookDragRef.current = null;
       }
       if (selectionDragRef.current) {
         selectionDragRef.current = null;
@@ -2135,6 +2375,7 @@ export default function ClipStudioModal({
       if (isDraggingCaption) {
         setIsDraggingCaption(false);
       }
+      setCaptionCenterGuides({ x: false, y: false });
     };
 
     window.addEventListener('mousemove', onMove);
@@ -2145,10 +2386,15 @@ export default function ClipStudioModal({
     };
   }, [
     timelineDuration,
+    viralHookEnabled,
+    viralHookTimelineDuration,
+    viralHookTimelineStart,
+    viralHookTimelineEnd,
     baseClipStart,
     selectionStartRel,
     selectionEndRel,
     snapToNearest,
+    captionAnchorTopPercent,
     isPanningLayout,
     isDraggingCaption
   ]);
@@ -2240,8 +2486,22 @@ export default function ClipStudioModal({
             <section className="border-r border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4 overflow-y-auto custom-scrollbar">
               {section === 'transcript' && (
                 <div>
-                  <div className="mb-3">
+                  <div className="mb-3 space-y-2">
                     <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">Transcripción</h3>
+                    <div className="grid grid-cols-1 gap-2">
+                      <SettingToggle
+                        label="Solo transcripción"
+                        tooltip="Vista limpia en texto continuo, sin tarjetas por segmento."
+                        checked={transcriptPlainMode}
+                        onChange={() => setTranscriptPlainMode((v) => !v)}
+                      />
+                      <SettingToggle
+                        label="Descripciones de escena"
+                        tooltip="Muestra descripciones visuales si vienen en el transcript del backend."
+                        checked={transcriptSceneDescriptionsOn}
+                        onChange={() => setTranscriptSceneDescriptionsOn((v) => !v)}
+                      />
+                    </div>
                   </div>
                   <div className="relative mb-3">
                     <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
@@ -2262,6 +2522,35 @@ export default function ClipStudioModal({
                       );
                       const clipRelativeStart = Math.max(0, Number(seg.start || 0) - Number(baseClipStart || 0));
                       const clipRelativeEnd = Math.max(0, Number(seg.end || 0) - Number(baseClipStart || 0));
+                      const sceneDescription = String(seg?.scene_description || '').trim();
+                      const showSceneDescription = transcriptSceneDescriptionsOn && sceneDescription;
+                      if (transcriptPlainMode) {
+                        return (
+                          <div
+                            key={segmentKey}
+                            ref={(el) => {
+                              if (!el) {
+                                transcriptEntryRefs.current.delete(segmentKey);
+                                return;
+                              }
+                              transcriptEntryRefs.current.set(segmentKey, el);
+                            }}
+                            onClick={() => {
+                              seekTo(clipRelativeStart);
+                            }}
+                            className={`cursor-pointer px-1 py-1.5 ${isActive ? 'bg-violet-50/80 dark:bg-violet-900/20 rounded-md' : ''}`}
+                          >
+                            <p className={`text-[13px] leading-relaxed ${isActive ? 'text-violet-800 dark:text-violet-200' : 'text-slate-700 dark:text-slate-200'}`}>
+                              {seg.text}
+                            </p>
+                            {showSceneDescription && (
+                              <p className="mt-1 rounded-md bg-slate-900/90 px-2 py-1 text-[12px] leading-snug text-slate-200">
+                                {`${Math.max(0, Number(seg.duration || 0)).toFixed(1)}s: ${sceneDescription}`}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      }
                       return (
                         <div
                           key={segmentKey}
@@ -2294,6 +2583,11 @@ export default function ClipStudioModal({
                             {`Clip ${formatTimelineTime(clipRelativeStart)} - ${formatTimelineTime(clipRelativeEnd)}`}
                           </div>
                           <p className="text-sm text-slate-700 dark:text-slate-200 leading-relaxed">{seg.text}</p>
+                          {showSceneDescription && (
+                            <p className="mt-1.5 rounded-md bg-slate-900/90 px-2 py-1 text-[12px] leading-snug text-slate-200">
+                              {`${Math.max(0, Number(seg.duration || 0)).toFixed(1)}s: ${sceneDescription}`}
+                            </p>
+                          )}
                         </div>
                       );
                     })}
@@ -2766,6 +3060,16 @@ export default function ClipStudioModal({
                     </p>
                   </div>
 
+                  <SettingToggle
+                    label="Activar hook viral"
+                    tooltip="Cuando está apagado, no se renderiza el hook viral en el export."
+                    checked={viralHookEnabled}
+                    onChange={() => {
+                      setViralHookEnabled((v) => !v);
+                      setSavedPulse(false);
+                    }}
+                  />
+
                   <div className="space-y-3 p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/80">
                     <div className="flex flex-col gap-2">
                       <div className="flex justify-between items-center">
@@ -2788,24 +3092,55 @@ export default function ClipStudioModal({
                       </div>
                       <textarea
                         value={viralHookText}
-                        onChange={(e) => setViralHookText(e.target.value)}
+                        onChange={(e) => {
+                          setViralHookText(e.target.value);
+                          if (!viralHookEnabled && String(e.target.value || '').trim()) {
+                            setViralHookEnabled(true);
+                          }
+                          setSavedPulse(false);
+                        }}
                         placeholder="Ej: Un pasajero me reconoció en el avión 🤯"
                         rows={2}
+                        disabled={!viralHookEnabled}
                         className="w-full rounded-md border border-slate-300 dark:border-slate-600 bg-transparent px-3 py-2 text-sm text-slate-800 dark:text-slate-100 focus:border-violet-500 focus:outline-none"
                       />
                     </div>
 
                     <div className="flex flex-col gap-2">
                       <label className="text-sm font-medium text-slate-700 dark:text-slate-200 text-left">
-                        Duración: <span className="text-violet-600 dark:text-violet-400">{viralHookDuration}s</span>
+                        Inicio: <span className="text-violet-600 dark:text-violet-400">{viralHookTimelineStart.toFixed(1)}s</span>
                       </label>
                       <input
                         type="range"
-                        min="1"
-                        max="5"
-                        step="0.5"
-                        value={viralHookDuration}
-                        onChange={(e) => setViralHookDuration(Number(e.target.value))}
+                        min="0"
+                        max={String(Math.max(0, timelineDuration - 0.4))}
+                        step="0.1"
+                        value={viralHookTimelineStart}
+                        disabled={!viralHookEnabled}
+                        onChange={(e) => {
+                          const nextStart = clamp(Number(e.target.value), 0, Math.max(0, timelineDuration - 0.4));
+                          setViralHookStart(nextStart);
+                          setSavedPulse(false);
+                        }}
+                        className="w-full accent-violet-600"
+                      />
+                    </div>
+
+                    <div className="flex flex-col gap-2">
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200 text-left">
+                        Duración: <span className="text-violet-600 dark:text-violet-400">{viralHookTimelineDuration.toFixed(1)}s</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="0.4"
+                        max={String(Math.max(0.4, timelineDuration - viralHookTimelineStart))}
+                        step="0.1"
+                        value={viralHookTimelineDuration}
+                        disabled={!viralHookEnabled}
+                        onChange={(e) => {
+                          setViralHookDuration(Number(e.target.value));
+                          setSavedPulse(false);
+                        }}
                         className="w-full accent-violet-600"
                       />
                     </div>
@@ -3197,6 +3532,79 @@ export default function ClipStudioModal({
                     <input type="checkbox" checked={duckVoice} onChange={(e) => setDuckVoice(e.target.checked)} />
                     Bajar música cuando habla la voz (ducking)
                   </label>
+
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/40 p-3 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <Languages size={15} className="text-emerald-600 dark:text-emerald-400" />
+                        <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">Doblaje ElevenLabs</p>
+                      </div>
+                      <span className={`text-[11px] px-2 py-0.5 rounded-full border ${hasElevenLabsKey
+                        ? 'border-emerald-300 bg-emerald-100 text-emerald-700 dark:border-emerald-700/60 dark:bg-emerald-900/30 dark:text-emerald-300'
+                        : 'border-amber-300 bg-amber-100 text-amber-700 dark:border-amber-700/60 dark:bg-amber-900/30 dark:text-amber-300'
+                        }`}>
+                        {hasElevenLabsKey ? 'API key OK' : 'Falta API key'}
+                      </span>
+                    </div>
+
+                    <SettingToggle
+                      label="Activar doblaje IA"
+                      tooltip="Traduce la voz del clip con ElevenLabs al idioma destino al aplicar cambios."
+                      checked={dubbingEnabled}
+                      onChange={() => {
+                        setDubbingEnabled((v) => !v);
+                        setSavedPulse(false);
+                      }}
+                    />
+
+                    <div className="grid grid-cols-1 gap-3">
+                      <label className="text-xs text-zinc-600 dark:text-zinc-300">
+                        Idioma destino
+                        <select
+                          value={dubbingTargetLanguage}
+                          onChange={(e) => {
+                            setDubbingTargetLanguage(String(e.target.value || 'es'));
+                            setSavedPulse(false);
+                          }}
+                          disabled={!dubbingEnabled}
+                          className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm"
+                        >
+                          {dubbingLanguageOptions.map(([code, name]) => (
+                            <option key={`dub-target-${code}`} value={code}>{name}</option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className="text-xs text-zinc-600 dark:text-zinc-300">
+                        Idioma origen (opcional)
+                        <select
+                          value={dubbingSourceLanguage}
+                          onChange={(e) => {
+                            setDubbingSourceLanguage(String(e.target.value || 'auto'));
+                            setSavedPulse(false);
+                          }}
+                          disabled={!dubbingEnabled}
+                          className="mt-1 w-full rounded-md border border-black/10 dark:border-white/10 bg-white/80 dark:bg-black/20 p-2 text-sm"
+                        >
+                          <option value="auto">Auto detectar</option>
+                          {dubbingLanguageOptions.map(([code, name]) => (
+                            <option key={`dub-source-${code}`} value={code}>{name}</option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+
+                    <p className="text-[11px] text-zinc-500">
+                      {isLoadingDubbingLanguages
+                        ? 'Cargando idiomas de doblaje...'
+                        : 'El doblaje se procesa al pulsar Aplicar. Si no eliges idioma origen, ElevenLabs lo detecta automáticamente.'}
+                    </p>
+                    {!hasElevenLabsKey && (
+                      <p className="text-[11px] text-amber-600 dark:text-amber-300">
+                        Configura tu API key de ElevenLabs en Configuración para habilitar el doblaje.
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -3214,18 +3622,6 @@ export default function ClipStudioModal({
                     <div className="min-w-0">
                       <p className="text-[15px] md:text-[20px] font-semibold leading-tight text-slate-900 dark:text-white" title={previewClipTitle}>
                         {previewClipTitle}
-                      </p>
-                      <p
-                        className="mt-1.5 text-[14px] leading-snug text-slate-600 dark:text-slate-300"
-                        style={{
-                          display: '-webkit-box',
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: 'vertical',
-                          overflow: 'hidden'
-                        }}
-                        title={previewHeaderSubline}
-                      >
-                        {previewHeaderSubline}
                       </p>
                     </div>
                   </div>
@@ -3419,6 +3815,16 @@ export default function ClipStudioModal({
                       Arrastra subtítulo
                     </div>
                   )}
+                  {captionDragEnabled && isDraggingCaption && (captionCenterGuides.x || captionCenterGuides.y) && (
+                    <>
+                      {captionCenterGuides.x && (
+                        <div className="pointer-events-none absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[1px] bg-cyan-300/90 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]" />
+                      )}
+                      {captionCenterGuides.y && (
+                        <div className="pointer-events-none absolute left-0 right-0 top-1/2 -translate-y-1/2 h-[1px] bg-cyan-300/90 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]" />
+                      )}
+                    </>
+                  )}
 
                   {captionsOn && !fastPreviewCaptionsBurned && subtitleEntries && subtitleEntries.length > 0 && (
                     <SubtitleRenderer
@@ -3484,28 +3890,31 @@ export default function ClipStudioModal({
                 <div className="flex rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
 
                   {/* Fixed label sidebar */}
-                  <div className="shrink-0 w-[72px] border-r border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 flex flex-col">
+                  <div className="shrink-0 border-r border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/60 flex flex-col w-[52px]">
                     {/* Tick ruler spacer */}
                     <div className="h-[28px] border-b border-slate-200 dark:border-slate-700" />
                     {/* Video label */}
-                    <div className="h-[52px] border-b border-slate-200 dark:border-slate-700 flex items-center gap-1.5 px-2">
+                    <div className="h-[52px] border-b border-slate-200 dark:border-slate-700 flex items-center justify-center px-0" title="Track de video">
                       <div className="w-4 h-4 rounded-sm bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shrink-0">
                         <svg width="8" height="8" viewBox="0 0 8 8" fill="white"><polygon points="2,1 7,4 2,7" /></svg>
                       </div>
-                      <span className="text-[10px] font-semibold text-slate-600 dark:text-slate-300">Video</span>
                     </div>
                     {/* Subs label */}
-                    <div className="h-[58px] border-b border-slate-200 dark:border-slate-700 flex items-center gap-1.5 px-2">
+                    <div className="h-[58px] border-b border-slate-200 dark:border-slate-700 flex items-center justify-center px-0" title="Track de subtítulos">
                       <div className="w-4 h-4 rounded-sm bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center shrink-0">
                         <svg width="9" height="7" viewBox="0 0 9 7" fill="none"><rect x="0" y="0" width="9" height="2" rx="1" fill="white" /><rect x="0" y="4" width="6" height="2" rx="1" fill="white" /></svg>
                       </div>
-                      <span className="text-[10px] font-semibold text-slate-600 dark:text-slate-300">Subs</span>
+                    </div>
+                    {/* Hook label */}
+                    <div className="h-[58px] border-b border-slate-200 dark:border-slate-700 flex items-center justify-center px-0" title="Track de hook viral">
+                      <div className="w-4 h-4 rounded-sm bg-gradient-to-br from-amber-500 to-orange-500 flex items-center justify-center shrink-0">
+                        <Sparkles size={9} className="text-white" />
+                      </div>
                     </div>
                     {/* Waveform label */}
                     {timelineMode === TIMELINE_MODE_ADVANCED && (
-                      <div className="h-[72px] flex items-center gap-1.5 px-2">
+                      <div className="h-[72px] flex items-center justify-center px-0" title="Track de audio">
                         <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="1" y="4" width="2" height="6" rx="1" fill="#64748b" /><rect x="4" y="2" width="2" height="8" rx="1" fill="#64748b" /><rect x="7" y="5" width="2" height="5" rx="1" fill="#64748b" /></svg>
-                        <span className="text-[10px] font-semibold text-slate-600 dark:text-slate-300">Audio</span>
                       </div>
                     )}
                   </div>
@@ -3572,6 +3981,56 @@ export default function ClipStudioModal({
                               </div>
                             );
                           })}
+                        </div>
+                      </div>
+
+                      {/* Viral Hook track */}
+                      <div className="border-b border-slate-200 dark:border-slate-700 py-2 px-2">
+                        <div className="relative h-10 rounded-md bg-amber-50/60 dark:bg-amber-900/10 border border-amber-200/80 dark:border-amber-700/40 overflow-hidden">
+                          {viralHookEnabled && String(viralHookText || '').trim() ? (
+                            (() => {
+                              const start = clamp(Number(viralHookTimelineStart || 0), 0, timelineDuration);
+                              const end = clamp(Number(viralHookTimelineEnd || (start + 0.4)), start + 0.4, timelineDuration);
+                              const left = (start / Math.max(0.001, timelineDuration)) * 100;
+                              const width = Math.max(0.8, ((end - start) / Math.max(0.001, timelineDuration)) * 100);
+                              return (
+                                <div
+                                  className="absolute top-1 bottom-1 rounded-md text-[10px] px-2 flex items-center cursor-grab select-none transition-shadow hover:shadow-md"
+                                  style={{
+                                    left: `${left}%`,
+                                    width: `${width}%`,
+                                    background: 'rgba(245, 158, 11, 0.18)',
+                                    border: '1px solid rgba(217, 119, 6, 0.6)',
+                                    color: '#b45309'
+                                  }}
+                                  onMouseDown={(e) => startViralHookDrag(e, 'move')}
+                                  title={viralHookText}
+                                >
+                                  <button
+                                    type="button"
+                                    className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize rounded-l-md"
+                                    style={{ background: 'rgba(217, 119, 6, 0.85)' }}
+                                    onMouseDown={(e) => startViralHookDrag(e, 'start')}
+                                    onClick={(e) => e.stopPropagation()}
+                                    aria-label="Inicio hook viral"
+                                  />
+                                  <span className="truncate pl-0.5 font-medium">{viralHookText}</span>
+                                  <button
+                                    type="button"
+                                    className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize rounded-r-md"
+                                    style={{ background: 'rgba(217, 119, 6, 0.85)' }}
+                                    onMouseDown={(e) => startViralHookDrag(e, 'end')}
+                                    onClick={(e) => e.stopPropagation()}
+                                    aria-label="Fin hook viral"
+                                  />
+                                </div>
+                              );
+                            })()
+                          ) : (
+                            <div className="absolute inset-0 flex items-center px-2 text-[10px] text-amber-700/80 dark:text-amber-200/70">
+                              Hook viral desactivado
+                            </div>
+                          )}
                         </div>
                       </div>
 

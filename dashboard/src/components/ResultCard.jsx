@@ -1122,6 +1122,7 @@ export default function ResultCard({ clip, displayIndex = 0, clipIndex = 0, view
                     clipIndex={clipIndex}
                     clip={clip}
                     currentVideoUrl={currentVideoUrl}
+                    elevenLabsKey={elevenLabsKey}
                     onApplied={({ newVideoUrl }) => {
                         if (newVideoUrl) {
                             setCurrentVideoUrl(newVideoUrl);
