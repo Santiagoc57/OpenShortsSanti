@@ -1004,3 +1004,12 @@
   - En `app.py` (`POST /api/recut`) la duración por defecto del hook también pasó a `3.0s` y su posición vertical se movió más arriba (`y=h*0.08`) manteniendo caja de fondo.
 - Para que sirve:
   - El hook se comporta como título de contexto del video y se ve claramente en los primeros 3 segundos en la parte superior.
+
+### Ajustado: Títulos alternativos guiados por criterios de viralidad
+- Que cambiamos:
+  - En `app.py` se incorporó una lista explícita de criterios virales para títulos alternativos (ej: `Nunca vas a creer esto...`, `Opinión impopular sobre X`, `Se me cayó la mandíbula cuando...`, etc.).
+  - La generación fallback de títulos ahora usa esas plantillas como base, rellenando contexto real del clip (tema/keyword/título actual).
+  - Los prompts de IA para `retitle` y variantes se actualizaron para exigir esos criterios en la salida.
+  - Se ajustó la regla de prompt para emoji opcional (máximo 1) en lugar de obligatorio.
+- Para que sirve:
+  - Los títulos alternativos quedan alineados con un framework de hooks virales consistente y más orientado a CTR.

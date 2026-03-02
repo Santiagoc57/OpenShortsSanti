@@ -1936,6 +1936,126 @@ def _parse_social_variants_payload(raw_text: str) -> List[str]:
             fallback_candidates.append(cleaned)
     return _dedupe_social_candidates(fallback_candidates)
 
+VIRAL_TITLE_CRITERIA = [
+    "Nunca vas a creer esto...",
+    "No pierdas tu tiempo...",
+    "Esto fue un verdadero shock...",
+    "Cómo lograr [resultado específico] en [#] tiempo",
+    "Evita [cosa] a toda costa",
+    "Por esto eres tan malo en...",
+    "Opinión impopular sobre X",
+    "Esto me volvió loco",
+    "La estrategia secreta para...",
+    "Si una persona más me dice...",
+    "Esto no tiene ningún sentido",
+    "¿Por qué esto es tan difícil?",
+    "Simplemente no puedo hacerlo",
+    "Mi mayor arrepentimiento es...",
+    "Esto me tuvo estancado",
+    "¿Cómo es que esto no funciona?",
+    "Se me cayó la mandíbula cuando...",
+    "La increíble razón por la que..."
+]
+
+VIRAL_TITLE_STOPWORDS = {
+    "esto", "esta", "este", "para", "como", "cuando", "donde", "sobre", "porque", "por", "video",
+    "clip", "tema", "cosa", "algo", "gente", "mucho", "poco", "todo", "nada", "verdad", "ahora",
+    "entonces", "desde", "hasta", "luego", "tambien", "también", "solo", "sólo", "aqui", "aquí"
+}
+
+def _extract_viral_title_keyword(topic_tags: List[str], transcript_excerpt: str) -> str:
+    for tag in topic_tags or []:
+        t = _sanitize_short_title(tag, max_chars=30).lower()
+        if len(t) >= 4:
+            return t
+    words = re.findall(r"[a-zA-ZÀ-ÿ0-9]{4,}", str(transcript_excerpt or "").lower())
+    for word in words:
+        if word in VIRAL_TITLE_STOPWORDS:
+            continue
+        return word
+    return ""
+
+def _build_viral_title_from_criterion(
+    criterion: str,
+    outcome: str,
+    keyword: str,
+    number_hint: int
+) -> str:
+    safe_keyword = _sanitize_short_title(keyword or "esto", max_chars=30).lower() or "esto"
+    safe_outcome = _sanitize_short_title(outcome or safe_keyword, max_chars=70) or safe_keyword
+    safe_number = max(2, min(30, int(number_hint or 7)))
+
+    if criterion == "Nunca vas a creer esto...":
+        return f"Nunca vas a creer esto: {safe_outcome}"
+    if criterion == "No pierdas tu tiempo...":
+        return f"No pierdas tu tiempo: {safe_keyword} no funciona como te dijeron"
+    if criterion == "Esto fue un verdadero shock...":
+        return f"Esto fue un verdadero shock: {safe_outcome}"
+    if criterion == "Cómo lograr [resultado específico] en [#] tiempo":
+        return f"Cómo lograr {safe_outcome} en {safe_number} minutos"
+    if criterion == "Evita [cosa] a toda costa":
+        return f"Evita {safe_keyword} a toda costa"
+    if criterion == "Por esto eres tan malo en...":
+        return f"Por esto eres tan malo en {safe_keyword}"
+    if criterion == "Opinión impopular sobre X":
+        return f"Opinión impopular sobre {safe_keyword}"
+    if criterion == "Esto me volvió loco":
+        return f"Esto me volvió loco: {safe_outcome}"
+    if criterion == "La estrategia secreta para...":
+        return f"La estrategia secreta para {safe_outcome}"
+    if criterion == "Si una persona más me dice...":
+        return f"Si una persona más me dice '{safe_keyword}', exploto"
+    if criterion == "Esto no tiene ningún sentido":
+        return f"Esto no tiene ningún sentido: {safe_outcome}"
+    if criterion == "¿Por qué esto es tan difícil?":
+        return f"¿Por qué {safe_keyword} es tan difícil?"
+    if criterion == "Simplemente no puedo hacerlo":
+        return f"Simplemente no puedo hacerlo: {safe_keyword}"
+    if criterion == "Mi mayor arrepentimiento es...":
+        return f"Mi mayor arrepentimiento es no entender {safe_keyword}"
+    if criterion == "Esto me tuvo estancado":
+        return f"Esto me tuvo estancado: {safe_keyword}"
+    if criterion == "¿Cómo es que esto no funciona?":
+        return f"¿Cómo es que {safe_keyword} no funciona?"
+    if criterion == "Se me cayó la mandíbula cuando...":
+        return f"Se me cayó la mandíbula cuando {safe_outcome.lower()}"
+    if criterion == "La increíble razón por la que...":
+        return f"La increíble razón por la que {safe_keyword} falla"
+    return _sanitize_short_title(safe_outcome or "Momento clave del video")
+
+def _build_viral_title_candidates(
+    current_title: str,
+    transcript_excerpt: str,
+    topic_tags: List[str],
+    seed: int
+) -> List[str]:
+    keyword = _extract_viral_title_keyword(topic_tags, transcript_excerpt) or "esto"
+    outcome = _sanitize_short_title(current_title, max_chars=72)
+    if not outcome:
+        transcript_hint = _normalize_space(str(transcript_excerpt or "")).split(".")[0].strip()
+        outcome = _sanitize_short_title(transcript_hint, max_chars=72)
+    if not outcome:
+        outcome = keyword
+
+    criteria = list(VIRAL_TITLE_CRITERIA)
+    if criteria:
+        offset = abs(int(seed or 0)) % len(criteria)
+        criteria = criteria[offset:] + criteria[:offset]
+
+    number_hint = 3 + (abs(int(seed or 0)) % 10)
+    raw_candidates: List[str] = []
+    for criterion in criteria:
+        candidate = _build_viral_title_from_criterion(
+            criterion=criterion,
+            outcome=outcome,
+            keyword=keyword,
+            number_hint=number_hint
+        )
+        clean = _sanitize_short_title(candidate)
+        if clean:
+            raw_candidates.append(clean)
+    return _dedupe_title_candidates(raw_candidates)
+
 def _build_fallback_title(
     current_title: str,
     transcript_excerpt: str,
@@ -1943,57 +2063,20 @@ def _build_fallback_title(
     avoid_title: str
 ) -> str:
     clean_current = _sanitize_short_title(current_title)
-    clean_avoid = _sanitize_short_title(avoid_title).lower()
-
-    keyword = ""
-    for tag in topic_tags or []:
-        t = _sanitize_short_title(tag, max_chars=24).lower()
-        if len(t) >= 4:
-            keyword = t
-            break
-    if not keyword:
-        words = re.findall(r"[a-zA-ZÀ-ÿ0-9]{4,}", str(transcript_excerpt or "").lower())
-        stop = {"esto", "esta", "este", "para", "como", "cuando", "donde", "sobre", "porque", "video", "clip"}
-        for word in words:
-            if word in stop:
-                continue
-            keyword = word
-            break
-
-    hooks = [
-        "cambia el debate",
-        "deja una alerta clara",
-        "explica el punto clave",
-        "abre una discusión fuerte",
-        "resume lo más importante"
-    ]
-    lead = [
-        "Lo que no te contaron",
-        "La parte más fuerte",
-        "El momento que explica todo",
-        "Esta frase lo resume",
-        "Así lo dijo sin filtro"
-    ]
+    clean_avoid = _sanitize_short_title(avoid_title)
+    avoid_fp = _title_fingerprint(clean_avoid)
     seed_raw = f"{clean_current}|{transcript_excerpt}|{clean_avoid}|{int(time.time())}"
     seed = zlib.crc32(seed_raw.encode("utf-8"))
-    lead_text = lead[seed % len(lead)]
-    hook_text = hooks[(seed // max(1, len(lead))) % len(hooks)]
-
-    candidates = []
-    if keyword:
-        candidates.append(f"{lead_text}: {keyword} y por qué {hook_text}")
-        candidates.append(f"{keyword}: {hook_text} en este corte")
-    if clean_current:
-        candidates.append(f"{clean_current} | {hook_text}")
-    candidates.append(f"{lead_text} y por qué {hook_text}")
-
+    candidates = _build_viral_title_candidates(
+        current_title=clean_current,
+        transcript_excerpt=transcript_excerpt,
+        topic_tags=topic_tags,
+        seed=seed
+    )
     for candidate in candidates:
-        clean = _sanitize_short_title(candidate)
-        if not clean:
+        if avoid_fp and _title_fingerprint(candidate) == avoid_fp:
             continue
-        if clean.lower() == clean_avoid:
-            continue
-        return clean
+        return candidate
     return _sanitize_short_title(clean_current or "Momento clave del video")
 
 def _generate_rewritten_title(
@@ -2015,10 +2098,13 @@ def _generate_rewritten_title(
         try:
             from google import genai
             client = genai.Client(api_key=api_key)
+            criteria_line = "\n".join(f"- {item}" for item in VIRAL_TITLE_CRITERIA)
             prompt = (
                 "Reescribe SOLO el titulo para un clip corto vertical.\n"
                 "Devuelve una sola linea sin comillas.\n"
-                "Reglas: español neutro, 55-95 caracteres, gancho claro, incluye siempre al menos un emoji, sin hashtags, sin clickbait engañoso.\n"
+                "Reglas: español neutro, 45-95 caracteres, gancho claro, sin hashtags, emoji opcional (máximo 1), sin clickbait engañoso.\n"
+                "Debe seguir exactamente uno de estos criterios de viralidad:\n"
+                f"{criteria_line}\n"
                 f"Evita repetir literalmente este titulo: {clean_avoid or clean_current or 'n/a'}.\n"
                 f"Titulo actual: {clean_current or 'n/a'}\n"
                 f"Contexto social: {clean_social or 'n/a'}\n"
@@ -2071,11 +2157,14 @@ def _generate_rewritten_title_variants(
             client = genai.Client(api_key=api_key)
             blocked_line = "; ".join(blocked[:8]) if blocked else "n/a"
             tag_line = ", ".join(safe_tags[:6]) if safe_tags else "n/a"
+            criteria_line = "\n".join(f"- {item}" for item in VIRAL_TITLE_CRITERIA)
             prompt = (
                 f"Genera exactamente {safe_target} títulos distintos para un clip vertical.\n"
                 "Responde SOLO como JSON array de strings y nada más.\n"
-                "Reglas: español neutro, 55-95 caracteres, incluye siempre al menos un emoji relevante, sin hashtags, sin comillas extra.\n"
+                "Reglas: español neutro, 45-95 caracteres, sin hashtags, emoji opcional (máximo 1), sin comillas extra.\n"
                 "Estilo: Usa 'Sentence case' (ej: 'Así me recibe la gente en Argentina'), evita mayúsculas en cada palabra.\n"
+                "Cada título debe seguir un criterio de viralidad distinto de esta lista:\n"
+                f"{criteria_line}\n"
                 f"Evita repetir literalmente estos títulos: {blocked_line}\n"
                 f"Título base: {clean_current or 'n/a'}\n"
                 f"Contexto social: {clean_social or 'n/a'}\n"
@@ -2135,46 +2224,19 @@ def _generate_rewritten_title_variants(
         filler_guard += 1
 
     if len(results) < safe_target:
-        keyword = ""
-        for tag in safe_tags:
-            if len(tag) >= 4:
-                keyword = tag
-                break
-        if not keyword:
-            words = re.findall(r"[a-zA-ZÀ-ÿ0-9]{4,}", clean_transcript.lower())
-            for word in words:
-                if word not in {"esto", "esta", "este", "para", "como", "cuando", "donde", "sobre", "porque", "video", "clip"}:
-                    keyword = word
-                    break
-
-        lead_opts = [
-            "Lo que no te contaron",
-            "La parte más fuerte",
-            "El momento que explica todo",
-            "Esta frase lo resume",
-            "Así lo dijo sin filtro",
-            "El dato que cambia la lectura"
-        ]
-        hook_opts = [
-            "abre una discusión fuerte",
-            "cambia el debate",
-            "deja una alerta clara",
-            "explica el punto clave",
-            "resumen el punto central",
-            "marca la conversación"
-        ]
-        synth_idx = 0
-        while len(results) < safe_target and synth_idx < (len(lead_opts) * len(hook_opts) + 8):
-            lead = lead_opts[synth_idx % len(lead_opts)]
-            hook = hook_opts[(synth_idx // max(1, len(lead_opts))) % len(hook_opts)]
-            if keyword:
-                candidate = f"{lead}: {keyword} y por qué {hook}"
-            else:
-                candidate = f"{lead}: por qué {hook}"
+        synthetic_seed = zlib.crc32(f"{clean_current}|{clean_transcript}|{time.time()}".encode("utf-8"))
+        synthetic_candidates = _build_viral_title_candidates(
+            current_title=clean_current,
+            transcript_excerpt=clean_transcript,
+            topic_tags=safe_tags,
+            seed=synthetic_seed
+        )
+        for candidate in synthetic_candidates:
             deduped = _dedupe_title_candidates([candidate], blocked=blocked + results)
             if deduped:
                 results.extend(deduped)
-            synth_idx += 1
+            if len(results) >= safe_target:
+                break
 
     return _dedupe_title_candidates(results, blocked=blocked)[:safe_target]
 
