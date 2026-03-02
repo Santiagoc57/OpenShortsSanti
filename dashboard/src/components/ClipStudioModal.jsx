@@ -523,6 +523,18 @@ const formatAbsoluteClock = (seconds) => {
   return `${String(mins).padStart(2, '0')}:${secs.toFixed(1).padStart(4, '0')}`;
 };
 
+const resolveDefaultViralHookText = (clip, clipIndex, currentVideoUrl = '') => {
+  const explicitHook = String(clip?.viral_hook_text || '').trim();
+  if (explicitHook) return explicitHook;
+  const socialTitle = String(clip?.video_title_for_youtube_short || '').trim();
+  if (socialTitle) return socialTitle;
+  const genericTitle = String(clip?.title || '').trim();
+  if (genericTitle) return genericTitle;
+  const filename = extractFilename(currentVideoUrl) || extractFilename(clip?.video_url || '');
+  if (filename) return filename;
+  return `Clip n.o ${Number(clipIndex || 0) + 1}`;
+};
+
 export default function ClipStudioModal({
   isOpen,
   standalone = false,
@@ -713,8 +725,8 @@ export default function ClipStudioModal({
   const [dubbingLanguages, setDubbingLanguages] = useState(DEFAULT_DUBBING_LANGUAGES);
   const [isLoadingDubbingLanguages, setIsLoadingDubbingLanguages] = useState(false);
 
-  const [viralHookText, setViralHookText] = useState('');
-  const [viralHookEnabled, setViralHookEnabled] = useState(Boolean(String(clip?.viral_hook_text || '').trim()));
+  const [viralHookText, setViralHookText] = useState(() => resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl));
+  const [viralHookEnabled, setViralHookEnabled] = useState(() => Boolean(resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl)));
   const [viralHookStart, setViralHookStart] = useState(Math.max(0, Number(clip?.viral_hook_start || 0)));
   const [viralHookDuration, setViralHookDuration] = useState(2.5);
 
@@ -830,7 +842,8 @@ export default function ClipStudioModal({
       if (!inRange) return false;
       if (!q) return true;
       const text = String(seg?.text || '').toLowerCase();
-      return text.includes(q);
+      const sceneDescription = String(seg?.scene_description || '').toLowerCase();
+      return text.includes(q) || sceneDescription.includes(q);
     });
   }, [transcriptSegments, transcriptQuery, layoutStart, layoutEnd]);
 
@@ -1372,8 +1385,9 @@ export default function ClipStudioModal({
     setDubbingEnabled(false);
     setDubbingTargetLanguage(String(clip?.dub_target_language || 'es').trim().toLowerCase() || 'es');
     setDubbingSourceLanguage(String(clip?.dub_source_language || 'auto').trim().toLowerCase() || 'auto');
-    setViralHookText(String(clip?.viral_hook_text || ''));
-    setViralHookEnabled(Boolean(String(clip?.viral_hook_text || '').trim()));
+    const nextViralHookDefault = resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl);
+    setViralHookText(nextViralHookDefault);
+    setViralHookEnabled(Boolean(nextViralHookDefault));
     setViralHookStart(Math.max(0, Number(clip?.viral_hook_start || 0)));
     setViralHookDuration(clamp(Number(clip?.viral_hook_duration || 2.5), 0.4, 8));
     setPunctuationOn(true);
@@ -1483,7 +1497,9 @@ export default function ClipStudioModal({
     clip?.transcript_segments,
     clip?.transcript_timebase,
     clip?.video_title_for_youtube_short,
-    clip?.title
+    clip?.title,
+    clip?.video_url,
+    currentVideoUrl
   ]);
 
   useEffect(() => {
@@ -1701,6 +1717,10 @@ export default function ClipStudioModal({
       const originalSplitZoomB = clamp(Number(clip?.layout_split_zoom_b ?? clip?.layout_zoom ?? 1), 0.5, 2.5);
       const originalSplitOffsetBX = clamp(Number(clip?.layout_split_offset_b_x ?? (-(Number(clip?.layout_offset_x || 0)))), -100, 100);
       const originalSplitOffsetBY = clamp(Number(clip?.layout_split_offset_b_y ?? clip?.layout_offset_y ?? 0), -100, 100);
+      if (viralHookEnabled && !appliedViralHookText) {
+        appliedViralHookText = resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl);
+        setViralHookText(appliedViralHookText);
+      }
       const needsRecut = layoutAspect !== (clip?.aspect_ratio === '16:9' ? '16:9' : '9:16')
         || Math.abs(requestedStart - clipStart) > 0.01
         || Math.abs(requestedEnd - clipEnd) > 0.01
@@ -3065,7 +3085,14 @@ export default function ClipStudioModal({
                     tooltip="Cuando está apagado, no se renderiza el hook viral en el export."
                     checked={viralHookEnabled}
                     onChange={() => {
-                      setViralHookEnabled((v) => !v);
+                      const hookFallback = resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl);
+                      setViralHookEnabled((v) => {
+                        const next = !v;
+                        if (next && !String(viralHookText || '').trim() && hookFallback) {
+                          setViralHookText(hookFallback);
+                        }
+                        return next;
+                      });
                       setSavedPulse(false);
                     }}
                   />

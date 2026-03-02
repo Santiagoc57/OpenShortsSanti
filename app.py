@@ -7823,11 +7823,18 @@ async def get_transcript_segments(
         if end < start:
             end = start
         speaker = _normalize_space(seg.get("speaker", ""))
+        scene_description = _normalize_space(
+            seg.get("scene_description")
+            or seg.get("sceneDescription")
+            or seg.get("visual_description")
+            or seg.get("description")
+            or ""
+        )
         if speaker:
             has_speaker_labels = True
 
         if query:
-            haystack = f"{text} {speaker}".lower()
+            haystack = f"{text} {speaker} {scene_description}".lower()
             if query not in haystack:
                 continue
 
@@ -7839,7 +7846,8 @@ async def get_transcript_segments(
             "duration": round(max(0.0, end - start), 3),
             "speaker": speaker or None,
             "word_count": len(words),
-            "text": text
+            "text": text,
+            "scene_description": scene_description or None
         }
         if include_words:
             safe_words: List[Dict[str, Any]] = []

@@ -963,3 +963,22 @@
 - Para que sirve:
   - Los clips abren por defecto sin leyenda textual en la timeline.
   - Se simplifica la UI y se evita que aparezca el control de leyenda que ya no se desea usar.
+
+### Corregido: Descripciones de escena en transcripción
+- Que cambiamos:
+  - En `app.py` (`GET /api/transcript/{job_id}`) ahora se incluye `scene_description` en cada segmento cuando exista (`scene_description`, `sceneDescription`, `visual_description` o `description`).
+  - El filtro de búsqueda del transcript ahora también considera el texto de `scene_description`.
+  - En `dashboard/src/components/ClipStudioModal.jsx` la búsqueda local del panel `Transcripción` también incluye `scene_description`.
+- Para que sirve:
+  - El toggle `Descripciones de escena` en Clip Studio vuelve a tener efecto cuando el backend dispone de esas descripciones.
+
+### Ajustado: Hook viral por defecto usa el título del clip
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se agregó resolución por defecto del hook viral basada en:
+    - `viral_hook_text` guardado (si existe),
+    - si no existe, `video_title_for_youtube_short`,
+    - si no, `title` del clip.
+  - Al abrir Clip Studio, el estado inicial del hook toma ese valor por defecto.
+  - Al activar hook con texto vacío o al aplicar cambios con hook activo y vacío, se autocompleta con ese título por defecto.
+- Para que sirve:
+  - El hook viral inicia con texto útil sin tener que escribirlo manualmente en cada clip.
