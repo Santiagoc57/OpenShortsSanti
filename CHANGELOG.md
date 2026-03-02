@@ -988,3 +988,11 @@
   - En `dashboard/src/components/ClipStudioModal.jsx` se reordenó la inicialización de `dubbingLanguageOptions` para calcularse después de declarar el estado `dubbingLanguages`.
 - Para que sirve:
   - Evita el error de runtime `ReferenceError: can't access lexical declaration 'dubbingLanguages' before initialization` al seleccionar proyecto/abrir Clip Studio.
+
+### Ajustado: Doblaje pasa a botón independiente (7º botón)
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se agregó un nuevo item de navegación lateral: `Doblaje`.
+  - El bloque `Doblaje ElevenLabs` se movió desde la sección `Música` a la nueva sección `Doblaje`.
+  - La sección `Música` quedó solo con controles de música (archivo, volumen y ducking).
+- Para que sirve:
+  - Separa claramente música y doblaje, y deja el doblaje en su propio botón como se solicitó.

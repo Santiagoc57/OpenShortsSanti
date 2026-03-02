@@ -180,7 +180,8 @@ const SECTION_ITEMS = [
   { id: 'subtitle_edit', label: 'Editar subtítulos', icon: Type },
   { id: 'viral_hook', label: 'Hook Viral', icon: Sparkles },
   { id: 'layout', label: 'Editar layout', icon: LayoutTemplate },
-  { id: 'music', label: 'Música', icon: Music2 }
+  { id: 'music', label: 'Música', icon: Music2 },
+  { id: 'dubbing', label: 'Doblaje', icon: Languages }
 ];
 
 const DEFAULT_DUBBING_LANGUAGES = {
@@ -3559,7 +3560,12 @@ export default function ClipStudioModal({
                     <input type="checkbox" checked={duckVoice} onChange={(e) => setDuckVoice(e.target.checked)} />
                     Bajar música cuando habla la voz (ducking)
                   </label>
+                </div>
+              )}
 
+              {section === 'dubbing' && (
+                <div className="space-y-4">
+                  <h3 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100">Doblaje</h3>
                   <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/40 p-3 space-y-3">
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex items-center gap-2">
