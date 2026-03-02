@@ -664,10 +664,6 @@ export default function ClipStudioModal({
     }
   }, [elevenLabsKey]);
   const hasElevenLabsKey = Boolean(resolvedElevenLabsKey);
-  const dubbingLanguageOptions = useMemo(
-    () => Object.entries(dubbingLanguages || {}).sort((a, b) => String(a[1]).localeCompare(String(b[1]))),
-    [dubbingLanguages]
-  );
 
   const handleLayoutAspectChange = useCallback((nextAspectRaw) => {
     const nextAspect = nextAspectRaw === '16:9' ? '16:9' : '9:16';
@@ -724,6 +720,10 @@ export default function ClipStudioModal({
   const [dubbingSourceLanguage, setDubbingSourceLanguage] = useState('auto');
   const [dubbingLanguages, setDubbingLanguages] = useState(DEFAULT_DUBBING_LANGUAGES);
   const [isLoadingDubbingLanguages, setIsLoadingDubbingLanguages] = useState(false);
+  const dubbingLanguageOptions = useMemo(
+    () => Object.entries(dubbingLanguages || {}).sort((a, b) => String(a[1]).localeCompare(String(b[1]))),
+    [dubbingLanguages]
+  );
 
   const [viralHookText, setViralHookText] = useState(() => resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl));
   const [viralHookEnabled, setViralHookEnabled] = useState(() => Boolean(resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl)));

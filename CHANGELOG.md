@@ -982,3 +982,9 @@
   - Al activar hook con texto vacío o al aplicar cambios con hook activo y vacío, se autocompleta con ese título por defecto.
 - Para que sirve:
   - El hook viral inicia con texto útil sin tener que escribirlo manualmente en cada clip.
+
+### Corregido: crash al abrir proyecto en Clip Studio (`dubbingLanguages` TDZ)
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se reordenó la inicialización de `dubbingLanguageOptions` para calcularse después de declarar el estado `dubbingLanguages`.
+- Para que sirve:
+  - Evita el error de runtime `ReferenceError: can't access lexical declaration 'dubbingLanguages' before initialization` al seleccionar proyecto/abrir Clip Studio.
