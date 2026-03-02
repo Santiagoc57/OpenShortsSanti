@@ -3123,6 +3123,32 @@ export default function ClipStudioModal({
 
                   <div className="space-y-3 p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/80">
                     <div className="flex flex-col gap-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-sm font-medium text-slate-700 dark:text-slate-200 text-left">Preset de estilo</label>
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400">Mismos presets de subtítulos</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {CAPTION_PRESETS.map((preset) => (
+                          <button
+                            key={`viral-preset-${preset.id}`}
+                            type="button"
+                            onClick={() => {
+                              applyPreset(preset.id);
+                              setSavedPulse(false);
+                            }}
+                            className={`rounded-md border px-2 py-1.5 text-left text-xs font-medium transition-colors ${selectedPreset === preset.id
+                              ? 'border-violet-400 bg-violet-50 text-violet-700 dark:border-violet-500/70 dark:bg-violet-900/30 dark:text-violet-200'
+                              : 'border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/50'
+                              }`}
+                            title={`Aplicar preset ${preset.name} al estilo de subtítulos y hook`}
+                          >
+                            {preset.name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-2">
                       <div className="flex justify-between items-center">
                         <label className="text-sm font-medium text-slate-700 dark:text-slate-200 text-left">Texto del Hook</label>
                         <button

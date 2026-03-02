@@ -1021,3 +1021,10 @@
   - Se agregó resolución de fuente para hook basada en la familia del preset (Montserrat/Anton/Archivo Black/Bebas/Oswald/Teko, con fallback).
 - Para que sirve:
   - Aplicar un preset de subtítulos impacta también el hook viral sin duplicar controles ni estilos separados.
+
+### Ajustado: Presets visibles también en sección Viral Hook
+- Que cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se agregó un bloque `Preset de estilo` dentro de la sección `Viral Hook`.
+  - El bloque muestra los mismos presets de subtítulos y permite aplicarlos con un clic desde ese panel.
+- Para que sirve:
+  - El usuario puede cambiar el preset del hook directamente donde edita el hook, sin ir a otra sección.
