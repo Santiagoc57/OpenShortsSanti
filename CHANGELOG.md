@@ -2,6 +2,15 @@
 
 ## 2026-03-02
 
+### Nuevo: control de tamaño del Viral Hook con slider + persistencia en export
+- Qué cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se agregó estado dedicado `viralHookFontSize` y un slider `Tamaño` dentro del panel `Hook Viral`.
+  - El preview del hook ahora usa ese tamaño dedicado (independiente del tamaño general de subtítulos), manteniendo color/fuente/estilo del preset activo.
+  - El flujo de `Aplicar` ahora envía `viral_hook_font_size` a `/api/recut` y actualiza estado local con el valor devuelto por backend.
+  - En `app.py` se añadió `viral_hook_font_size` al `RecutRequest`, se aplica al `drawtext` del hook, y se persiste en metadata + `job.result.clips`.
+- Para qué sirve:
+  - Permite ajustar con precisión el tamaño del título-hook desde la UI y mantener ese tamaño en el render final/exportado.
+
 ### Ajustado: se quitó el texto superior sobre la vista previa del video en Clip Studio
 - Qué cambiamos:
   - En `dashboard/src/components/ClipStudioModal.jsx` se eliminó la línea de texto descriptiva que aparecía arriba del video en el panel de preview.

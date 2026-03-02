@@ -5759,6 +5759,7 @@ class RecutRequest(BaseModel):
     viral_hook_text: Optional[str] = None
     viral_hook_start: Optional[float] = None
     viral_hook_duration: Optional[float] = None
+    viral_hook_font_size: Optional[int] = None
 
 def _parse_form_bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -6070,6 +6071,19 @@ async def recut_clip(req: RecutRequest):
             clip_window_duration = max(0.1, _safe_float((req.end - req.start), 0.1))
             viral_hook_start = max(0.0, _safe_float(getattr(req, "viral_hook_start", 0.0), 0.0))
             viral_hook_duration = max(0.0, _safe_float(getattr(req, "viral_hook_duration", 3.0), 3.0))
+            viral_hook_font_size = max(
+                12,
+                min(
+                    84,
+                    int(
+                        _safe_float(
+                            getattr(req, "viral_hook_font_size", hook_style.get("font_size", 50)),
+                            _safe_float(hook_style.get("font_size", 50), 50)
+                        )
+                    )
+                )
+            )
+            hook_style["font_size"] = viral_hook_font_size
             if viral_hook_start >= clip_window_duration:
                 viral_hook_start = max(0.0, clip_window_duration - 0.1)
 
@@ -6084,7 +6098,7 @@ async def recut_clip(req: RecutRequest):
                 hook_font_color = str(hook_style.get("font_color") or "#FFFFFF")
                 hook_stroke_color = str(hook_style.get("stroke_color") or "#000000")
                 hook_box_color = str(hook_style.get("box_color") or "#000000")
-                hook_font_size = max(12, min(96, int(_safe_float(hook_style.get("font_size", 50), 50))))
+                hook_font_size = viral_hook_font_size
                 hook_stroke_width = max(0.0, min(8.0, _safe_float(hook_style.get("stroke_width", 0), 0.0)))
                 hook_box_opacity = max(0, min(100, int(_safe_float(hook_style.get("box_opacity", 0), 0.0))))
 
@@ -6196,6 +6210,7 @@ async def recut_clip(req: RecutRequest):
                 clips[req.clip_index]['viral_hook_text'] = viral_hook_text
                 clips[req.clip_index]['viral_hook_start'] = round(max(0.0, _safe_float(viral_hook_start, 0.0)), 3)
                 clips[req.clip_index]['viral_hook_duration'] = round(max(0.0, _safe_float(viral_hook_duration, 0.0)), 3)
+                clips[req.clip_index]['viral_hook_font_size'] = int(max(12, min(84, _safe_float(viral_hook_font_size, 50))))
                 if smart_summary:
                     clips[req.clip_index]['layout_smart_summary'] = smart_summary
                 elif 'layout_smart_summary' in clips[req.clip_index]:
@@ -6226,6 +6241,7 @@ async def recut_clip(req: RecutRequest):
         job['result']['clips'][req.clip_index]['viral_hook_text'] = viral_hook_text
         job['result']['clips'][req.clip_index]['viral_hook_start'] = round(max(0.0, _safe_float(viral_hook_start, 0.0)), 3)
         job['result']['clips'][req.clip_index]['viral_hook_duration'] = round(max(0.0, _safe_float(viral_hook_duration, 0.0)), 3)
+        job['result']['clips'][req.clip_index]['viral_hook_font_size'] = int(max(12, min(84, _safe_float(viral_hook_font_size, 50))))
         if smart_summary:
             job['result']['clips'][req.clip_index]['layout_smart_summary'] = smart_summary
         elif 'layout_smart_summary' in job['result']['clips'][req.clip_index]:
@@ -6244,6 +6260,7 @@ async def recut_clip(req: RecutRequest):
         "viral_hook_text": viral_hook_text,
         "viral_hook_start": round(max(0.0, _safe_float(viral_hook_start, 0.0)), 3),
         "viral_hook_duration": round(max(0.0, _safe_float(viral_hook_duration, 0.0)), 3),
+        "viral_hook_font_size": int(max(12, min(84, _safe_float(viral_hook_font_size, 50)))),
         "smart_reframe_summary": smart_summary,
         "warnings": recut_warnings
     }

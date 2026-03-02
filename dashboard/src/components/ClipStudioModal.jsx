@@ -501,6 +501,8 @@ const LAYOUT_PAN_SENSITIVITY = 120;
 const CAPTION_OFFSET_FACTOR = 0.35;
 const CAPTION_CENTER_SNAP_THRESHOLD = 2.2;
 const VIRAL_HOOK_DEFAULT_DURATION = 3.0;
+const VIRAL_HOOK_FONT_SIZE_MIN = 12;
+const VIRAL_HOOK_FONT_SIZE_MAX = 84;
 const TIMELINE_ZOOM_MIN = 0.55;
 const TIMELINE_ZOOM_MAX = 2.2;
 const TIMELINE_ZOOM_DEFAULT = 0.9;
@@ -535,6 +537,18 @@ const resolveDefaultViralHookText = (clip, clipIndex, currentVideoUrl = '') => {
   const filename = extractFilename(currentVideoUrl) || extractFilename(clip?.video_url || '');
   if (filename) return filename;
   return `Clip n.o ${Number(clipIndex || 0) + 1}`;
+};
+
+const resolveViralHookFontSize = (clip, fallback = CAPTION_PRESETS[0].style.fontSize) => {
+  const explicitSize = Number(clip?.viral_hook_font_size);
+  if (Number.isFinite(explicitSize) && explicitSize > 0) {
+    return clamp(explicitSize, VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
+  }
+  const captionSize = Number(clip?.caption_font_size);
+  if (Number.isFinite(captionSize) && captionSize > 0) {
+    return clamp(captionSize, VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
+  }
+  return clamp(Number(fallback || CAPTION_PRESETS[0].style.fontSize), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
 };
 
 export default function ClipStudioModal({
@@ -731,6 +745,7 @@ export default function ClipStudioModal({
   const [viralHookEnabled, setViralHookEnabled] = useState(() => Boolean(resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl)));
   const [viralHookStart, setViralHookStart] = useState(Math.max(0, Number(clip?.viral_hook_start || 0)));
   const [viralHookDuration, setViralHookDuration] = useState(VIRAL_HOOK_DEFAULT_DURATION);
+  const [viralHookFontSize, setViralHookFontSize] = useState(() => resolveViralHookFontSize(clip));
 
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewCurrentTime, setPreviewCurrentTime] = useState(0);
@@ -964,8 +979,8 @@ export default function ClipStudioModal({
     [strokeWidth]
   );
   const previewViralHookFontSize = useMemo(
-    () => clamp(Math.round(Number(fontSize || 50) * 0.62), 14, 42),
-    [fontSize]
+    () => clamp(Math.round(Number(viralHookFontSize || CAPTION_PRESETS[0].style.fontSize) * 0.62), 14, 42),
+    [viralHookFontSize]
   );
   const showPreviewViralHook = useMemo(() => {
     if (!previewViralHookText) return false;
@@ -1104,6 +1119,7 @@ export default function ClipStudioModal({
     setKaraokeMode(Boolean(preset.karaokeMode));
     setSubtitleAnimation(String(preset.style?.animation || 'none'));
     setSpeakerColorMode(Boolean(preset.style?.speakerColorMode));
+    setViralHookFontSize(clamp(Number(preset.style?.fontSize || CAPTION_PRESETS[0].style.fontSize), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX));
   };
 
   useEffect(() => {
@@ -1414,6 +1430,7 @@ export default function ClipStudioModal({
     setViralHookEnabled(Boolean(nextViralHookDefault));
     setViralHookStart(Math.max(0, Number(clip?.viral_hook_start || 0)));
     setViralHookDuration(clamp(Number(clip?.viral_hook_duration || VIRAL_HOOK_DEFAULT_DURATION), 0.4, 8));
+    setViralHookFontSize(resolveViralHookFontSize(clip));
     setPunctuationOn(true);
     setEmojiOn(true);
     setShowCaptionSettings(false);
@@ -1516,6 +1533,7 @@ export default function ClipStudioModal({
     clip?.viral_hook_text,
     clip?.viral_hook_duration,
     clip?.viral_hook_start,
+    clip?.viral_hook_font_size,
     clip?.dub_target_language,
     clip?.dub_source_language,
     clip?.transcript_segments,
@@ -1715,6 +1733,7 @@ export default function ClipStudioModal({
     let appliedViralHookText = viralHookEnabled ? String(viralHookText || '').trim() : '';
     let appliedViralHookStart = viralHookEnabled ? Number(viralHookTimelineStart || 0) : 0;
     let appliedViralHookDuration = viralHookEnabled ? Number(viralHookTimelineDuration || 0) : 0;
+    let appliedViralHookFontSize = clamp(Number(viralHookFontSize || CAPTION_PRESETS[0].style.fontSize), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
     let subtitleSrtPayload = srtContent || null;
 
     try {
@@ -1782,10 +1801,12 @@ export default function ClipStudioModal({
       const existingViralHookText = String(clip?.viral_hook_text || '').trim();
       const existingViralHookStart = Math.max(0, Number(clip?.viral_hook_start || 0));
       const existingViralHookDuration = Math.max(0, Number(clip?.viral_hook_duration || 0));
+      const existingViralHookFontSize = resolveViralHookFontSize(clip, appliedViralHookFontSize);
       const viralHookChanged = (
         appliedViralHookText !== existingViralHookText
         || Math.abs(appliedViralHookStart - existingViralHookStart) > 0.01
         || Math.abs(appliedViralHookDuration - existingViralHookDuration) > 0.01
+        || (Boolean(appliedViralHookText) && Math.abs(appliedViralHookFontSize - existingViralHookFontSize) > 0.01)
       );
 
       // We always attempt to fetch fresh subtitle SRT data if we are overriding it or if timestamps changed
@@ -1855,7 +1876,8 @@ export default function ClipStudioModal({
           srt_content: subtitleSrtPayload,
           viral_hook_text: appliedViralHookText,
           viral_hook_start: appliedViralHookStart,
-          viral_hook_duration: appliedViralHookDuration
+          viral_hook_duration: appliedViralHookDuration,
+          viral_hook_font_size: appliedViralHookFontSize
         };
 
         const recutRes = await apiFetch('/api/recut', {
@@ -1898,6 +1920,10 @@ export default function ClipStudioModal({
         if (Number.isFinite(Number(recutData?.viral_hook_duration))) {
           appliedViralHookDuration = Math.max(0, Number(recutData.viral_hook_duration));
           setViralHookDuration(appliedViralHookDuration);
+        }
+        if (Number.isFinite(Number(recutData?.viral_hook_font_size))) {
+          appliedViralHookFontSize = clamp(Number(recutData.viral_hook_font_size), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
+          setViralHookFontSize(appliedViralHookFontSize);
         }
       }
 
@@ -1988,6 +2014,7 @@ export default function ClipStudioModal({
           viral_hook_text: appliedViralHookText,
           viral_hook_start: appliedViralHookStart,
           viral_hook_duration: appliedViralHookDuration,
+          viral_hook_font_size: appliedViralHookFontSize,
           ...(dubbingEnabled
             ? {
               dub_target_language: appliedDubTargetLanguage,
@@ -3216,6 +3243,25 @@ export default function ClipStudioModal({
                         disabled={!viralHookEnabled}
                         onChange={(e) => {
                           setViralHookDuration(Number(e.target.value));
+                          setSavedPulse(false);
+                        }}
+                        className="w-full accent-violet-600"
+                      />
+                    </div>
+
+                    <div className="flex flex-col gap-2">
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200 text-left">
+                        Tamaño: <span className="text-violet-600 dark:text-violet-400">{Math.round(viralHookFontSize)} px</span>
+                      </label>
+                      <input
+                        type="range"
+                        min={String(VIRAL_HOOK_FONT_SIZE_MIN)}
+                        max={String(VIRAL_HOOK_FONT_SIZE_MAX)}
+                        step="1"
+                        value={viralHookFontSize}
+                        disabled={!viralHookEnabled}
+                        onChange={(e) => {
+                          setViralHookFontSize(clamp(Number(e.target.value), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX));
                           setSavedPulse(false);
                         }}
                         className="w-full accent-violet-600"
