@@ -21,6 +21,14 @@
 - Para qué sirve:
   - Permite diseñar el Hook Viral con control completo sin depender del estilo de subtítulos, manteniendo consistencia entre preview y export.
 
+### Corregido: recut no falla si falta el archivo fuente original del proyecto
+- Qué cambiamos:
+  - En `app.py` (`/api/recut`) se eliminó la dependencia rígida de `job.input_path` existente en disco.
+  - Ahora el recut resuelve fuente en cascada: `clip _uncut` -> `input_path` original -> `clip actual` del job.
+  - Cuando usa fuentes de clip (uncut/actual), convierte el tiempo absoluto solicitado a tiempo relativo del clip para mantener el recorte correcto.
+- Para qué sirve:
+  - Evita el error `Original source video not available for recut.` al pulsar `Aplicar` o `Aplicar y descargar` en proyectos donde el path original ya no está disponible.
+
 ### Ajustado: se quitó el texto superior sobre la vista previa del video en Clip Studio
 - Qué cambiamos:
   - En `dashboard/src/components/ClipStudioModal.jsx` se eliminó la línea de texto descriptiva que aparecía arriba del video en el panel de preview.

@@ -5787,8 +5787,7 @@ async def recut_clip(req: RecutRequest):
         raise HTTPException(status_code=404, detail="Job not found")
 
     input_path = job.get('input_path')
-    if not input_path or not os.path.exists(input_path):
-        raise HTTPException(status_code=400, detail="Original source video not available for recut.")
+    has_original_input = bool(input_path and os.path.exists(input_path))
 
     if req.start < 0 or req.end <= req.start:
         raise HTTPException(status_code=400, detail="Invalid start/end times.")
@@ -5818,71 +5817,94 @@ async def recut_clip(req: RecutRequest):
     output_dir = os.path.join(OUTPUT_DIR, req.job_id)
     os.makedirs(output_dir, exist_ok=True)
 
-    # Try to find the uncut version of the clip first
+    # Source resolution: prefer clip _uncut, then original input, finally current clip file.
+    source_to_cut = ""
+    source_timebase = "absolute"  # absolute | clip_relative
+    source_anchor_start = 0.0
+    source_label = ""
+
     json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
-    source_to_cut = input_path
+    metadata_data: Dict[str, Any] = {}
+    metadata_clips: List[Dict[str, Any]] = []
+    metadata_path = json_files[0] if json_files else None
+    if metadata_path:
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata_data = json.load(f)
+            raw_clips = metadata_data.get("shorts", [])
+            if isinstance(raw_clips, list):
+                metadata_clips = [c for c in raw_clips if isinstance(c, dict)]
+        except Exception:
+            metadata_data = {}
+            metadata_clips = []
+
+    if 0 <= req.clip_index < len(metadata_clips):
+        source_anchor_start = max(0.0, _safe_float(metadata_clips[req.clip_index].get("start", 0.0), 0.0))
+
+    uncut_path: Optional[str] = None
     if json_files:
         base_name = os.path.basename(json_files[0]).replace("_metadata.json", "")
         uncut_name = f"{base_name}_clip_{req.clip_index + 1}_uncut.mp4"
-        uncut_path = os.path.join(output_dir, uncut_name)
-        if os.path.exists(uncut_path):
+        candidate_uncut = os.path.join(output_dir, uncut_name)
+        if os.path.exists(candidate_uncut):
+            uncut_path = candidate_uncut
             source_to_cut = uncut_path
-            # Since uncut is already cut to the correct segment, we just use it directly
-            # Or we can cut from it again just to be safe if start/end tweaked
+            source_timebase = "clip_relative"
+            source_label = "uncut"
             print(f"Recutting from uncut variant: {uncut_path}")
+
+    if not source_to_cut and has_original_input:
+        source_to_cut = str(input_path)
+        source_timebase = "absolute"
+        source_label = "original_input"
+
+    if not source_to_cut:
+        try:
+            result_clips = ((job.get("result") or {}).get("clips") or []) if isinstance(job, dict) else []
+            clip_payload = result_clips[req.clip_index] if 0 <= req.clip_index < len(result_clips) else {}
+            if isinstance(clip_payload, dict):
+                clip_filename = _safe_input_filename(clip_payload.get("video_url", ""))
+                clip_file_path = os.path.join(output_dir, clip_filename) if clip_filename else ""
+                if clip_file_path and os.path.exists(clip_file_path):
+                    source_to_cut = clip_file_path
+                    source_timebase = "clip_relative"
+                    source_label = "current_clip"
+                    source_anchor_start = max(0.0, _safe_float(clip_payload.get("start", source_anchor_start), source_anchor_start))
+                    recut_warnings.append("No se encontró video original; se usó el clip actual como fuente de recorte.")
+        except Exception:
+            pass
+
+    if not source_to_cut:
+        raise HTTPException(status_code=400, detail="Original source video not available for recut.")
 
     # Cut from source
     temp_cut = os.path.join(output_dir, f"temp_recut_{req.clip_index}_{int(time.time())}.mp4")
     out_name = f"reclip_{req.clip_index+1}_{int(time.time())}.mp4"
     out_path = os.path.join(output_dir, out_name)
 
-    # Note: If source_to_cut is the uncut clip, it's already bounded to the clip's original start.
-    # However, 'req.start' is absolute relative to the *full* video.
-    # We must adjust the cut command depending on what source we use.
-    if source_to_cut == uncut_path:
-        # The uncut clip starts at the clip's original start time.
-        # We need to find what that original start time was.
-        try:
-            with open(json_files[0], 'r') as f:
-                data = json.load(f)
-            clips = data.get('shorts', [])
-            original_start = 0.0
-            if req.clip_index < len(clips):
-                original_start = clips[req.clip_index].get('start', 0.0)
-            
-            # The requested start might be slightly tweaked by the user
-            relative_start = max(0.0, req.start - original_start)
-            duration = max(0.6, req.end - req.start)
-            
-            cut_cmd = [
-                'ffmpeg', '-y',
-                '-ss', str(relative_start),
-                '-t', str(duration),
-                '-i', source_to_cut,
-                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'fast',
-                '-c:a', 'aac',
-                '-movflags', '+faststart',
-                temp_cut
-            ]
-        except Exception as e:
-            print(f"Failed to use uncut clip: {e}, falling back to full input")
-            source_to_cut = input_path
-            cut_cmd = [
-                'ffmpeg', '-y',
-                '-ss', str(req.start),
-                '-to', str(req.end),
-                '-i', input_path,
-                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'fast',
-                '-c:a', 'aac',
-                '-movflags', '+faststart',
-                temp_cut
-            ]
+    # For clip-bounded sources (uncut/current clip), request times are absolute (full video),
+    # so we convert them to local clip-relative times using source_anchor_start.
+    if source_timebase == "clip_relative":
+        relative_start = max(0.0, _safe_float(req.start, 0.0) - _safe_float(source_anchor_start, 0.0))
+        duration = max(0.6, _safe_float(req.end, 0.0) - _safe_float(req.start, 0.0))
+        cut_cmd = [
+            'ffmpeg', '-y',
+            '-ss', str(relative_start),
+            '-t', str(duration),
+            '-i', source_to_cut,
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'fast',
+            '-c:a', 'aac',
+            '-movflags', '+faststart',
+            temp_cut
+        ]
+        if source_label == "current_clip":
+            recut_warnings.append("El recorte usó tiempo relativo del clip actual por falta del archivo fuente original.")
     else:
         cut_cmd = [
             'ffmpeg', '-y',
             '-ss', str(req.start),
             '-to', str(req.end),
-            '-i', input_path,
+            '-i', source_to_cut,
             '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'fast',
             '-c:a', 'aac',
             '-movflags', '+faststart',
