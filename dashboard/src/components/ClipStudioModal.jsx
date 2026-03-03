@@ -503,6 +503,16 @@ const CAPTION_CENTER_SNAP_THRESHOLD = 2.2;
 const VIRAL_HOOK_DEFAULT_DURATION = 3.0;
 const VIRAL_HOOK_FONT_SIZE_MIN = 12;
 const VIRAL_HOOK_FONT_SIZE_MAX = 84;
+const DEFAULT_VIRAL_HOOK_STYLE = {
+  fontSize: 37,
+  fontFamily: 'Archivo Black',
+  fontColor: '#FFFFFF',
+  strokeColor: '#000000',
+  strokeWidth: 0,
+  bold: true,
+  boxColor: '#000000',
+  boxOpacity: 0
+};
 const TIMELINE_ZOOM_MIN = 0.55;
 const TIMELINE_ZOOM_MAX = 2.2;
 const TIMELINE_ZOOM_DEFAULT = 0.9;
@@ -539,35 +549,31 @@ const resolveDefaultViralHookText = (clip, clipIndex, currentVideoUrl = '') => {
   return `Clip n.o ${Number(clipIndex || 0) + 1}`;
 };
 
-const resolveViralHookFontSize = (clip, fallback = CAPTION_PRESETS[0].style.fontSize) => {
+const resolveViralHookFontSize = (clip, fallback = DEFAULT_VIRAL_HOOK_STYLE.fontSize) => {
   const explicitSize = Number(clip?.viral_hook_font_size);
   if (Number.isFinite(explicitSize) && explicitSize > 0) {
     return clamp(explicitSize, VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
   }
-  const captionSize = Number(clip?.caption_font_size);
-  if (Number.isFinite(captionSize) && captionSize > 0) {
-    return clamp(captionSize, VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
-  }
-  return clamp(Number(fallback || CAPTION_PRESETS[0].style.fontSize), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
+  return clamp(Number(fallback || DEFAULT_VIRAL_HOOK_STYLE.fontSize), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
 };
 
-const resolveViralHookStyle = (clip, fallbackStyle = CAPTION_PRESETS[0].style) => {
-  const style = fallbackStyle && typeof fallbackStyle === 'object' ? fallbackStyle : CAPTION_PRESETS[0].style;
+const resolveViralHookStyle = (clip, fallbackStyle = DEFAULT_VIRAL_HOOK_STYLE) => {
+  const style = fallbackStyle && typeof fallbackStyle === 'object' ? fallbackStyle : DEFAULT_VIRAL_HOOK_STYLE;
   const resolvedFontSize = resolveViralHookFontSize(clip, style.fontSize);
-  const rawStrokeWidth = Number(clip?.viral_hook_stroke_width ?? clip?.caption_stroke_width ?? style.strokeWidth ?? 0);
-  const rawBoxOpacity = Number(clip?.viral_hook_box_opacity ?? clip?.caption_box_opacity ?? style.boxOpacity ?? 0);
+  const rawStrokeWidth = Number(clip?.viral_hook_stroke_width ?? style.strokeWidth ?? 0);
+  const rawBoxOpacity = Number(clip?.viral_hook_box_opacity ?? style.boxOpacity ?? 0);
   const rawBold = (typeof clip?.viral_hook_bold === 'boolean')
     ? clip.viral_hook_bold
-    : (typeof clip?.caption_bold === 'boolean' ? clip.caption_bold : Boolean(style.bold));
+    : Boolean(style.bold);
 
   return {
     fontSize: resolvedFontSize,
-    fontFamily: normalizeSubtitleFontFamily(clip?.viral_hook_font_family || clip?.caption_font_family || style.fontFamily || 'Anton'),
-    fontColor: String(clip?.viral_hook_font_color || clip?.caption_font_color || style.fontColor || '#FFFFFF'),
-    strokeColor: String(clip?.viral_hook_stroke_color || clip?.caption_stroke_color || style.strokeColor || '#000000'),
+    fontFamily: normalizeSubtitleFontFamily(clip?.viral_hook_font_family || style.fontFamily || DEFAULT_VIRAL_HOOK_STYLE.fontFamily),
+    fontColor: String(clip?.viral_hook_font_color || style.fontColor || DEFAULT_VIRAL_HOOK_STYLE.fontColor),
+    strokeColor: String(clip?.viral_hook_stroke_color || style.strokeColor || DEFAULT_VIRAL_HOOK_STYLE.strokeColor),
     strokeWidth: clamp(rawStrokeWidth, 0, 8),
     bold: Boolean(rawBold),
-    boxColor: String(clip?.viral_hook_box_color || clip?.caption_box_color || style.boxColor || '#000000'),
+    boxColor: String(clip?.viral_hook_box_color || style.boxColor || DEFAULT_VIRAL_HOOK_STYLE.boxColor),
     boxOpacity: clamp(rawBoxOpacity, 0, 100)
   };
 };
@@ -1008,7 +1014,7 @@ export default function ClipStudioModal({
     [viralHookStrokeWidth]
   );
   const previewViralHookFontSize = useMemo(
-    () => clamp(Math.round(Number(viralHookFontSize || CAPTION_PRESETS[0].style.fontSize) * 0.62), 14, 42),
+    () => clamp(Math.round(Number(viralHookFontSize || DEFAULT_VIRAL_HOOK_STYLE.fontSize) * 0.62), 14, 42),
     [viralHookFontSize]
   );
   const showPreviewViralHook = useMemo(() => {
@@ -1791,7 +1797,7 @@ export default function ClipStudioModal({
     let appliedViralHookText = viralHookEnabled ? String(viralHookText || '').trim() : '';
     let appliedViralHookStart = viralHookEnabled ? Number(viralHookTimelineStart || 0) : 0;
     let appliedViralHookDuration = viralHookEnabled ? Number(viralHookTimelineDuration || 0) : 0;
-    let appliedViralHookFontSize = clamp(Number(viralHookFontSize || CAPTION_PRESETS[0].style.fontSize), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
+    let appliedViralHookFontSize = clamp(Number(viralHookFontSize || DEFAULT_VIRAL_HOOK_STYLE.fontSize), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX);
     let appliedViralHookFontFamily = normalizeSubtitleFontFamily(viralHookFontFamily);
     let appliedViralHookFontColor = String(viralHookFontColor || '#FFFFFF');
     let appliedViralHookStrokeColor = String(viralHookStrokeColor || '#000000');

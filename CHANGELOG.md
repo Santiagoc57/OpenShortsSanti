@@ -29,6 +29,22 @@
 - Para qué sirve:
   - Evita el error `Original source video not available for recut.` al pulsar `Aplicar` o `Aplicar y descargar` en proyectos donde el path original ya no está disponible.
 
+### Ajustado: defaults del Hook Viral alineados al preset solicitado
+- Qué cambiamos:
+  - En `dashboard/src/components/ClipStudioModal.jsx` se definió un default propio del Hook Viral con:
+    - `Tamaño 37`,
+    - `Fuente Archivo Black`,
+    - `Grosor contorno 0`,
+    - `Color texto #FFFFFF`,
+    - `Color contorno #000000`,
+    - `Color caja #000000`,
+    - `Caja 0%`,
+    - `Negrita activa`.
+  - Se removió el fallback al estilo de subtítulos cuando no hay estilo de hook guardado.
+  - En `app.py` (`/api/recut`) se aplican los mismos defaults del hook cuando faltan campos explícitos.
+- Para qué sirve:
+  - El panel de Hook y el render final arrancan con los valores por defecto que definiste, en vez de heredar estilo de subtítulos.
+
 ### Ajustado: se quitó el texto superior sobre la vista previa del video en Clip Studio
 - Qué cambiamos:
   - En `dashboard/src/components/ClipStudioModal.jsx` se eliminó la línea de texto descriptiva que aparecía arriba del video en el panel de preview.
