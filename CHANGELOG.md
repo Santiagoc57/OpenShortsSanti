@@ -45,6 +45,13 @@
 - Para qué sirve:
   - El panel de Hook y el render final arrancan con los valores por defecto que definiste, en vez de heredar estilo de subtítulos.
 
+### Corregido: error de FFmpeg al aplicar/descargar por `fontsize=out_w*...` en Hook
+- Qué cambiamos:
+  - En `app.py` (`/api/recut`) se reemplazó `drawtext fontsize=out_w*...` por un tamaño en píxeles calculado en backend (`hook_font_px`) usando el ancho de salida real.
+  - Se mantiene el escalado relativo del hook, pero sin depender de variables no válidas para el parser de `drawtext`.
+- Para qué sirve:
+  - Evita el fallo `Undefined constant or missing '(' in 'out_w*...'` al usar `Aplicar` o `Aplicar y descargar`.
+
 ### Ajustado: se quitó el texto superior sobre la vista previa del video en Clip Studio
 - Qué cambiamos:
   - En `dashboard/src/components/ClipStudioModal.jsx` se eliminó la línea de texto descriptiva que aparecía arriba del video en el panel de preview.

@@ -6160,6 +6160,8 @@ async def recut_clip(req: RecutRequest):
                 hook_box_color = _normalize_hook_hex(hook_box_color, "#000000")
 
                 hook_font_scale = max(0.030, min(0.110, float(hook_font_size) / 780.0))
+                render_width_ref = max(320, int(_safe_float(out_w if out_w else in_w, 720)))
+                hook_font_px = max(16, min(160, int(round(render_width_ref * hook_font_scale))))
                 hook_border_width = max(0.0, min(4.0, hook_stroke_width * 0.45))
                 hook_box_alpha = (hook_box_opacity / 100.0) if hook_box_opacity > 0 else 0.68
                 hook_box_alpha = max(0.35, min(0.95, hook_box_alpha))
@@ -6198,7 +6200,7 @@ async def recut_clip(req: RecutRequest):
                 # Add text near the top for the requested start/end window.
                 hook_filter = (
                     f"drawtext=text='{safe_hook_text}'{font_param}:fontcolor=0x{hook_font_color.lstrip('#')}:"
-                    f"fontsize=out_w*{hook_font_scale:.5f}:"
+                    f"fontsize={hook_font_px}:"
                     f"borderw={hook_border_width:.2f}:bordercolor=0x{hook_stroke_color.lstrip('#')}:"
                     f"box=1:boxcolor=0x{hook_box_color.lstrip('#')}@{hook_box_alpha:.2f}:boxborderw=15:x=(w-text_w)/2:y=h*0.08:"
                     f"enable='between(t,{viral_hook_start:.3f},{viral_hook_end:.3f})'"
