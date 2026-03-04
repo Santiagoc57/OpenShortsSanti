@@ -1,32 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { X, FileText, Captions, Type, LayoutTemplate, Music2, Search, Sparkles, Loader2, Play, Pause, Pencil, SlidersHorizontal, ZoomOut, ZoomIn, Crosshair, Menu, Lightbulb, Download, Languages } from 'lucide-react';
+import { X, FileText, Captions, Type, LayoutTemplate, Music2, Search, Sparkles, Loader2, Play, Pause, Pencil, SlidersHorizontal, ZoomOut, ZoomIn, Crosshair, Menu, Lightbulb, Download, Languages, RotateCcw } from 'lucide-react';
 import { apiFetch, getApiUrl } from '../config';
 import SubtitleRenderer from './SubtitleRenderer';
 
 const CAPTION_PRESETS = [
-  {
-    id: 'karaoke_pro',
-    name: 'Karaoke Pro',
-    sample: 'TO GET\nSTARTED',
-    preview: {
-      bg: 'linear-gradient(145deg, #090f1d 0%, #111827 55%, #0b1020 100%)',
-      highlightColor: '#39FF14',
-      highlightWordIndex: 1
-    },
-    style: {
-      position: 'bottom',
-      fontSize: 50,
-      fontFamily: 'Anton',
-      fontColor: '#FFFFFF',
-      strokeColor: '#000000',
-      strokeWidth: 5,
-      bold: true,
-      boxColor: '#000000',
-      boxOpacity: 0,
-      animation: 'bounce'
-    },
-    karaokeMode: true
-  },
   {
     id: 'deep_diver',
     name: 'Deep Diver',
@@ -38,16 +15,39 @@ const CAPTION_PRESETS = [
     },
     style: {
       position: 'bottom',
-      fontSize: 50,
+      fontSize: 60,
       fontFamily: 'Montserrat',
       fontColor: '#FFFFFF',
       strokeColor: '#111827',
-      strokeWidth: 1,
+      strokeWidth: 0,
       bold: true,
       boxColor: '#111827',
       boxOpacity: 72,
       animation: 'slide'
     }
+  },
+  {
+    id: 'karaoke_pro',
+    name: 'Karaoke Pro',
+    sample: 'TO GET\nSTARTED',
+    preview: {
+      bg: 'linear-gradient(145deg, #090f1d 0%, #111827 55%, #0b1020 100%)',
+      highlightColor: '#39FF14',
+      highlightWordIndex: 1
+    },
+    style: {
+      position: 'bottom',
+      fontSize: 60,
+      fontFamily: 'Montserrat',
+      fontColor: '#FFFFFF',
+      strokeColor: '#000000',
+      strokeWidth: 0,
+      bold: true,
+      boxColor: '#000000',
+      boxOpacity: 0,
+      animation: 'bounce'
+    },
+    karaokeMode: true
   },
   {
     id: 'mozi_pop',
@@ -60,11 +60,11 @@ const CAPTION_PRESETS = [
     },
     style: {
       position: 'bottom',
-      fontSize: 50,
+      fontSize: 60,
       fontFamily: 'Archivo Black',
       fontColor: '#FFFFFF',
       strokeColor: '#0A0A0A',
-      strokeWidth: 5,
+      strokeWidth: 0,
       bold: true,
       boxColor: '#000000',
       boxOpacity: 0,
@@ -83,7 +83,7 @@ const CAPTION_PRESETS = [
     },
     style: {
       position: 'bottom',
-      fontSize: 50,
+      fontSize: 75,
       fontFamily: 'Bebas Neue',
       fontColor: '#FFFFFF',
       strokeColor: '#0A0A0A',
@@ -105,12 +105,12 @@ const CAPTION_PRESETS = [
       highlightWordIndex: 0
     },
     style: {
-      position: 'middle',
-      fontSize: 50,
+      position: 'bottom',
+      fontSize: 55,
       fontFamily: 'Oswald',
       fontColor: '#E0F2FE',
       strokeColor: '#0F172A',
-      strokeWidth: 2,
+      strokeWidth: 0,
       bold: true,
       boxColor: '#1D4ED8',
       boxOpacity: 78,
@@ -127,7 +127,7 @@ const CAPTION_PRESETS = [
       highlightWordIndex: 1
     },
     style: {
-      position: 'middle',
+      position: 'bottom',
       fontSize: 50,
       fontFamily: 'Montserrat',
       fontColor: '#111111',
@@ -150,11 +150,11 @@ const CAPTION_PRESETS = [
     },
     style: {
       position: 'bottom',
-      fontSize: 50,
+      fontSize: 60,
       fontFamily: 'Teko',
       fontColor: '#EAFB23',
       strokeColor: '#101010',
-      strokeWidth: 6,
+      strokeWidth: 0,
       bold: true,
       boxColor: '#000000',
       boxOpacity: 0,
@@ -504,14 +504,15 @@ const VIRAL_HOOK_DEFAULT_DURATION = 3.0;
 const VIRAL_HOOK_FONT_SIZE_MIN = 12;
 const VIRAL_HOOK_FONT_SIZE_MAX = 84;
 const DEFAULT_VIRAL_HOOK_STYLE = {
-  fontSize: 37,
-  fontFamily: 'Archivo Black',
+  fontSize: 60,
+  fontFamily: 'Montserrat',
   fontColor: '#FFFFFF',
-  strokeColor: '#000000',
+  strokeColor: '#111827',
   strokeWidth: 0,
   bold: true,
-  boxColor: '#000000',
-  boxOpacity: 0
+  boxColor: '#111827',
+  boxOpacity: 72,
+  lineSpacing: 0
 };
 const TIMELINE_ZOOM_MIN = 0.55;
 const TIMELINE_ZOOM_MAX = 2.2;
@@ -625,7 +626,7 @@ export default function ClipStudioModal({
   const [punctuationOn, setPunctuationOn] = useState(true);
   const [emojiOn, setEmojiOn] = useState(true);
   const [captionOffsetX, setCaptionOffsetX] = useState(clamp(Number(clip?.caption_offset_x || 0), -100, 100));
-  const [captionOffsetY, setCaptionOffsetY] = useState(clamp(Number(clip?.caption_offset_y || 0), -100, 100));
+  const [captionOffsetY, setCaptionOffsetY] = useState(clamp(Number(clip?.caption_offset_y ?? 10), -100, 100));
   const [isDraggingCaption, setIsDraggingCaption] = useState(false);
   const [captionCenterGuides, setCaptionCenterGuides] = useState({ x: false, y: false });
 
@@ -781,6 +782,7 @@ export default function ClipStudioModal({
   const [viralHookBold, setViralHookBold] = useState(() => resolveViralHookStyle(clip).bold);
   const [viralHookBoxColor, setViralHookBoxColor] = useState(() => resolveViralHookStyle(clip).boxColor);
   const [viralHookBoxOpacity, setViralHookBoxOpacity] = useState(() => resolveViralHookStyle(clip).boxOpacity);
+  const [viralHookLineSpacing, setViralHookLineSpacing] = useState(0);
 
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewCurrentTime, setPreviewCurrentTime] = useState(0);
@@ -1154,6 +1156,8 @@ export default function ClipStudioModal({
     setKaraokeMode(Boolean(preset.karaokeMode));
     setSubtitleAnimation(String(preset.style?.animation || 'none'));
     setSpeakerColorMode(Boolean(preset.style?.speakerColorMode));
+    // Sync viral hook to the same style automatically
+    applyViralHookPreset(presetId);
   };
 
   const applyViralHookPreset = (presetId) => {
@@ -1551,7 +1555,7 @@ export default function ClipStudioModal({
     }
 
     setCaptionOffsetX(clamp(Number(clip?.caption_offset_x || 0), -100, 100));
-    setCaptionOffsetY(clamp(Number(clip?.caption_offset_y || 0), -100, 100));
+    setCaptionOffsetY(clamp(Number(clip?.caption_offset_y ?? 10), -100, 100));
     loadTranscript();
     loadSrt();
   }, [
@@ -1973,7 +1977,8 @@ export default function ClipStudioModal({
           viral_hook_stroke_width: appliedViralHookStrokeWidth,
           viral_hook_bold: appliedViralHookBold,
           viral_hook_box_color: appliedViralHookBoxColor,
-          viral_hook_box_opacity: appliedViralHookBoxOpacity
+          viral_hook_box_opacity: appliedViralHookBoxOpacity,
+          viral_hook_line_spacing: Number(viralHookLineSpacing || 0)
         };
 
         const recutRes = await apiFetch('/api/recut', {
@@ -2146,6 +2151,7 @@ export default function ClipStudioModal({
           viral_hook_bold: appliedViralHookBold,
           viral_hook_box_color: appliedViralHookBoxColor,
           viral_hook_box_opacity: appliedViralHookBoxOpacity,
+          viral_hook_line_spacing: Number(viralHookLineSpacing || 0),
           ...(dubbingEnabled
             ? {
               dub_target_language: appliedDubTargetLanguage,
@@ -2630,13 +2636,33 @@ export default function ClipStudioModal({
             </button>
             <button
               type="button"
-              onClick={handleFastPreview}
-              disabled={isRenderingFastPreview || isApplying}
-              className="px-3 py-2 rounded-full border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-medium hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-60 inline-flex items-center gap-1.5"
-              title="Render rápido de 3s con el layout actual"
+              onClick={() => {
+                // Reset all settings to factory defaults
+                applyPreset(CAPTION_PRESETS[0].id);
+                setCaptionOffsetX(0);
+                setCaptionOffsetY(10);
+                setViralHookText('');
+                setViralHookEnabled(false);
+                setViralHookStart(0);
+                setViralHookDuration(VIRAL_HOOK_DEFAULT_DURATION);
+                setViralHookLineSpacing(0);
+                setLayoutZoom(1.0);
+                setLayoutOffsetX(0);
+                setLayoutOffsetY(0);
+                setLayoutFitMode('cover');
+                setLayoutMode('single');
+                setLayoutAutoSmart(false);
+                setEmojiOn(true);
+                setPunctuationOn(true);
+                setSpeakerColorMode(false);
+                setSavedPulse(false);
+                setSelectedPreset(CAPTION_PRESETS[0].id);
+              }}
+              className="px-3 py-2 rounded-full border border-amber-300 dark:border-amber-600 bg-white dark:bg-slate-800 text-amber-700 dark:text-amber-300 text-xs font-medium hover:bg-amber-50 dark:hover:bg-amber-900/20 inline-flex items-center gap-1.5"
+              title="Restaurar todos los ajustes a los valores por defecto"
             >
-              {isRenderingFastPreview ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
-              {isRenderingFastPreview ? 'Render...' : 'Preview rápido'}
+              <RotateCcw size={13} />
+              Reset
             </button>
             <button
               type="button"
@@ -2934,6 +2960,25 @@ export default function ClipStudioModal({
                           </button>
                         );
                       })}
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="text-xs font-semibold text-zinc-500 mb-2">Tamaño de fuente</p>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="range"
+                        min={12}
+                        max={84}
+                        step={1}
+                        value={fontSize}
+                        onChange={(e) => {
+                          setFontSize(Number(e.target.value));
+                          setSavedPulse(false);
+                        }}
+                        className="flex-1 accent-violet-500 h-1.5"
+                      />
+                      <span className="text-xs font-mono text-zinc-400 w-8 text-right">{fontSize}</span>
                     </div>
                   </div>
 
@@ -3281,28 +3326,80 @@ export default function ClipStudioModal({
 
                   <div className="space-y-3 p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/80">
                     <div className="flex flex-col gap-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <label className="text-sm font-medium text-slate-700 dark:text-slate-200 text-left">Preset de estilo</label>
-                        <span className="text-[11px] text-slate-500 dark:text-slate-400">Presets aplicados solo al hook</span>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        {CAPTION_PRESETS.map((preset) => (
-                          <button
-                            key={`viral-preset-${preset.id}`}
-                            type="button"
-                            onClick={() => {
-                              applyViralHookPreset(preset.id);
-                              setSavedPulse(false);
-                            }}
-                            className={`rounded-md border px-2 py-1.5 text-left text-xs font-medium transition-colors ${selectedViralHookPreset === preset.id
-                              ? 'border-violet-400 bg-violet-50 text-violet-700 dark:border-violet-500/70 dark:bg-violet-900/30 dark:text-violet-200'
-                              : 'border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/50'
-                              }`}
-                            title={`Aplicar preset ${preset.name} al estilo del hook`}
-                          >
-                            {preset.name}
-                          </button>
-                        ))}
+                      <p className="text-xs font-semibold text-zinc-500 mb-1">Preset de estilo</p>
+                      <div className="grid grid-cols-2 lg:grid-cols-3 gap-2">
+                        {CAPTION_PRESETS.map((preset) => {
+                          const previewBg = preset?.preview?.bg || 'linear-gradient(145deg, #111827 0%, #1f2937 100%)';
+                          const highlightColor = preset?.preview?.highlightColor || ACTIVE_WORD_COLOR;
+                          const highlightWordIndex = Number.isFinite(preset?.preview?.highlightWordIndex)
+                            ? Number(preset.preview.highlightWordIndex)
+                            : -1;
+                          let wordCounter = 0;
+                          const sampleLines = String(preset.sample || '').split('\n').filter(Boolean);
+                          const previewFontSize = Math.max(11, Math.min(18, Math.round((preset.style?.fontSize || 24) * 0.4)));
+                          const previewStroke = Math.max(0, Number(preset.style?.strokeWidth || 0) * 0.65);
+                          const sampleBoxColor = Number(preset.style?.boxOpacity || 0) > 0
+                            ? toRgba(preset.style?.boxColor || '#000000', Math.min(90, Number(preset.style?.boxOpacity || 0)))
+                            : 'transparent';
+                          return (
+                            <button
+                              key={`viral-preset-${preset.id}`}
+                              type="button"
+                              onClick={() => {
+                                applyViralHookPreset(preset.id);
+                                setSavedPulse(false);
+                              }}
+                              className={`rounded-xl border p-2 text-left transition-colors ${selectedViralHookPreset === preset.id
+                                ? 'border-violet-400 bg-violet-50 dark:bg-violet-500/10 shadow-[0_0_0_1px_rgba(139,92,246,0.2)]'
+                                : 'border-black/10 dark:border-white/10 bg-white/70 dark:bg-white/5 hover:bg-white dark:hover:bg-white/10'
+                                }`}
+                              title={`Aplicar preset ${preset.name} al hook`}
+                            >
+                              <div
+                                className="relative rounded-lg h-[72px] overflow-hidden border border-white/10"
+                                style={{ background: previewBg }}
+                              >
+                                <div className="absolute inset-0 bg-[radial-gradient(circle_at_25%_20%,rgba(255,255,255,0.12),transparent_45%)]" />
+                                <div className="absolute inset-x-2 top-1.5 text-center">
+                                  <span
+                                    className="inline-block rounded-md px-1.5 py-0.5 leading-tight"
+                                    style={{
+                                      fontFamily: preset.style?.fontFamily || 'Montserrat',
+                                      fontSize: `${previewFontSize}px`,
+                                      fontWeight: preset.style?.bold ? 700 : 500,
+                                      color: preset.style?.fontColor || '#FFFFFF',
+                                      textShadow: `0 0 ${previewStroke}px ${preset.style?.strokeColor || '#000000'}`,
+                                      backgroundColor: sampleBoxColor
+                                    }}
+                                  >
+                                    {sampleLines.map((line, lineIdx) => {
+                                      const words = String(line).split(/\s+/).filter(Boolean);
+                                      return (
+                                        <div key={`viral-${preset.id}-sample-line-${lineIdx}`}>
+                                          {words.map((word, idx) => {
+                                            const currentWordIndex = wordCounter;
+                                            wordCounter += 1;
+                                            const isHighlight = currentWordIndex === highlightWordIndex;
+                                            return (
+                                              <span
+                                                key={`viral-${preset.id}-sample-word-${lineIdx}-${idx}`}
+                                                style={isHighlight ? { color: highlightColor } : undefined}
+                                              >
+                                                {word}
+                                                {idx < words.length - 1 ? ' ' : ''}
+                                              </span>
+                                            );
+                                          })}
+                                        </div>
+                                      );
+                                    })}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="mt-1 text-[11px] font-semibold text-zinc-700 dark:text-zinc-100 truncate">{preset.name}</div>
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
 
@@ -3394,6 +3491,25 @@ export default function ClipStudioModal({
                         onChange={(e) => {
                           setViralHookFontSize(clamp(Number(e.target.value), VIRAL_HOOK_FONT_SIZE_MIN, VIRAL_HOOK_FONT_SIZE_MAX));
                           setSelectedViralHookPreset('');
+                          setSavedPulse(false);
+                        }}
+                        className="w-full accent-violet-600"
+                      />
+                    </div>
+
+                    <div className="flex flex-col gap-2">
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200 text-left">
+                        Interlineado: <span className="text-violet-600 dark:text-violet-400">{viralHookLineSpacing}</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="-10"
+                        max="20"
+                        step="1"
+                        value={viralHookLineSpacing}
+                        disabled={!viralHookEnabled}
+                        onChange={(e) => {
+                          setViralHookLineSpacing(Number(e.target.value));
                           setSavedPulse(false);
                         }}
                         className="w-full accent-violet-600"
@@ -4193,12 +4309,13 @@ export default function ClipStudioModal({
                     <div className="pointer-events-none absolute left-1/2 top-[8%] -translate-x-1/2 w-[86%] z-[4] flex justify-center">
                       <div className="max-w-full rounded-md border border-white/20 px-3 py-2 shadow-lg" style={{ backgroundColor: previewViralHookBoxBg }}>
                         <p
-                          className="text-center leading-snug break-words"
+                          className="text-center break-words"
                           style={{
                             color: viralHookFontColor,
-                            fontFamily: String(viralHookFontFamily || 'Anton'),
+                            fontFamily: String(viralHookFontFamily || 'Montserrat'),
                             fontWeight: viralHookBold ? 700 : 600,
                             fontSize: `${previewViralHookFontSize}px`,
+                            lineHeight: `${1.2 + (Number(viralHookLineSpacing || 0) * 0.02)}`,
                             WebkitTextStroke: `${previewViralHookStrokeWidth}px ${viralHookStrokeColor}`
                           }}
                         >

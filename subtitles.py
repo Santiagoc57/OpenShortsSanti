@@ -564,10 +564,10 @@ def _caption_anchor_point(alignment_str: str, offset_x: float = 0.0, offset_y: f
         base_y_percent = 80.0
 
     # UI offsets are percentages of the container. 
-    # CSS: left: calc(50% + {offset_x}%)
-    #      top: calc({base_y}% + {offset_y}%)
-    final_x_percent = 50.0 + _clamp_percent(offset_x)
-    final_y_percent = base_y_percent + _clamp_percent(offset_y)
+    # CSS: left: calc(50% + {offset_x}%) where max offset is 50% visually
+    # Our offset_x comes in -100 to 100 range, representing relative distance from center to edge.
+    final_x_percent = 50.0 + (_clamp_percent(offset_x) * 0.5)
+    final_y_percent = base_y_percent + (_clamp_percent(offset_y) * 0.5)
 
     # Convert to 1080x1920 canvas
     x = int(round((final_x_percent / 100.0) * 1080.0))
@@ -607,8 +607,8 @@ def generate_styled_ass_from_srt(
 
     ass_alignment = _ass_alignment_from_position(alignment)
     # The frontend uses a narrow container (~360px) but the backend renders at 1080px.
-    # To match the relative visual size in the React UI where font looks larger, we scale by 3.0 (1080/360).
-    final_fontsize = max(10, int(float(font_size) * 3.0))
+    # To match the relative visual size in the React UI where font looks larger, we scale by 4.5 (1080/360 * libass_factor).
+    final_fontsize = max(10, int(float(font_size) * 4.5))
     safe_font_name = _sanitize_font_name(font_name)
     box_alpha = int(255 * (1 - max(0, min(100, int(box_opacity))) / 100))
     primary = _hex_to_ass_color(font_color, alpha=0)
@@ -706,8 +706,8 @@ def generate_karaoke_ass_from_srt(
         return False
 
     ass_alignment = _ass_alignment_from_position(alignment)
-    # Equivalent 3.0x scaling for karaoke to match React UI (~360px -> 1080px).
-    final_fontsize = max(12, int(float(font_size) * 3.0))
+    # Equivalent 4.2x scaling for karaoke to match React UI while leaving room for pop effects.
+    final_fontsize = max(12, int(float(font_size) * 4.2))
     safe_font_name = _sanitize_font_name(font_name)
     box_alpha = int(255 * (1 - max(0, min(100, int(box_opacity))) / 100))
     primary = _hex_to_ass_color(font_color, alpha=0)

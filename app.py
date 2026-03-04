@@ -678,8 +678,17 @@ def _build_manual_layout_ops_for_target(
             max_crop_x = stage_w - actual_crop_w
             max_crop_y = stage_h - actual_crop_h
             
-            crop_x = int(round((max_crop_x / 2.0) + (ox * (max_crop_x / 2.0))))
-            crop_y = int(round((max_crop_y / 2.0) + (oy * (max_crop_y / 2.0))))
+            P_x = max(0.0, min(1.0, 0.5 + ox_raw))
+            P_y = max(0.0, min(1.0, 0.5 + oy_raw))
+            
+            w_cap1 = actual_crop_w * z
+            h_cap1 = actual_crop_h * z
+            
+            raw_crop_x = P_x * (stage_w - w_cap1) + 0.5 * actual_crop_w * (z - 1) * (1 + ox_raw)
+            raw_crop_y = P_y * (stage_h - h_cap1) + 0.5 * actual_crop_h * (z - 1) * (1 + oy_raw)
+            
+            crop_x = int(round(raw_crop_x))
+            crop_y = int(round(raw_crop_y))
             
             # Ensure crop doesn't go out of bounds
             crop_x = max(0, min(max_crop_x, crop_x))
@@ -703,11 +712,12 @@ def _build_manual_layout_ops_for_target(
             # If we crop AND pad (e.g. weird aspect ratios), offset shouldn't double dip, 
             # but usually it's one or the other per axis.
             # When padding, panning moves the image within the black box.
-            pad_x = int(round((max_pad_x / 2.0) + (ox * (max_pad_x / 2.0))))
-            pad_y = int(round((max_pad_y / 2.0) + (oy * (max_pad_y / 2.0))))
+            P_x = max(0.0, min(1.0, 0.5 + ox_raw))
+            P_y = max(0.0, min(1.0, 0.5 + oy_raw))
             
-            pad_x = max(0, min(max_pad_x, pad_x))
-            pad_y = max(0, min(max_pad_y, pad_y))
+            # When padding, panning moves the image within the black box.
+            pad_x = int(round(P_x * max_pad_x))
+            pad_y = int(round(P_y * max_pad_y))
             
             filters.append(f"pad={out_w}:{out_h}:{pad_x}:{pad_y}:black")
 
@@ -737,8 +747,14 @@ def _build_manual_layout_ops_for_target(
         f"scale={fg_scaled_w}:{fg_scaled_h}"
     ]
     # Center or offset FG
-    fg_x = f"(W-w)/2+{ox*out_w/2}"
-    fg_y = f"(H-h)/2+{oy*out_h/2}"
+    # Center or offset FG mapping exactly CSS object-position and transform behaviors
+    P_x = max(0.0, min(1.0, 0.5 + ox_raw))
+    P_y = max(0.0, min(1.0, 0.5 + oy_raw))
+    tx_factor = ox_raw * (z - 1) / 2.0
+    ty_factor = oy_raw * (z - 1) / 2.0
+    
+    fg_x = f"W/2 + {z}*({P_x}*(W - w/{z}) - W/2) - {tx_factor}*W"
+    fg_y = f"H/2 + {z}*({P_y}*(H - h/{z}) - H/2) - {ty_factor}*H"
     
     # Combine
     in_prefix = f"[{input_label}]" if input_label else ""
@@ -5767,6 +5783,7 @@ class RecutRequest(BaseModel):
     viral_hook_bold: Optional[bool] = None
     viral_hook_box_color: Optional[str] = None
     viral_hook_box_opacity: Optional[int] = None
+    viral_hook_line_spacing: Optional[int] = None
 
 def _parse_form_bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -5842,21 +5859,63 @@ async def recut_clip(req: RecutRequest):
         source_anchor_start = max(0.0, _safe_float(metadata_clips[req.clip_index].get("start", 0.0), 0.0))
 
     uncut_path: Optional[str] = None
+    # Determine if user explicitly adjusted layout parameters
+    user_adjusted_layout = (
+        abs(offset_x) > 0.01 or abs(offset_y) > 0.01 or abs(zoom - 1.0) > 0.01
+        or layout_mode == "split" or auto_smart_requested
+    )
     if json_files:
         base_name = os.path.basename(json_files[0]).replace("_metadata.json", "")
         uncut_name = f"{base_name}_clip_{req.clip_index + 1}_uncut.mp4"
         candidate_uncut = os.path.join(output_dir, uncut_name)
         if os.path.exists(candidate_uncut):
             uncut_path = candidate_uncut
-            source_to_cut = uncut_path
-            source_timebase = "clip_relative"
-            source_label = "uncut"
-            print(f"Recutting from uncut variant: {uncut_path}")
+            # Check if uncut file's aspect ratio matches the target
+            # If it doesn't (e.g., 854x480 landscape for 9:16 target) AND the user
+            # hasn't adjusted layout, skip uncut to preserve face-centered clip instead
+            uncut_w, uncut_h = _probe_video_dimensions(candidate_uncut)
+            target_ratio = {"9:16": 9.0/16.0, "16:9": 16.0/9.0}.get(aspect_ratio, 9.0/16.0)
+            uncut_ratio = (uncut_w / max(1, uncut_h))
+            ratio_matches = abs(uncut_ratio - target_ratio) < 0.1  # Close enough to target AR
+            
+            if ratio_matches or user_adjusted_layout:
+                source_to_cut = uncut_path
+                source_timebase = "clip_relative"
+                source_label = "uncut"
+                print(f"Recutting from uncut variant: {uncut_path}")
+            else:
+                print(f"Skipping uncut ({uncut_w}x{uncut_h}, ratio={uncut_ratio:.3f}) — doesn't match target {aspect_ratio} (ratio={target_ratio:.3f}) and user hasn't adjusted layout. Will prefer face-centered clip.")
+
+
+    # user_adjusted_layout already computed above
 
     if not source_to_cut and has_original_input:
-        source_to_cut = str(input_path)
-        source_timebase = "absolute"
-        source_label = "original_input"
+        if user_adjusted_layout:
+            # User explicitly changed layout — use original source for full control
+            source_to_cut = str(input_path)
+            source_timebase = "absolute"
+            source_label = "original_input"
+        else:
+            # No manual adjustments — try to use existing clip first (preserves face centering)
+            try:
+                result_clips = ((job.get("result") or {}).get("clips") or []) if isinstance(job, dict) else []
+                clip_payload = result_clips[req.clip_index] if 0 <= req.clip_index < len(result_clips) else {}
+                if isinstance(clip_payload, dict):
+                    clip_filename = _safe_input_filename(clip_payload.get("video_url", ""))
+                    clip_file_path = os.path.join(output_dir, clip_filename) if clip_filename else ""
+                    if clip_file_path and os.path.exists(clip_file_path):
+                        source_to_cut = clip_file_path
+                        source_timebase = "clip_relative"
+                        source_label = "current_clip_face_centered"
+                        source_anchor_start = max(0.0, _safe_float(clip_payload.get("start", source_anchor_start), source_anchor_start))
+                        print(f"Using face-centered clip as recut source (no manual layout adjustments): {clip_file_path}")
+            except Exception:
+                pass
+            # Fall back to original if clip not found
+            if not source_to_cut:
+                source_to_cut = str(input_path)
+                source_timebase = "absolute"
+                source_label = "original_input"
 
     if not source_to_cut:
         try:
@@ -6105,6 +6164,7 @@ async def recut_clip(req: RecutRequest):
                         print(f"Error generating subtitles during recut: {e}")
 
         try:
+
             if not auto_smart_applied:
                 if layout_mode == "split":
                     filter_complex, out_w, out_h, out_label = _build_split_layout_filter_complex(
@@ -6121,6 +6181,19 @@ async def recut_clip(req: RecutRequest):
                         fit_mode=fit_mode, zoom=zoom, offset_x=offset_x, offset_y=offset_y
                     )
                     out_pad = "[out_v]"
+
+            # Upscale to social media quality if output is too small
+            # TikTok/Reels/Shorts standard is 1080x1920. Minimum acceptable is 720px wide.
+            MIN_OUTPUT_WIDTH = 720
+            if out_w > 0 and out_w < MIN_OUTPUT_WIDTH:
+                upscale_factor = MIN_OUTPUT_WIDTH / out_w
+                new_w = _even_int(out_w * upscale_factor)
+                new_h = _even_int(out_h * upscale_factor)
+                # Insert scale before the output label
+                filter_complex = filter_complex.replace(
+                    f"{out_pad}", f",scale={new_w}:{new_h}:flags=lanczos{out_pad}"
+                )
+                out_w, out_h = new_w, new_h
                     
             if subtitle_filter:
                 filter_complex = f"{filter_complex};{out_pad}{subtitle_filter}[final_out]"
@@ -6159,12 +6232,37 @@ async def recut_clip(req: RecutRequest):
                 hook_stroke_color = _normalize_hook_hex(hook_stroke_color, "#000000")
                 hook_box_color = _normalize_hook_hex(hook_box_color, "#000000")
 
-                hook_font_scale = max(0.030, min(0.110, float(hook_font_size) / 780.0))
-                render_width_ref = max(320, int(_safe_float(out_w if out_w else in_w, 720)))
-                hook_font_px = max(16, min(160, int(round(render_width_ref * hook_font_scale))))
-                hook_border_width = max(0.0, min(4.0, hook_stroke_width * 0.45))
+                hook_font_scale = max(0.030, (float(hook_font_size) * 0.62) / 360.0)
+                render_width_ref = max(1, int(_safe_float(out_w if out_w else in_w, 720)))
+                hook_font_px = max(12, int(round(render_width_ref * hook_font_scale)))
+                hook_border_width = max(0.0, min(8.0, hook_stroke_width * 0.45))
                 hook_box_alpha = (hook_box_opacity / 100.0) if hook_box_opacity > 0 else 0.68
                 hook_box_alpha = max(0.35, min(0.95, hook_box_alpha))
+                
+                # Keep emojis in the text — use the original text for rendering.
+                # On macOS, Apple Color Emoji font can render them.
+                # On other platforms, emojis may render as boxes but we prefer keeping them.
+                hook_clean_text = viral_hook_text.strip()
+
+                # Wrap viral hook text using textwrap to prevent overflow
+                # Account for box padding (boxborderw=15 on each side)
+                import textwrap
+                effective_text_width = max(100, render_width_ref - 40)
+                avg_char_width = max(1, hook_font_px * 0.58)
+                max_chars_per_line = max(8, int(effective_text_width / avg_char_width))
+                wrapped_lines = textwrap.wrap(hook_clean_text, width=max_chars_per_line)
+                
+                # Attempt to artificially center-align by adding spaces
+                if wrapped_lines:
+                    max_len = max(len(line) for line in wrapped_lines)
+                    wrapped_lines = [line.center(max_len) for line in wrapped_lines]
+                    
+                wrapped_hook_text = "\n".join(wrapped_lines)
+                
+                # Use a text file to handle newlines easily in ffmpeg drawtext
+                hook_text_file = os.path.join(output_dir, f"hook_text_{req.clip_index}_{int(time.time())}_{uuid.uuid4().hex[:5]}.txt")
+                with open(hook_text_file, "w", encoding="utf-8") as f:
+                    f.write(wrapped_hook_text)
 
                 resolved_hook_font = _sanitize_font_name(hook_font_family, fallback="Anton")
                 fonts_dir = os.path.join(os.path.dirname(__file__), "dashboard", "public", "fonts")
@@ -6198,15 +6296,18 @@ async def recut_clip(req: RecutRequest):
                     font_param = f":fontfile='{safe_font_file}'"
                 
                 # Add text near the top for the requested start/end window.
+                safe_text_file = hook_text_file.replace('\\', '/').replace(':', '\\:')
+                hook_line_spacing = int(req.viral_hook_line_spacing if req.viral_hook_line_spacing is not None else 0)
                 hook_filter = (
-                    f"drawtext=text='{safe_hook_text}'{font_param}:fontcolor=0x{hook_font_color.lstrip('#')}:"
-                    f"fontsize={hook_font_px}:"
+                    f"drawtext=textfile='{safe_text_file}'{font_param}:fontcolor=0x{hook_font_color.lstrip('#')}:"
+                    f"fontsize={hook_font_px}:line_spacing={hook_line_spacing}:"
                     f"borderw={hook_border_width:.2f}:bordercolor=0x{hook_stroke_color.lstrip('#')}:"
                     f"box=1:boxcolor=0x{hook_box_color.lstrip('#')}@{hook_box_alpha:.2f}:boxborderw=15:x=(w-text_w)/2:y=h*0.08:"
                     f"enable='between(t,{viral_hook_start:.3f},{viral_hook_end:.3f})'"
                 )
                 filter_complex = f"{filter_complex};{out_pad}{hook_filter}[hook_out]"
                 out_pad = "[hook_out]"
+
 
             recut_cmd = [
                 "ffmpeg", "-y",
@@ -6227,6 +6328,11 @@ async def recut_clip(req: RecutRequest):
             if subtitle_path and os.path.exists(subtitle_path):
                 try:
                     os.remove(subtitle_path)
+                except Exception:
+                    pass
+            if 'hook_text_file' in locals() and os.path.exists(hook_text_file):
+                try:
+                    os.remove(hook_text_file)
                 except Exception:
                     pass
     finally:
