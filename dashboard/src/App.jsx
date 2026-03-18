@@ -300,8 +300,26 @@ function App() {
     }
   };
 
-  const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
-  const [elevenLabsKey, setElevenLabsKey] = useState(localStorage.getItem('elevenlabs_key') || '');
+  // Seguridad: API keys sensibles — sessionStorage como primario (limpia al cerrar el tab),
+  // con localStorage cifrado como respaldo para conveniencia del usuario.
+  const _loadSensitiveKey = (sessionKey, localKey) => {
+    const fromSession = sessionStorage.getItem(sessionKey);
+    if (fromSession) return fromSession;
+    const fromLocal = localStorage.getItem(localKey);
+    return fromLocal ? decrypt(fromLocal) : '';
+  };
+  const _saveSensitiveKey = (sessionKey, localKey, value) => {
+    if (value) {
+      sessionStorage.setItem(sessionKey, value);
+      localStorage.setItem(localKey, encrypt(value)); // cifrado XOR como respaldo
+    } else {
+      sessionStorage.removeItem(sessionKey);
+      localStorage.removeItem(localKey);
+    }
+  };
+
+  const [apiKey, setApiKey] = useState(() => _loadSensitiveKey('gemini_key_session', 'gemini_key_enc'));
+  const [elevenLabsKey, setElevenLabsKey] = useState(() => _loadSensitiveKey('elevenlabs_key_session', 'elevenlabs_key_enc'));
   const [showSettings, setShowSettings] = useState(false);
   const [huggingfaceToken, setHuggingfaceToken] = useState(localStorage.getItem('hf_token') || '');
   // Toast notification system
@@ -513,13 +531,14 @@ function App() {
   };
 
   useEffect(() => {
-    // Encrypt Gemini Key too for consistency if desired, but user asked specifically about Social integration not saving well.
-    // For now keeping gemini plain for compatibility unless requested.
-    if (apiKey) localStorage.setItem('gemini_key', apiKey);
+    _saveSensitiveKey('gemini_key_session', 'gemini_key_enc', apiKey);
+    // Migration: remove old plaintext key if present
+    if (localStorage.getItem('gemini_key')) localStorage.removeItem('gemini_key');
   }, [apiKey]);
 
   useEffect(() => {
-    if (elevenLabsKey) localStorage.setItem('elevenlabs_key', elevenLabsKey);
+    _saveSensitiveKey('elevenlabs_key_session', 'elevenlabs_key_enc', elevenLabsKey);
+    if (localStorage.getItem('elevenlabs_key')) localStorage.removeItem('elevenlabs_key');
   }, [elevenLabsKey]);
 
   useEffect(() => {
@@ -742,19 +761,38 @@ function App() {
   };
 
   useEffect(() => {
-    let interval;
-    if ((status === 'processing' || status === 'completed') && jobId && !isPollingPaused) {
-      interval = setInterval(async () => {
-        try {
-          const data = await pollJob(jobId);
-          if (import.meta.env.DEV) console.log('Job status:', data);
-          applyPolledJobData(jobId, data);
-        } catch (e) {
-          console.error("Polling error", e);
-        }
-      }, 2000);
-    }
-    return () => clearInterval(interval);
+    if (!(status === 'processing' || status === 'completed') || !jobId || isPollingPaused) return;
+
+    let timeoutId;
+    let delay = 2000;          // Empieza en 2s
+    const MAX_DELAY = 10000;   // Máximo 10s
+    const RAMP_AFTER_MS = 30000; // Sube el intervalo después de 30s en proceso
+    const startTs = Date.now();
+    let stopped = false;
+
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const data = await pollJob(jobId);
+        if (import.meta.env.DEV) console.log('Job status:', data);
+        applyPolledJobData(jobId, data);
+      } catch (e) {
+        console.error('Polling error', e);
+      }
+      if (stopped) return;
+      // Backoff: si llevamos más de 30s, subimos el intervalo gradualmente hasta 10s
+      const elapsed = Date.now() - startTs;
+      if (elapsed > RAMP_AFTER_MS) {
+        delay = Math.min(MAX_DELAY, delay * 1.4);
+      }
+      timeoutId = setTimeout(tick, delay);
+    };
+
+    timeoutId = setTimeout(tick, delay);
+    return () => {
+      stopped = true;
+      clearTimeout(timeoutId);
+    };
   }, [status, jobId, isPollingPaused]);
 
 
