@@ -304,6 +304,13 @@ function App() {
   const [elevenLabsKey, setElevenLabsKey] = useState(localStorage.getItem('elevenlabs_key') || '');
   const [showSettings, setShowSettings] = useState(false);
   const [huggingfaceToken, setHuggingfaceToken] = useState(localStorage.getItem('hf_token') || '');
+  // Toast notification system
+  const [toasts, setToasts] = useState([]);
+  const showToast = useCallback((msg, type = 'info') => {
+    const id = Date.now() + Math.random();
+    setToasts((prev) => [...prev.slice(-4), { id, msg, type }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4500);
+  }, []);
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
@@ -696,6 +703,7 @@ function App() {
       return {
         ...project,
         status: normalizedStatus,
+        language: String(data?.result?.language || project?.language || 'auto').trim().toLowerCase() || 'auto',
         clip_count_actual: clips.length || project.clip_count_actual || null,
         ratio: firstClip?.aspect_ratio || project.ratio || '9:16',
         thumbnail_url: firstClip?.thumbnail_url || project.thumbnail_url || null,
@@ -739,7 +747,7 @@ function App() {
       interval = setInterval(async () => {
         try {
           const data = await pollJob(jobId);
-          console.log("Job status:", data);
+          if (import.meta.env.DEV) console.log('Job status:', data);
           applyPolledJobData(jobId, data);
         } catch (e) {
           console.error("Polling error", e);
@@ -765,10 +773,10 @@ function App() {
           setUploadUserId(data.profiles[0].username);
         }
       } else {
-        alert("No se encontraron perfiles para esta API Key.");
+        showToast('No se encontraron perfiles para esta API Key.', 'warning');
       }
     } catch (e) {
-      alert("Error consultando perfiles de usuario. Revisa la API Key.");
+      showToast('Error consultando perfiles. Revisa la API Key.', 'error');
       console.error(e);
     }
   };
@@ -797,12 +805,16 @@ function App() {
 
     const outputMode = normalizeOutputMode(data?.aspectRatio);
     const generationMode = String(data?.generation_mode || '').trim().toLowerCase() === 'trailer' ? 'trailer' : 'clips';
+    const projectLanguage = String(data?.language || 'auto').trim().toLowerCase() || 'auto';
+    const projectDubbingTargetLanguage = String(data?.dubbingTargetLanguage || 'es').trim().toLowerCase() || 'es';
     const projectDraft = {
       title: projectTitle,
       source_kind: sourceKind,
       source_label: sourceLabel,
       video_type: generationMode === 'trailer' ? 'Super trailer' : projectVideoTypeLabel(data?.contentPreset),
       ratio: outputMode,
+      language: projectLanguage,
+      dubbing_target_language: projectDubbingTargetLanguage,
       clip_count_target: Number.isFinite(data?.clipCount) ? data.clipCount : null,
       created_at: createdAt.toISOString(),
       expires_at: expiresAt.toISOString()
@@ -1273,7 +1285,7 @@ function App() {
     const candidatePool = batchScope === 'global' ? sortedClips : visibleClips;
     if (!jobId || candidatePool.length === 0) return;
     if (!uploadPostKey || !uploadUserId) {
-      alert("Configura Upload-Post API Key y perfil de usuario en Configuración para usar cola batch.");
+      showToast('Configura Upload-Post API Key y perfil de usuario en Configuración para usar cola batch.', 'warning');
       return;
     }
 
@@ -1874,9 +1886,9 @@ function App() {
     }
 
     if (purgeReport?.skipped_active > 0) {
-      window.alert(`Se eliminaron ${purgeReport.removed_jobs || 0} proyectos. ${purgeReport.skipped_active} seguían en proceso y no se borraron.`);
+      showToast(`Se eliminaron ${purgeReport.removed_jobs || 0} proyectos. ${purgeReport.skipped_active} seguían en proceso y no se borraron.`, 'warning');
     } else if (purgeError) {
-      window.alert(`La lista local se limpió, pero el backend no confirmó borrado total: ${purgeError}`);
+      showToast(`Lista local limpiada, pero el backend no confirmó borrado total: ${purgeError}`, 'error');
     }
   };
 
@@ -1888,7 +1900,7 @@ function App() {
       || type.startsWith('audio/')
       || /\.(mp4|mov|m4a|mp3|wav|mkv|webm)$/i.test(name);
     if (!looksLikeMedia) {
-      window.alert('Archivo no compatible. Usa video/audio (MP4, MOV, MP3, WAV, M4A, MKV, WEBM).');
+      showToast('Archivo no compatible. Usa video/audio (MP4, MOV, MP3, WAV, M4A, MKV, WEBM).', 'error');
       return;
     }
     setHomePrefillFile({ file, id: Date.now() });
@@ -1934,6 +1946,13 @@ function App() {
 
   const openClipStudio = useCallback(({ clip, clipIndex, currentVideoUrl }) => {
     if (!jobId || !clip) return;
+    const projectLanguage = String(results?.language || processingMedia?.language || 'auto').trim().toLowerCase() || 'auto';
+    const defaultDubbingTargetLanguage = String(
+      processingMedia?.dubbingTargetLanguage
+      || processingMedia?.dubbing_target_language
+      || clip?.dub_target_language
+      || (projectLanguage !== 'auto' ? projectLanguage : 'es')
+    ).trim().toLowerCase() || 'es';
     pollingPauseBeforeStudioRef.current = Boolean(isPollingPaused);
     setIsPollingPaused(true);
     setFocusedClipIndex(null);
@@ -1943,9 +1962,11 @@ function App() {
       jobId,
       clip,
       clipIndex: Number.isFinite(clipIndex) ? clipIndex : Number(clip?.clip_index || 0),
-      currentVideoUrl: currentVideoUrl || getApiUrl(clip?.video_url || '')
+      currentVideoUrl: currentVideoUrl || getApiUrl(clip?.video_url || ''),
+      projectLanguage,
+      defaultDubbingTargetLanguage
     });
-  }, [jobId, isPollingPaused]);
+  }, [jobId, isPollingPaused, processingMedia?.dubbingTargetLanguage, processingMedia?.dubbing_target_language, processingMedia?.language, results?.language]);
 
   const closeClipStudio = useCallback((options = {}) => {
     const { restoreFocus = true } = options;
@@ -1993,6 +2014,7 @@ function App() {
   const handleStudioApplied = useCallback(({ newVideoUrl, clipPatch }) => {
     if (!studioContext) return;
     const targetClipIndex = Number(studioContext.clipIndex);
+    const nextDubbingTargetLanguage = String(clipPatch?.dub_target_language || '').trim().toLowerCase();
     if (newVideoUrl || (clipPatch && typeof clipPatch === 'object')) {
       setResults((prev) => {
         if (!prev || !Array.isArray(prev.clips)) return prev;
@@ -2009,10 +2031,28 @@ function App() {
         };
       });
     }
+    if (nextDubbingTargetLanguage) {
+      setProcessingMedia((prev) => (
+        prev && typeof prev === 'object'
+          ? { ...prev, dubbingTargetLanguage: nextDubbingTargetLanguage }
+          : prev
+      ));
+    }
     if (newVideoUrl) {
       setProjects((prev) => prev.map((project) => (
         project.job_id === studioContext.jobId
-          ? { ...project, preview_video_url: newVideoUrl, updated_at: new Date().toISOString() }
+          ? {
+            ...project,
+            ...(nextDubbingTargetLanguage ? { dubbing_target_language: nextDubbingTargetLanguage } : {}),
+            preview_video_url: newVideoUrl,
+            updated_at: new Date().toISOString()
+          }
+          : project
+      )));
+    } else if (nextDubbingTargetLanguage) {
+      setProjects((prev) => prev.map((project) => (
+        project.job_id === studioContext.jobId
+          ? { ...project, dubbing_target_language: nextDubbingTargetLanguage, updated_at: new Date().toISOString() }
           : project
       )));
     }
@@ -2034,7 +2074,9 @@ function App() {
     setLogs(['Cargando proyecto guardado...']);
     setProcessingMedia({
       aspectRatio: normalizeOutputMode(project?.ratio),
-      contentPreset: project?.video_type || null
+      contentPreset: project?.video_type || null,
+      language: String(project?.language || 'auto').trim().toLowerCase() || 'auto',
+      dubbingTargetLanguage: String(project?.dubbing_target_language || 'es').trim().toLowerCase() || 'es'
     });
     try {
       const data = await pollJob(project.job_id);
@@ -2974,6 +3016,8 @@ function App() {
                 clipIndex={studioContext.clipIndex}
                 clip={studioContext.clip}
                 currentVideoUrl={studioContext.currentVideoUrl}
+                projectLanguage={studioContext.projectLanguage}
+                defaultDubbingTargetLanguage={studioContext.defaultDubbingTargetLanguage}
                 onClipPatched={handleStudioClipPatched}
                 onApplied={handleStudioApplied}
                 fontCatalog={captionFontOptions}
@@ -3954,6 +3998,33 @@ function App() {
 
         </div>
       </main>
+
+      {/* === Toast Notification Container === */}
+      {toasts.length > 0 && (
+        <div className="fixed bottom-6 right-6 z-[9999] flex flex-col gap-2 items-end" aria-live="polite">
+          {toasts.map((t) => {
+            const colors = {
+              error: 'bg-red-600 border-red-500',
+              warning: 'bg-amber-500 border-amber-400',
+              success: 'bg-emerald-600 border-emerald-500',
+              info: 'bg-slate-800 border-slate-600',
+            };
+            return (
+              <div
+                key={t.id}
+                className={`flex items-start gap-3 px-4 py-3 rounded-xl border text-white text-sm font-medium shadow-2xl max-w-sm animate-modal-in ${colors[t.type] || colors.info}`}
+              >
+                <span className="leading-snug">{t.msg}</span>
+                <button
+                  onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))}
+                  className="text-white/70 hover:text-white ml-1 shrink-0 text-base leading-none"
+                  aria-label="Cerrar"
+                >×</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -36,8 +36,6 @@ from autocrop import (
     normalize_to_cfr,
     _DummyTime
 )
-import numpy as np
-from tqdm import tqdm
 import yt_dlp
 import mediapipe as mp
 # import whisper (replaced by faster_whisper inside function)
@@ -775,101 +773,35 @@ def postprocess_shorts_with_transcript(
     }
     return out
 
-# Load the YOLO model once (Keep for backup or scene analysis if needed)
-model = YOLO('yolov8n.pt')
+# --- YOLO + MediaPipe: lazy-loaded singletons ---
+# No se cargan al importar el módulo: reduce el arranque ~3-5s en CPU.
+_yolo_model = None
+_mp_face_detection = None
 
-# --- MediaPipe Setup ---
-# Use standard Face Detection (BlazeFace) for speed
-mp_face_detection = mp.solutions.face_detection
-face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+def _get_yolo_model():
+    global _yolo_model
+    if _yolo_model is None:
+        _yolo_model = YOLO('yolov8n.pt')
+    return _yolo_model
 
-class SmoothedCameraman:
-    """
-    Handles smooth camera movement.
-    Simplified Logic: "Heavy Tripod"
-    Only moves if the subject leaves the center safe zone.
-    Moves slowly and linearly.
-    """
-    def __init__(self, output_width, output_height, video_width, video_height, aspect_ratio=ASPECT_RATIO_PRESETS[DEFAULT_ASPECT_RATIO]):
-        self.output_width = output_width
-        self.output_height = output_height
-        self.video_width = video_width
-        self.video_height = video_height
-        self.aspect_ratio = aspect_ratio
-        
-        # Initial State
-        self.current_center_x = video_width / 2
-        self.target_center_x = video_width / 2
-        
-        # Calculate crop dimensions once
-        self.crop_height = video_height
-        self.crop_width = int(round(self.crop_height * self.aspect_ratio))
-        if self.crop_width > video_width:
-             self.crop_width = video_width
-             self.crop_height = int(round(self.crop_width / self.aspect_ratio))
-             
-        # Safe Zone: 20% of the video width
-        # As long as the target is within this zone relative to current center, DO NOT MOVE.
-        self.safe_zone_radius = self.crop_width * 0.25
+def _get_face_detection():
+    global _mp_face_detection
+    if _mp_face_detection is None:
+        _mp_face_detection = mp.solutions.face_detection.FaceDetection(
+            model_selection=1, min_detection_confidence=0.5
+        )
+    return _mp_face_detection
 
-    def update_target(self, face_box):
-        """
-        Updates the target center based on detected face/person.
-        """
-        if face_box:
-            x, y, w, h = face_box
-            self.target_center_x = x + w / 2
-    
-    def get_crop_box(self, force_snap=False):
-        """
-        Returns the (x1, y1, x2, y2) for the current frame.
-        """
-        if force_snap:
-            self.current_center_x = self.target_center_x
-        else:
-            diff = self.target_center_x - self.current_center_x
-            
-            # SIMPLIFIED LOGIC:
-            # 1. Is the target outside the safe zone?
-            if abs(diff) > self.safe_zone_radius:
-                # 2. If yes, move towards it slowly (Linear Speed)
-                # Determine direction
-                direction = 1 if diff > 0 else -1
-                
-                # Speed: 2 pixels per frame (Slow pan)
-                # If the distance is HUGE (scene change or fast movement), speed up slightly
-                if abs(diff) > self.crop_width * 0.5:
-                    speed = 15.0 # Fast re-frame
-                else:
-                    speed = 3.0  # Slow, steady pan
-                
-                self.current_center_x += direction * speed
-                
-                # Check if we overshot (prevent oscillation)
-                new_diff = self.target_center_x - self.current_center_x
-                if (direction == 1 and new_diff < 0) or (direction == -1 and new_diff > 0):
-                    self.current_center_x = self.target_center_x
-            
-            # If inside safe zone, DO NOTHING (Stationary Camera)
-                
-        # Clamp center
-        half_crop = self.crop_width / 2
-        
-        if self.current_center_x - half_crop < 0:
-            self.current_center_x = half_crop
-        if self.current_center_x + half_crop > self.video_width:
-            self.current_center_x = self.video_width - half_crop
-            
-        x1 = int(self.current_center_x - half_crop)
-        x2 = int(self.current_center_x + half_crop)
-        
-        x1 = max(0, x1)
-        x2 = min(self.video_width, x2)
-        
-        y1 = int((self.video_height - self.crop_height) / 2)
-        y2 = y1 + self.crop_height
+# Proxy callable: carga YOLO al primer uso (lazy). model(frame, ...) sigue funcionando.
+class _LazyYOLOProxy:
+    def __call__(self, *args, **kwargs):
+        return _get_yolo_model()(*args, **kwargs)
+    def __getattr__(self, name):
+        return getattr(_get_yolo_model(), name)
 
-        return x1, y1, x2, y2
+model = _LazyYOLOProxy()
+
+# NOTE: SmoothedCameraman is imported from autocrop.py (line 30) — no local re-definition needed.
 
 class SpeakerTracker:
     """

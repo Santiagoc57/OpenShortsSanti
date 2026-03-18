@@ -1,25 +1,44 @@
 # Video files
 *.mp4
+*.mov
+*.mkv
+*.webm
 
-# YOLO model
+# Large media / demo assets (committed separately if needed)
+*.gif
+
+# YOLO model weights
 *.pt
 
 # Python virtual environment
 .venv/
 __pycache__/
 *.pyc
+*.pyo
 
 # Temporary files
 temp_*.mp4
 
+# macOS
 .DS_Store
 
+# Environment variables
 .env
+.env.local
+
+# Job metadata
 *_metadata.json
+*.sqlite3
 
+# Cache
 .cache
-
 .config
 
-output/.tmp_mutonby/
+# Generated output directories
 output/
+uploads/
+output/.tmp_mutonby/
+
+# Node
+node_modules/
+dist/
