@@ -8,19 +8,8 @@ import math
 import zlib
 import shutil
 import glob
-try:
-    from scenedetect import detect_scenes as sd_detect_scenes
-except ImportError:
-    try:
-        from scenedetect import detect as sd_detect_scenes
-    except ImportError:
-        sd_detect_scenes = None
-
-try:
-    from scenedetect import ContentDetector
-except ImportError:
-    from scenedetect.detectors import ContentDetector
-from ultralytics import YOLO
+import threading
+import queue
 import torch
 import os
 import numpy as np
@@ -32,18 +21,21 @@ from autocrop import (
     detect_face_candidates,
     detect_person_yolo,
     analyze_scenes_strategy,
+    create_general_frame,
     is_variable_frame_rate,
     normalize_to_cfr,
     _DummyTime
 )
 import yt_dlp
-import mediapipe as mp
 # import whisper (replaced by faster_whisper inside function)
 from google import genai
 from groq import Groq
 from dotenv import load_dotenv
 import json
 from typing import List, Dict, Any, Optional, Tuple
+from tight_edit import build_tight_edit_plan, normalize_tight_edit_preset, render_keep_segments
+from runtime_limits import ffmpeg_thread_args, subprocess_priority_kwargs
+from whisper_runtime import transcribe_with_runtime
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
@@ -57,6 +49,58 @@ ASPECT_RATIO_PRESETS = {
     "16:9": 16 / 9,
 }
 DEFAULT_ASPECT_RATIO = "9:16"
+DEFAULT_FFMPEG_PRESET = os.environ.get("OPENSHORTS_FFMPEG_PRESET", "medium").strip() or "medium"
+DEFAULT_FFMPEG_CRF = int(os.environ.get("OPENSHORTS_FFMPEG_CRF", "18"))
+FORCE_STANDARD_VERTICAL_OUTPUT = os.environ.get("OPENSHORTS_FORCE_STANDARD_VERTICAL_OUTPUT", "true").strip().lower() not in {"0", "false", "no"}
+DEFAULT_VIDEO_ENHANCE_FILTER = os.environ.get(
+    "OPENSHORTS_VIDEO_ENHANCE_FILTER",
+    "unsharp=5:5:1.5,eq=brightness=0.06:contrast=1.1:saturation=1.15",
+).strip()
+DEFAULT_TIGHT_EDIT_PRESET = normalize_tight_edit_preset(os.environ.get("TIGHT_EDIT_PRESET", "off"), "off")
+VIDEO_ENCODER = (os.environ.get("OPENSHORTS_VIDEO_ENCODER") or "libx264").strip() or "libx264"
+
+
+def video_encoder_args(ffmpeg_preset, ffmpeg_crf):
+    """
+    Encoder args for the final H.264 encodes. OPENSHORTS_VIDEO_ENCODER selects
+    hardware encoders (h264_videotoolbox on macOS, h264_nvenc/hevc_nvenc on
+    NVIDIA); they ignore preset and map CRF to their own quality scale.
+    """
+    if VIDEO_ENCODER == "h264_videotoolbox":
+        quality = max(1, min(100, 100 - int(ffmpeg_crf) * 2))
+        return ['-c:v', 'h264_videotoolbox', '-q:v', str(quality), '-allow_sw', '1']
+    if VIDEO_ENCODER in ("h264_nvenc", "hevc_nvenc"):
+        return ['-c:v', VIDEO_ENCODER, '-preset', 'p5', '-cq', str(ffmpeg_crf)]
+    return ['-c:v', 'libx264', '-preset', str(ffmpeg_preset), '-crf', str(ffmpeg_crf)]
+
+
+MP4_SAFE_AUDIO_CODECS = {"aac", "mp3", "ac3", "eac3", "alac"}
+
+
+def _source_audio_codec(media_path):
+    """Audio codec of the first audio stream, or '' if none/undetectable."""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'a:0',
+             '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', media_path],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().splitlines()[0].lower()
+    except FileNotFoundError:
+        pass
+    # Fallback when ffprobe is unavailable: parse `ffmpeg -i` stream info.
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-i', media_path],
+            capture_output=True, text=True
+        )
+        match = re.search(r"Audio:\s*([A-Za-z0-9_]+)", result.stderr or "")
+        if match:
+            return match.group(1).lower()
+    except Exception:
+        pass
+    return ""
 
 
 def normalize_aspect_ratio(raw_aspect_ratio):
@@ -74,6 +118,9 @@ def _make_even(value):
 
 
 def compute_output_dimensions(input_width, input_height, target_ratio):
+    if FORCE_STANDARD_VERTICAL_OUTPUT and math.isclose(target_ratio, ASPECT_RATIO_PRESETS["9:16"], rel_tol=0.001):
+        return 1080, 1920
+
     source_ratio = input_width / input_height
     if source_ratio >= target_ratio:
         out_height = input_height
@@ -84,7 +131,7 @@ def compute_output_dimensions(input_width, input_height, target_ratio):
     return _make_even(out_width), _make_even(out_height)
 
 GEMINI_PROMPT_TEMPLATE = """
-You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 15 and 60 seconds long.
+You are a senior short-form video editor. Read the ENTIRE transcript and its timestamped word timeline to choose the 3–15 MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between 15 and 60 seconds long.
 {max_clips_rule}
 {clip_length_rule}
 
@@ -102,7 +149,7 @@ VIDEO_DURATION_SECONDS: {video_duration}
 TRANSCRIPT_TEXT (raw):
 {transcript_text}
 
-WORDS_JSON (array of {{w, s, e}} where s/e are seconds):
+WORD_TIMELINE (each line: [start_seconds-end_seconds] words spoken in that span; use these to anchor exact cut points):
 {words_json}
 
 STRICT EXCLUSIONS:
@@ -773,312 +820,6 @@ def postprocess_shorts_with_transcript(
     }
     return out
 
-# --- YOLO + MediaPipe: lazy-loaded singletons ---
-# No se cargan al importar el módulo: reduce el arranque ~3-5s en CPU.
-_yolo_model = None
-_mp_face_detection = None
-
-def _get_yolo_model():
-    global _yolo_model
-    if _yolo_model is None:
-        _yolo_model = YOLO('yolov8n.pt')
-    return _yolo_model
-
-def _get_face_detection():
-    global _mp_face_detection
-    if _mp_face_detection is None:
-        _mp_face_detection = mp.solutions.face_detection.FaceDetection(
-            model_selection=1, min_detection_confidence=0.5
-        )
-    return _mp_face_detection
-
-# Proxy callable: carga YOLO al primer uso (lazy). model(frame, ...) sigue funcionando.
-class _LazyYOLOProxy:
-    def __call__(self, *args, **kwargs):
-        return _get_yolo_model()(*args, **kwargs)
-    def __getattr__(self, name):
-        return getattr(_get_yolo_model(), name)
-
-model = _LazyYOLOProxy()
-
-# NOTE: SmoothedCameraman is imported from autocrop.py (line 30) — no local re-definition needed.
-
-class SpeakerTracker:
-    """
-    Tracks speakers over time to prevent rapid switching and handle temporary obstructions.
-    """
-    def __init__(self, stabilization_frames=15, cooldown_frames=30):
-        self.active_speaker_id = None
-        self.speaker_scores = {}  # {id: score}
-        self.last_seen = {}       # {id: frame_number}
-        self.locked_counter = 0   # How long we've been locked on current speaker
-        
-        # Hyperparameters
-        self.stabilization_threshold = stabilization_frames # Frames needed to confirm a new speaker
-        self.switch_cooldown = cooldown_frames              # Minimum frames before switching again
-        self.last_switch_frame = -1000
-        
-        # ID tracking
-        self.next_id = 0
-        self.known_faces = [] # [{'id': 0, 'center': x, 'last_frame': 123}]
-
-    def get_target(self, face_candidates, frame_number, width):
-        """
-        Decides which face to focus on.
-        face_candidates: list of {'box': [x,y,w,h], 'score': float}
-        """
-        current_candidates = []
-        
-        # 1. Match faces to known IDs (simple distance tracking)
-        for face in face_candidates:
-            x, y, w, h = face['box']
-            center_x = x + w / 2
-            
-            best_match_id = -1
-            min_dist = width * 0.15 # Reduced matching radius to avoid jumping in groups
-            
-            # Try to match with known faces seen recently
-            for kf in self.known_faces:
-                if frame_number - kf['last_frame'] > 30: # Forgot faces older than 1s (was 2s)
-                    continue
-                    
-                dist = abs(center_x - kf['center'])
-                if dist < min_dist:
-                    min_dist = dist
-                    best_match_id = kf['id']
-            
-            # If no match, assign new ID
-            if best_match_id == -1:
-                best_match_id = self.next_id
-                self.next_id += 1
-            
-            # Update known face
-            self.known_faces = [kf for kf in self.known_faces if kf['id'] != best_match_id]
-            self.known_faces.append({'id': best_match_id, 'center': center_x, 'last_frame': frame_number})
-            
-            current_candidates.append({
-                'id': best_match_id,
-                'box': face['box'],
-                'score': face['score']
-            })
-
-        # 2. Update Scores with decay
-        for pid in list(self.speaker_scores.keys()):
-             self.speaker_scores[pid] *= 0.85 # Faster decay (was 0.9)
-             if self.speaker_scores[pid] < 0.1:
-                 del self.speaker_scores[pid]
-
-        # Add new scores
-        for cand in current_candidates:
-            pid = cand['id']
-            # Score is purely based on size (proximity) now that we don't have mouth
-            raw_score = cand['score'] / (width * width * 0.05)
-            self.speaker_scores[pid] = self.speaker_scores.get(pid, 0) + raw_score
-
-        # 3. Determine Best Speaker
-        if not current_candidates:
-            # If no one found, maintain last active speaker if cooldown allows
-            # to avoid black screen or jump to 0,0
-            return None 
-            
-        best_candidate = None
-        max_score = -1
-        
-        for cand in current_candidates:
-            pid = cand['id']
-            total_score = self.speaker_scores.get(pid, 0)
-            
-            # Hysteresis: HUGE Bonus for current active speaker
-            if pid == self.active_speaker_id:
-                total_score *= 3.0 # Sticky factor
-                
-            if total_score > max_score:
-                max_score = total_score
-                best_candidate = cand
-
-        # 4. Decide Switch
-        if best_candidate:
-            target_id = best_candidate['id']
-            
-            if target_id == self.active_speaker_id:
-                self.locked_counter += 1
-                return best_candidate['box']
-            
-            # New person
-            if frame_number - self.last_switch_frame < self.switch_cooldown:
-                old_cand = next((c for c in current_candidates if c['id'] == self.active_speaker_id), None)
-                if old_cand:
-                    return old_cand['box']
-            
-            self.active_speaker_id = target_id
-            self.last_switch_frame = frame_number
-            self.locked_counter = 0
-            return best_candidate['box']
-            
-        return None
-
-def detect_face_candidates(frame):
-    """
-    Returns list of all detected faces using lightweight FaceDetection.
-    """
-    height, width, _ = frame.shape
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_detection.process(rgb_frame)
-    
-    candidates = []
-    
-    if not results.detections:
-        return []
-        
-    for detection in results.detections:
-        bboxC = detection.location_data.relative_bounding_box
-        x = int(bboxC.xmin * width)
-        y = int(bboxC.ymin * height)
-        w = int(bboxC.width * width)
-        h = int(bboxC.height * height)
-        
-        candidates.append({
-            'box': [x, y, w, h],
-            'score': w * h # Area as score
-        })
-            
-    return candidates
-
-def detect_person_yolo(frame):
-    """
-    Fallback: Detect largest person using YOLO when face detection fails.
-    Returns [x, y, w, h] of the person's 'upper body' approximation.
-    """
-    # Use the globally loaded model
-    results = model(frame, verbose=False, classes=[0]) # class 0 is person
-    
-    if not results:
-        return None
-        
-    best_box = None
-    max_area = 0
-    
-    for result in results:
-        boxes = result.boxes
-        for box in boxes:
-            x1, y1, x2, y2 = [int(i) for i in box.xyxy[0]]
-            w = x2 - x1
-            h = y2 - y1
-            area = w * h
-            
-            if area > max_area:
-                max_area = area
-                # Focus on the top 40% of the person (head/chest) for framing
-                # This approximates where the face is if we can't detect it directly
-                face_h = int(h * 0.4)
-                best_box = [x1, y1, w, face_h]
-                
-    return best_box
-
-def create_general_frame(frame, output_width, output_height):
-    """
-    Creates a 'General Shot' frame: 
-    - Background: Blurred zoom of original
-    - Foreground: Original video scaled to fit width, centered vertically.
-    """
-    orig_h, orig_w = frame.shape[:2]
-    
-    # 1. Background (Cover target canvas and crop center)
-    bg_scale = max(output_width / orig_w, output_height / orig_h)
-    bg_w = int(orig_w * bg_scale)
-    bg_h = int(orig_h * bg_scale)
-    bg_resized = cv2.resize(frame, (bg_w, bg_h))
-
-    # Crop center of background
-    start_x = (bg_w - output_width) // 2
-    start_y = (bg_h - output_height) // 2
-    if start_x < 0: start_x = 0
-    if start_y < 0: start_y = 0
-    background = bg_resized[start_y:start_y+output_height, start_x:start_x+output_width]
-    if background.shape[0] != output_height or background.shape[1] != output_width:
-        background = cv2.resize(background, (output_width, output_height))
-        
-    # Blur background
-    background = cv2.GaussianBlur(background, (51, 51), 0)
-    
-    # 2. Foreground (Contain)
-    scale = min(output_width / orig_w, output_height / orig_h)
-    fg_w = int(orig_w * scale)
-    fg_h = int(orig_h * scale)
-    foreground = cv2.resize(frame, (fg_w, fg_h))
-    
-    # 3. Overlay
-    x_offset = (output_width - fg_w) // 2
-    y_offset = (output_height - fg_h) // 2
-
-    # Clone background to avoid modifying it
-    final_frame = background.copy()
-    final_frame[y_offset:y_offset+fg_h, x_offset:x_offset+fg_w] = foreground
-
-    return final_frame
-
-def analyze_scenes_strategy(video_path, scenes):
-    """
-    Analyzes each scene to determine if it should be TRACK (Single person) or GENERAL (Group/Wide).
-    Returns list of strategies corresponding to scenes.
-    """
-    cap = cv2.VideoCapture(video_path)
-    strategies = []
-    
-    if not cap.isOpened():
-        return ['TRACK'] * len(scenes)
-        
-    for start, end in tqdm(scenes, desc="   Analyzing Scenes"):
-        # Sample 3 frames (start, middle, end)
-        frames_to_check = [
-            start.get_frames() + 5,
-            int((start.get_frames() + end.get_frames()) / 2),
-            end.get_frames() - 5
-        ]
-        
-        face_counts = []
-        for f_idx in frames_to_check:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-            ret, frame = cap.read()
-            if not ret: continue
-            
-            # Detect faces
-            candidates = detect_face_candidates(frame)
-            face_counts.append(len(candidates))
-            
-        # Decision Logic
-        if not face_counts:
-            avg_faces = 0
-        else:
-            avg_faces = sum(face_counts) / len(face_counts)
-            
-        # Strategy:
-        # 0 faces -> GENERAL (Landscape/B-roll)
-        # 1 face -> TRACK
-        # > 1.2 faces -> GENERAL (Group)
-        
-        if avg_faces > 1.2 or avg_faces < 0.5:
-            strategies.append('GENERAL')
-        else:
-            strategies.append('TRACK')
-            
-    cap.release()
-    return strategies
-
-def detect_scenes(video_path):
-    """Detect scene boundaries using PySceneDetect (Modern API)."""
-    try:
-        if sd_detect_scenes is None:
-            raise ImportError("PySceneDetect detect API not available")
-        scene_list = sd_detect_scenes(video_path, ContentDetector(), show_progress=False)
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        cap.release()
-        return scene_list, fps
-    except Exception as e:
-        print(f"❌ Error in PySceneDetect: {str(e)}")
-        return [], 0.0
-
 def get_video_resolution(video_path):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -1099,7 +840,7 @@ def is_audio_input(path):
     audio_exts = {'.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wma'}
     return os.path.splitext(path.lower())[1] in audio_exts
 
-def build_audio_canvas_video(input_audio, output_video, ffmpeg_preset="fast", ffmpeg_crf=23, aspect_ratio=DEFAULT_ASPECT_RATIO):
+def build_audio_canvas_video(input_audio, output_video, ffmpeg_preset=DEFAULT_FFMPEG_PRESET, ffmpeg_crf=DEFAULT_FFMPEG_CRF, aspect_ratio=DEFAULT_ASPECT_RATIO):
     """
     Creates a vertical visual canvas from an audio file using ffmpeg waveform rendering.
     This allows reusing the same clipping + vertical pipeline for audio-only podcasts.
@@ -1196,7 +937,7 @@ def download_youtube_video(url, output_dir="."):
         'nocheckcertificate': True,
         'force_ipv4': True,
         'cachedir': False,
-        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+        'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'mweb', 'web']}},
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
     
@@ -1250,7 +991,7 @@ Technical Details: {str(e)}
         print(f"🗑️  Removed existing file to re-download with H.264 codec")
     
     ydl_opts = {
-        'format': 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc1]+bestaudio/best[ext=mp4]/best',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
         'outtmpl': output_template,
         'merge_output_format': 'mp4',
         'quiet': False,
@@ -1301,45 +1042,7 @@ Technical Details: {str(e)}
     
     return downloaded_file, sanitized_title
 
-def create_general_frame(frame, output_width, output_height):
-    """
-    Creates a 'General Shot' frame: 
-    - Background: Blurred zoom of original
-    - Foreground: Original video scaled to fit width, centered vertically.
-    """
-    orig_h, orig_w = frame.shape[:2]
-    
-    # 1. Background (Fill Height)
-    # Crop center to aspect ratio
-    bg_scale = output_height / orig_h
-    bg_w = int(orig_w * bg_scale)
-    bg_resized = cv2.resize(frame, (bg_w, output_height))
-    
-    # Crop center of background
-    start_x = (bg_w - output_width) // 2
-    if start_x < 0: start_x = 0
-    background = bg_resized[:, start_x:start_x+output_width]
-    if background.shape[1] != output_width:
-        background = cv2.resize(background, (output_width, output_height))
-        
-    # Blur background
-    background = cv2.GaussianBlur(background, (51, 51), 0)
-    
-    # 2. Foreground (Fit Width)
-    scale = output_width / orig_w
-    fg_h = int(orig_h * scale)
-    foreground = cv2.resize(frame, (output_width, fg_h))
-    
-    # 3. Overlay
-    y_offset = (output_height - fg_h) // 2
-    
-    # Clone background to avoid modifying it
-    final_frame = background.copy()
-    final_frame[y_offset:y_offset+fg_h, :] = foreground
-    
-    return final_frame
-
-def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fast", ffmpeg_crf=23, aspect_ratio=DEFAULT_ASPECT_RATIO):
+def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset=DEFAULT_FFMPEG_PRESET, ffmpeg_crf=DEFAULT_FFMPEG_CRF, aspect_ratio=DEFAULT_ASPECT_RATIO):
     """
     Core logic to convert horizontal video to vertical using scene detection and Active Speaker Tracking (MediaPipe).
     """
@@ -1348,11 +1051,10 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
     # Define temporary file paths based on the output name
     base_name = os.path.splitext(final_output_video)[0]
     temp_video_output = f"{base_name}_temp_video.mp4"
-    temp_audio_output = f"{base_name}_temp_audio.aac"
     temp_cfr_input = f"{base_name}_temp_cfr_input.mp4"
-    
+
     # Clean up previous temp files if they exist
-    for f in [temp_video_output, temp_audio_output, final_output_video, temp_cfr_input]:
+    for f in [temp_video_output, final_output_video, temp_cfr_input]:
         if os.path.exists(f): 
             try: os.remove(f)
             except: pass
@@ -1406,14 +1108,22 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
     command = [
         'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
         '-s', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}', '-pix_fmt', 'bgr24',
-        '-r', str(fps), '-i', '-', '-c:v', 'libx264',
+        '-r', str(fps), '-i', '-',
+        *ffmpeg_thread_args(include_filter_threads=True),
         '-pix_fmt', 'yuv420p',
         '-r', str(fps), '-vsync', 'cfr',
-        '-preset', str(ffmpeg_preset), '-crf', str(ffmpeg_crf), '-an',
-        '-movflags', '+faststart', temp_video_output
     ]
+    if DEFAULT_VIDEO_ENHANCE_FILTER:
+        command.extend(['-vf', DEFAULT_VIDEO_ENHANCE_FILTER])
+    command.extend([
+        *video_encoder_args(ffmpeg_preset, ffmpeg_crf), '-an',
+        '-movflags', '+faststart', temp_video_output
+    ])
 
-    ffmpeg_process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    ffmpeg_process = subprocess.Popen(
+        command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        **subprocess_priority_kwargs()
+    )
 
     cap = cv2.VideoCapture(input_video)
     frame_number = 0
@@ -1427,10 +1137,60 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
 
     speaker_tracker = SpeakerTracker(cooldown_frames=30)
 
+    # Decode (reader) and stdin writes to the encoder (writer) run on their own
+    # threads so video decoding, detection/cropping and x264 encoding overlap
+    # instead of executing strictly in series on one thread.
+    frame_queue = queue.Queue(maxsize=48)
+    write_queue = queue.Queue(maxsize=48)
+    stop_reading = threading.Event()
+    writer_errors = []
+
+    def _read_frames():
+        try:
+            while not stop_reading.is_set():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                while not stop_reading.is_set():
+                    try:
+                        frame_queue.put(frame, timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
+        finally:
+            while True:
+                try:
+                    frame_queue.put(None, timeout=0.5)
+                    break
+                except queue.Full:
+                    if stop_reading.is_set():
+                        break
+
+    def _write_frames():
+        failed = False
+        while True:
+            data = write_queue.get()
+            if data is None:
+                break
+            if failed:
+                continue
+            try:
+                ffmpeg_process.stdin.write(data)
+            except Exception as exc:
+                writer_errors.append(exc)
+                failed = True
+
+    reader_thread = threading.Thread(target=_read_frames, daemon=True)
+    writer_thread = threading.Thread(target=_write_frames, daemon=True)
+    reader_thread.start()
+    writer_thread.start()
+
     with tqdm(total=total_frames, desc="   Processing", file=sys.stdout) as pbar:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
+        while True:
+            if writer_errors:
+                break
+            frame = frame_queue.get()
+            if frame is None:
                 break
 
             if current_scene_index < len(scene_boundaries):
@@ -1461,9 +1221,9 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
                     
                     if y2 > y1 and x2 > x1:
                         cropped = frame[y1:y2, x1:x2]
-                        output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
+                        output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_CUBIC)
                     else:
-                        output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
+                        output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_CUBIC)
                 
                 last_output_frame = output_frame
             except Exception as e:
@@ -1473,61 +1233,77 @@ def process_video_to_vertical(input_video, final_output_video, ffmpeg_preset="fa
                 else:
                     output_frame = np.zeros((OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
 
-            ffmpeg_process.stdin.write(output_frame.tobytes())
+            write_queue.put(output_frame.tobytes())
             frame_number += 1
             pbar.update(1)
+
+    stop_reading.set()
+    try:
+        while frame_queue.get_nowait() is not None:
+            pass
+    except queue.Empty:
+        pass
+    write_queue.put(None)
+    writer_thread.join(timeout=60)
+    reader_thread.join(timeout=10)
 
     if dropped_frames > 0:
         print(f"  ⚠️  {dropped_frames} frame(s) could not be processed and were duplicated.")
 
-    ffmpeg_process.stdin.close()
+    try:
+        ffmpeg_process.stdin.close()
+    except Exception:
+        pass
     stderr_output = ffmpeg_process.stderr.read().decode()
     ffmpeg_process.wait()
     cap.release()
 
-    if ffmpeg_process.returncode != 0:
+    if ffmpeg_process.returncode != 0 or writer_errors:
         print("\n   ❌ FFmpeg frame processing failed.")
+        if writer_errors:
+            print("   Pipe error:", writer_errors[0])
         print("   Stderr:", stderr_output)
         return False
 
-    print("\n   🔊 Step 3: Extracting audio...")
-    audio_extract_command = [
-        'ffmpeg', '-y', '-i', input_video, '-vn', '-acodec', 'copy', temp_audio_output
-    ]
-    try:
-        subprocess.run(audio_extract_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError:
-        print("\n   ❌ Audio extraction failed (maybe no audio?). Proceeding without audio.")
-        pass
+    print("\n   ✨ Step 5: Merging with source audio...")
 
-    print("\n   ✨ Step 4: Merging...")
-    if os.path.exists(temp_audio_output):
+    def _merge_with_audio(audio_args):
         merge_command = [
-            'ffmpeg', '-y', '-i', temp_video_output, '-i', temp_audio_output,
-            '-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart', final_output_video
+            'ffmpeg', '-y', '-i', temp_video_output, '-i', input_video,
+            '-map', '0:v:0', '-map', '1:a:0?',
+            '-c:v', 'copy', *audio_args,
+            '-movflags', '+faststart', '-shortest',
+            final_output_video
         ]
+        return subprocess.run(merge_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+    # Copy the source audio only when its codec is broadly supported inside
+    # MP4 (newer ffmpeg happily muxes Opus into MP4, but TikTok/IG and many
+    # players reject it). Anything else — e.g. Opus from YouTube WebM, which
+    # used to produce MUTE clips — is re-encoded to AAC.
+    source_audio_codec = _source_audio_codec(input_video)
+    if source_audio_codec in MP4_SAFE_AUDIO_CODECS:
+        merge_result = _merge_with_audio(['-c:a', 'copy'])
+        if merge_result.returncode != 0:
+            merge_result = _merge_with_audio(['-c:a', 'aac', '-b:a', '192k'])
     else:
-         merge_command = [
-            'ffmpeg', '-y', '-i', temp_video_output,
-            '-c:v', 'copy', '-movflags', '+faststart', final_output_video
-        ]
-        
-    try:
-        subprocess.run(merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        print(f"   ✅ Clip saved to {final_output_video}")
-    except subprocess.CalledProcessError as e:
+        if source_audio_codec:
+            print(f"   ℹ️ Source audio is '{source_audio_codec}' (not MP4-safe), re-encoding to AAC...")
+        merge_result = _merge_with_audio(['-c:a', 'aac', '-b:a', '192k'])
+    if merge_result.returncode != 0:
         print("\n   ❌ Final merge failed.")
-        print("   Stderr:", e.stderr.decode())
+        print("   Stderr:", merge_result.stderr.decode(errors='ignore')[-800:])
         return False
+    print(f"   ✅ Clip saved to {final_output_video}")
 
     # Clean up temp files
-    for f in [temp_video_output, temp_audio_output, temp_cfr_input]:
+    for f in [temp_video_output, temp_cfr_input]:
         if os.path.exists(f): 
             try: os.remove(f)
             except: pass
     
     return True
-def build_super_trailer(input_video, fragments, output_path, ffmpeg_preset="fast", ffmpeg_crf=23):
+def build_super_trailer(input_video, fragments, output_path, ffmpeg_preset=DEFAULT_FFMPEG_PRESET, ffmpeg_crf=DEFAULT_FFMPEG_CRF):
     """
     Creates a fast-paced summary (Super Trailer) with crossfade transitions.
     fragments: List[dict] with 'start', 'end' in seconds.
@@ -2162,26 +1938,28 @@ def transcribe_video(video_path, language=None, backend=None, model_name=None, w
             'language': detected_language
         }
 
-    # Fallback to faster-whisper
-    print(f"🎙️  Transcribing video with Faster-Whisper (model={model_name}, device={device}, compute={compute_type})...")
-    from faster_whisper import WhisperModel
+    # Fallback to faster-whisper with runtime cache, GPU/CPU fallback, and safer defaults.
+    if model_name:
+        os.environ["WHISPER_MODEL"] = str(model_name)
+    if compute_type:
+        os.environ["WHISPER_COMPUTE_TYPE"] = str(compute_type)
+    if cpu_threads:
+        os.environ["WHISPER_CPU_THREADS"] = str(cpu_threads)
+    if num_workers:
+        os.environ["WHISPER_NUM_WORKERS"] = str(num_workers)
 
-    cpu_threads_env = os.getenv("WHISPER_CPU_THREADS", "").strip()
-    num_workers_env = os.getenv("WHISPER_NUM_WORKERS", "").strip()
-    if cpu_threads_env and not cpu_threads:
-        cpu_threads = int(cpu_threads_env)
-    if num_workers_env and not num_workers:
-        num_workers = int(num_workers_env)
-
-    model = WhisperModel(
-        model_name,
-        device=device,
-        compute_type=compute_type,
-        cpu_threads=cpu_threads,
-        num_workers=num_workers
+    print("🎙️  Transcribing video with Faster-Whisper runtime manager...")
+    segments, info, runtime_meta = transcribe_with_runtime(
+        video_path,
+        word_timestamps=word_timestamps,
+        language=language
     )
-
-    segments, info = model.transcribe(video_path, word_timestamps=word_timestamps, language=language, task="transcribe")
+    print(
+        "   Runtime: "
+        f"model={runtime_meta.get('model')}, device={runtime_meta.get('device')}, "
+        f"compute={runtime_meta.get('compute_type')}, beam={runtime_meta.get('beam_size')}, "
+        f"vad={runtime_meta.get('vad_filter')}"
+    )
     print(f"   Detected language '{info.language}' with probability {info.language_probability:.2f}")
 
     transcript_segments = []
@@ -2276,6 +2054,18 @@ def get_viral_clips(
                 'e': word['end']
             })
 
+    # Compact timeline (one line per ~10 words) instead of per-word JSON:
+    # ~4x fewer tokens on long videos with no loss of cut precision, since
+    # clip boundaries are refined locally afterwards by
+    # postprocess_shorts_with_transcript().
+    def _compact_word_timeline(word_list, group_size=10):
+        timeline_lines = []
+        for idx in range(0, len(word_list), group_size):
+            group = word_list[idx:idx + group_size]
+            text = " ".join(str(w['w']).strip() for w in group)
+            timeline_lines.append(f"[{group[0]['s']:.2f}-{group[-1]['e']:.2f}] {text}")
+        return "\n".join(timeline_lines)
+
     max_clips_rule = ""
     if max_clips:
         max_clips_rule = f"IMPORTANT: Return at most {max_clips} clips."
@@ -2291,7 +2081,7 @@ def get_viral_clips(
     prompt = GEMINI_PROMPT_TEMPLATE.format(
         video_duration=video_duration,
         transcript_text=json.dumps(transcript_result['text']),
-        words_json=json.dumps(words),
+        words_json=_compact_word_timeline(words),
         max_clips_rule=max_clips_rule,
         clip_length_rule=length_rule,
         trailer_fragments_rule=trailer_rule
@@ -2371,8 +2161,8 @@ if __name__ == '__main__':
     parser.add_argument('--enable-diarization', action='store_true', default=False, help="Run pyannote speaker diarization (slow on CPU, requires HF token).")
     parser.add_argument('--whisper-model', type=str, default=None, help="Whisper model: tiny|base|small|medium|large|large-v2|large-v3.")
     parser.add_argument('--word-timestamps', type=str, default="true", help="true/false for word-level timestamps.")
-    parser.add_argument('--ffmpeg-preset', type=str, default="fast", help="FFmpeg preset: ultrafast|fast|medium.")
-    parser.add_argument('--ffmpeg-crf', type=int, default=23, help="FFmpeg CRF quality (lower=better).")
+    parser.add_argument('--ffmpeg-preset', type=str, default=DEFAULT_FFMPEG_PRESET, help="FFmpeg preset: ultrafast|fast|medium.")
+    parser.add_argument('--ffmpeg-crf', type=int, default=DEFAULT_FFMPEG_CRF, help="FFmpeg CRF quality (lower=better).")
     parser.add_argument('--aspect-ratio', type=str, default=DEFAULT_ASPECT_RATIO, help="Output aspect ratio: 9:16 or 16:9.")
     parser.add_argument('--clip-length-target', type=str, default=None, help="Preferred clip length profile: short|balanced|long.")
     parser.add_argument('--style-template', type=str, default=None, help="UI template id used for this generation (metadata only).")
@@ -2384,8 +2174,10 @@ if __name__ == '__main__':
     parser.add_argument('--build-trailer', action='store_true', help="If true, generates a Super Trailer from identified fragments.")
     parser.add_argument('--trailer-only', action='store_true', help="If true, skips clip rendering and generates only the Super Trailer.")
     parser.add_argument('--trailer-fragments-target', type=int, default=6, help="Desired number of highlighted segments for Super Trailer (2-12).")
+    parser.add_argument('--tight-edit-preset', type=str, default=DEFAULT_TIGHT_EDIT_PRESET, choices=['off', 'balanced', 'aggressive', 'very_aggressive'], help="Remove pauses/filler words before vertical rendering.")
     
     args = parser.parse_args()
+    args.tight_edit_preset = normalize_tight_edit_preset(args.tight_edit_preset, DEFAULT_TIGHT_EDIT_PRESET)
 
     script_start_time = time.time()
 
@@ -2568,17 +2360,58 @@ if __name__ == '__main__':
                     # ffmpeg cut
                     # Using re-encoding for precision as requested by strict seconds
                     # Save directly to the uncut path first so we preserve the original frame.
-                    cut_command = [
-                        'ffmpeg', '-y', 
-                        '-ss', str(start), 
-                        '-to', str(end), 
-                        '-i', input_video,
-                        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', str(args.ffmpeg_crf), '-preset', str(args.ffmpeg_preset),
-                        '-c:a', 'aac',
-                        '-movflags', '+faststart',
-                        clip_uncut_path
-                    ]
-                    subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    tight_edit_plan = build_tight_edit_plan(transcript, start, end, args.tight_edit_preset)
+                    keep_segments = tight_edit_plan.get("keep_segments") or [(start, end)]
+                    if tight_edit_plan.get("compacted"):
+                        print(
+                            "   ✂️ Tight edit:",
+                            f"{len(keep_segments)} keep segment(s),",
+                            f"preset={tight_edit_plan.get('preset')},",
+                            f"new duration ≈ {tight_edit_plan.get('output_duration', end - start):.2f}s"
+                        )
+                        render_keep_segments(
+                            input_video,
+                            keep_segments,
+                            clip_uncut_path,
+                            ffmpeg_preset=str(args.ffmpeg_preset),
+                            crf=str(args.ffmpeg_crf),
+                            thread_args=ffmpeg_thread_args(include_filter_threads=True),
+                            subprocess_kwargs=subprocess_priority_kwargs(),
+                        )
+                        clip["display_duration"] = tight_edit_plan.get("output_duration", round(end - start, 3))
+                        clip["tight_edit_preset"] = tight_edit_plan.get("preset")
+                        clip["tight_edit_removed_ranges"] = [
+                            {"start": range_start, "end": range_end}
+                            for range_start, range_end in tight_edit_plan.get("remove_ranges", [])
+                        ]
+                        clip["tight_edit_keep_segments"] = [
+                            {"start": segment_start, "end": segment_end}
+                            for segment_start, segment_end in keep_segments
+                        ]
+                    else:
+                        # The uncut file is an intermediate that gets re-encoded by the
+                        # vertical render, so cap its CRF at 18 to limit generational loss.
+                        intermediate_crf = min(int(args.ffmpeg_crf), 18)
+                        cut_command = [
+                            'ffmpeg', '-y',
+                            '-ss', str(start),
+                            '-to', str(end),
+                            '-i', input_video,
+                            *ffmpeg_thread_args(include_filter_threads=False),
+                            *video_encoder_args(args.ffmpeg_preset, intermediate_crf),
+                            '-pix_fmt', 'yuv420p',
+                            '-c:a', 'aac',
+                            '-movflags', '+faststart',
+                            clip_uncut_path
+                        ]
+                        cut_result = subprocess.run(cut_command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **subprocess_priority_kwargs())
+                        if cut_result.returncode != 0:
+                            print(f"   ❌ Failed to cut clip {i+1}:", cut_result.stderr.decode(errors='ignore')[-500:])
+                            continue
+                        clip.pop("display_duration", None)
+                        clip.pop("tight_edit_preset", None)
+                        clip.pop("tight_edit_removed_ranges", None)
+                        clip.pop("tight_edit_keep_segments", None)
                     
                     # Process vertical from the uncut source instead of input_video to save processing time
                     # but input_video would also work if uncut_path is deleted. Let's use uncut_path.
@@ -2587,6 +2420,8 @@ if __name__ == '__main__':
                     if success:
                         print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
                         print(f"   ✅ Uncut Clip {i+1} saved: {clip_uncut_path}")
+                with open(metadata_file, 'w') as f:
+                    json.dump(clips_data, f, indent=2)
             else:
                 print("🎯 Trailer-only mode: omitiendo render de clips individuales.")
 

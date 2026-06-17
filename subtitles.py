@@ -932,7 +932,7 @@ def burn_subtitles(
             '-i', video_path,
             '-vf', vf_subtitles,
             '-c:a', 'copy',
-            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '23',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'medium', '-crf', '18',
             '-movflags', '+faststart',
             output_path
         ]

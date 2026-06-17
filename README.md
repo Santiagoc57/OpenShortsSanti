@@ -64,7 +64,37 @@ To enable automatic backup of your clips to S3:
     * `AWS_REGION`: (Optional) Defaults to `us-east-1`.
     * `AWS_S3_BUCKET`: (Optional) Defaults to `openshorts.app-clips`.
 2. **Bucket**: Clips are uploaded to the specified bucket automatically after generation.
+3. **Restore**: The Project Library can list remote job prefixes and restores archived clips on demand when a project is opened.
 
+### 🔒 Safety & Rights
+OpenShorts requires users to confirm they own the content or have permission to process it before starting a job.
+
+Optional deployment flag:
+* `DISABLE_YOUTUBE_URL=true`: disables YouTube URL ingestion and accepts uploaded files only.
+
+### 🎬 Remotion Render Service (Optional)
+This fork includes a separate Remotion render service for modern React-based video renders with animated captions, hooks and effects.
+
+With Docker Compose it starts automatically as `render-service` on port `3100` and writes final MP4 files into the shared `./output` folder. In Clip Studio, use the `Remotion` button to render the current clip with the service. The backend also proxies it through:
+
+* `GET /api/render/health`
+* `POST /api/render/remotion`
+* `GET /api/render/remotion/{render_id}`
+
+For local non-Docker runs, start it separately:
+
+```bash
+cd render-service
+npm install
+npm run build
+OUTPUT_DIR="../output" npm start
+```
+
+If the backend runs outside Docker, point it to the service:
+
+```bash
+export RENDER_SERVICE_URL="http://localhost:3100"
+```
 
 ---
 
@@ -135,6 +165,7 @@ También puedes enviar directamente `POST /api/search/clips/eval`.
 - **Métricas sociales**: `GET /api/social/metrics/{job_id}`.
 - **Highlight reel configurable**: `POST /api/highlight/reel` con `aspect_ratio` (`9:16` o `16:9`).
 - **Preview rápido de edición**: `POST /api/clip/fast-preview`.
+- **Render Remotion opcional**: `POST /api/render/remotion` y `GET /api/render/remotion/{render_id}`.
 
 ---
 

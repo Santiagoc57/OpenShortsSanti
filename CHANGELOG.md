@@ -1,5 +1,117 @@
 # Registro de Cambios
 
+## 2026-05-09
+
+### Nuevo: Remotion render-service integrado por API, Docker y CI
+- Qué cambiamos:
+  - Se incorporaron los paquetes Remotion del upstream: `remotion/`, `render-service/`, `dashboard/src/remotion/`, `RemotionPreview` y helper de render en navegador.
+  - Se agregaron dependencias Remotion al dashboard para que el build incluya el player/composición cuando se conecte desde la UI.
+  - Se añadió `api/routes/render.py` con proxy backend:
+    - `GET /api/render/health`
+    - `POST /api/render/remotion`
+    - `GET /api/render/remotion/{render_id}`
+  - `api/core/config.py` agrega `RENDER_SERVICE_URL`.
+  - `render-service/src/render-worker.ts` ahora devuelve URLs públicas `/output/...`; el backend las normaliza a `/videos/...`.
+  - `docker-compose.yml` ahora levanta `render-service` y comparte `./output` con backend.
+  - `dashboard/src/components/ClipStudioModal.jsx` añade botón `Remotion` para enviar el clip actual al render-service, esperar progreso y descargar el MP4 final.
+  - CI ahora compila también `render-service` y `remotion` con `npm ci` + `npm run build`.
+- Para qué sirve:
+  - Deja lista la base para renders React/Remotion con subtítulos animados, hooks y efectos, sin reemplazar todavía el flujo FFmpeg estable.
+  - Permite probar el servicio desde Clip Studio y también por API.
+
+### Nuevo: manifests por job para trazabilidad local
+- Qué cambiamos:
+  - Se agregó `api/services/job_manifest.py`.
+  - Cada job escribe `output/<job_id>/job_manifest.json` al encolarse, iniciar, completar o fallar.
+  - El manifest incluye comando ejecutado, estado, eventos, artefactos generados, return code y entorno relevante con secretos redactados.
+  - Se añadió `GET /api/projects/manifest/{job_id}` para consultar el manifest desde la API.
+  - Se agregó un test unitario ligero en `tests/test_job_manifest.py` y CI lo ejecuta con `python -m unittest discover -s tests`.
+  - `EJECUTAR_LOCAL.md` documenta cómo arrancar Remotion local sin Docker y dónde ver los manifests.
+- Para qué sirve:
+  - Facilita depurar jobs locales, comparar runs y recuperar contexto cuando un render o transcripción falla.
+  - Prepara una base para auditoría de artefactos sin depender de Docker.
+
+### Mejorado: calidad de render y compatibilidad de descarga
+- Qué cambiamos:
+  - En `main.py` se subió el default de FFmpeg a `preset=medium` y `crf=18`, configurable por `OPENSHORTS_FFMPEG_PRESET` y `OPENSHORTS_FFMPEG_CRF`.
+  - La salida vertical 9:16 ahora usa 1080x1920 por defecto, configurable con `OPENSHORTS_FORCE_STANDARD_VERTICAL_OUTPUT=false`.
+  - Se añadió filtro visual configurable por `OPENSHORTS_VIDEO_ENHANCE_FILTER` con `unsharp`, brillo, contraste y saturación para clips finales.
+  - El resize principal usa interpolación cúbica para reducir pérdida visual al reencuadrar.
+  - Se actualizaron opciones de `yt-dlp` con clientes `ios/android/mweb/web` y formato de descarga menos restrictivo para mejorar compatibilidad.
+  - En `editor.py` y `subtitles.py` los renders derivados también usan `preset=medium` y `crf=18`.
+  - En `dashboard/src/components/MediaInput.jsx` los defaults de export quedan alineados a `medium` / `18`.
+- Para qué sirve:
+  - Mejora nitidez y fidelidad del export, estandariza vertical shorts en 1080x1920 y reduce fallos de descarga por formatos/clientes de YouTube.
+
+### Corregido: build del dashboard por helpers compartidos
+- Qué cambiamos:
+  - En `dashboard/src/utils.js` se reexportó `getApiUrl` desde `config.js`.
+  - Se añadieron `formatProjectDate` y `outputModeLabel`, requeridos por `App.jsx` y las vistas de proyectos.
+- Para qué sirve:
+  - Permite que `npm run build` compile correctamente con la estructura actual de vistas/proyectos.
+
+### Nuevo: historial de proyectos reconstruido desde disco + borrado local/S3
+- Qué cambiamos:
+  - Se agregó `api/services/job_history.py` para reconstruir resultados desde `output/<job_id>` y archivos `*_metadata.json`.
+  - `GET /api/projects/history` ahora lista proyectos persistidos en SQLite y descubiertos en disco.
+  - `GET /api/projects/clips/{job_id}` reconstruye clips, URLs locales y metadata aunque el backend haya reiniciado.
+  - Si hay S3/MinIO configurado, el historial también lista proyectos archivados por prefijo remoto.
+  - Al abrir un proyecto archivado, `GET /api/projects/clips/{job_id}` descarga sus `.mp4`/`.json` desde S3/MinIO a `output/<job_id>` y reconstruye la vista local.
+  - `DELETE /api/projects/{job_id}` elimina estado persistido, artefactos locales y artefactos S3/MinIO cuando hay credenciales.
+  - El worker ahora arma `job.result` al terminar y sube artefactos a S3/MinIO si está configurado.
+  - `s3_uploader.py` soporta `AWS_S3_ENDPOINT_URL` / `S3_ENDPOINT_URL` y `AWS_S3_FORCE_PATH_STYLE` para MinIO.
+- Para qué sirve:
+  - La pestaña Proyectos deja de depender solo de memoria del navegador/backend y puede recuperar trabajos previos desde disco.
+  - Permite rehidratar trabajos archivados en almacenamiento self-hosted compatible con S3/MinIO.
+
+### Corregido: conexión real de la pestaña Proyectos al backend modular
+- Qué cambiamos:
+  - `dashboard/src/hooks/useJobManager.js` ahora carga historial desde `/api/projects/history`, inicia jobs con `/api/process`, abre proyectos con `/api/projects/clips/{job_id}` y borra con `DELETE /api/projects/{job_id}`.
+  - Se agregó persistencia local de favoritos y títulos personalizados de proyectos.
+  - `ProjectsView` ahora cambia a vista detalle al abrir un proyecto.
+  - `api/routes/jobs.py` vuelve a pasar a `main.py` los parámetros de UI: clips, Whisper, FFmpeg, ratio, trailer, modelo LLM y diarización.
+- Para qué sirve:
+  - La Project Library existente en tu UI queda funcional con el backend modular actual.
+
+### Ajustado: dependencias críticas pineadas
+- Qué cambiamos:
+  - Se pinearon dependencias sensibles siguiendo el upstream actual y compatibilidad local Mac: `scenedetect==0.7`, `faster-whisper==1.1.0`, `openai-whisper==20250625`, `whisperx==3.3.1`, `google-genai==1.75.0`, `python-dotenv==1.2.2`, `boto3==1.43.4`, `fastapi==0.136.1`, `uvicorn==0.46.0`, `python-multipart==0.0.27`, `httpx==0.28.1`.
+  - Se agregó `nest-asyncio>=1.6.0`, requerido por `app.py`.
+- Para qué sirve:
+  - Reduce drift de dependencias y evita fallos de importación en instalaciones limpias.
+
+### Nuevo: edición compacta y runtime Whisper robusto
+- Qué cambiamos:
+  - Se incorporaron `tight_edit.py`, `runtime_limits.py` y `whisper_runtime.py` desde el fork de `bogdan-dilaj`.
+  - `main.py` ahora usa `whisper_runtime.transcribe_with_runtime(...)` para Faster-Whisper, con cache de modelo, fallback GPU/CPU, safe mode, VAD y retries de idioma.
+  - Se añadió `--tight-edit-preset` (`off`, `balanced`, `aggressive`, `very_aggressive`) para eliminar pausas y muletillas antes del reencuadre vertical.
+  - Los clips compactados guardan metadata de `tight_edit_preset`, rangos eliminados, segmentos conservados y `display_duration`.
+  - `dashboard/src/components/MediaInput.jsx` añade control `Edición compacta` dentro de la configuración avanzada.
+  - `api/routes/jobs.py` pasa `tight_edit_preset` desde UI al proceso de `main.py`.
+- Para qué sirve:
+  - Permite generar shorts más densos eliminando silencios/fillers sin depender de edición manual.
+  - Hace la transcripción más estable en CPU/GPU y reduce reinicios costosos del modelo Whisper.
+
+### Nuevo: seguridad de contenido, términos y bloqueo opcional de URLs
+- Qué cambiamos:
+  - `api/routes/jobs.py` exige `ownership_attested` antes de iniciar cualquier procesamiento.
+  - Se persiste metadata básica de attestation en el estado del job: fuente, user-agent, IP y timestamp.
+  - `api/core/config.py` agrega `DISABLE_YOUTUBE_URL`; con `DISABLE_YOUTUBE_URL=true`, el backend rechaza URLs y acepta solo archivos subidos.
+  - `dashboard/src/components/MediaInput.jsx` añade confirmación explícita de derechos antes de generar.
+  - Se agregó `dashboard/src/views/LegalView.jsx` y una pestaña `Legal` con términos y privacidad básicos.
+  - `README.md` documenta la confirmación de derechos y el flag `DISABLE_YOUTUBE_URL`.
+- Para qué sirve:
+  - Reduce el riesgo de procesar contenido sin autorización y permite desplegar OpenShorts en modo solo-uploads.
+
+### Nuevo: CI básico para PRs y main
+- Qué cambiamos:
+  - Se agregó `.github/workflows/ci.yml`.
+  - El workflow valida sintaxis Python de backend/pipeline con `py_compile`.
+  - El workflow instala dependencias del dashboard con `npm ci` y ejecuta `npm run build`.
+- Para qué sirve:
+  - Evita merges con errores de sintaxis Python o roturas de build frontend.
+  - Deja una base para añadir lint/tests cuando se reduzca la deuda actual de ESLint.
+
 ## 2026-03-02
 
 ### Nuevo: control de tamaño del Viral Hook con slider + persistencia en export

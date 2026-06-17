@@ -42,3 +42,7 @@ output/.tmp_mutonby/
 # Node
 node_modules/
 dist/
+
+# Browser session cookies (NEVER commit)
+www.youtube.com_cookies.txt
+*cookies*.txt

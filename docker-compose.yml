@@ -1,13 +1,31 @@
 services:
+  render-service:
+    build:
+      context: .
+      dockerfile: render-service/Dockerfile
+    container_name: openshorts-render-service
+    ports:
+      - "3100:3100"
+    environment:
+      - PORT=3100
+      - OUTPUT_DIR=/output
+    volumes:
+      - ./output:/output
+    restart: unless-stopped
+
   backend:
     build: .
     container_name: openshorts-backend
     ports:
       - "8000:8000"
+    environment:
+      - RENDER_SERVICE_URL=http://render-service:3100
     volumes:
       - .:/app
       - /app/__pycache__
     restart: unless-stopped
+    depends_on:
+      - render-service
 
   frontend:
     build: ./dashboard

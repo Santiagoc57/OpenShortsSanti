@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-syntax:
+    name: Python syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile backend and pipeline modules
+        run: |
+          python -m py_compile \
+            app.py \
+            main.py \
+            editor.py \
+            subtitles.py \
+            s3_uploader.py \
+            tight_edit.py \
+            runtime_limits.py \
+            whisper_runtime.py \
+            $(find api -name '*.py' -print)
+
+      - name: Run lightweight Python unit tests
+        run: python -m unittest discover -s tests
+
+  dashboard-build:
+    name: Dashboard build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build dashboard
+        run: npm run build
+
+  render-service-build:
+    name: Render service build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: render-service
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: render-service/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build render service
+        run: npm run build
+
+  remotion-build:
+    name: Remotion composition build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: remotion
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: remotion/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Remotion composition
+        run: npm run build

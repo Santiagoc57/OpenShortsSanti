@@ -6,11 +6,13 @@ const MEDIA_INPUT_STORAGE_KEY = 'mediaInputPresetV2';
 
 const ALLOWED_VALUES = {
     language: ['es', 'en', 'fr', 'de', 'it', 'pt', 'auto'],
+    dubbingTargetLanguage: ['es', 'en', 'fr', 'de', 'it', 'pt', 'pl', 'hi', 'ja', 'ko', 'zh', 'ar', 'ru', 'tr', 'nl', 'sv', 'id', 'fil', 'ms', 'vi', 'th', 'uk', 'el', 'cs', 'fi', 'ro', 'da', 'bg', 'hr', 'sk', 'ta'],
     whisperBackend: ['openai', 'faster', 'whisperx'],
     whisperModel: ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3'],
     ffmpegPreset: ['ultrafast', 'fast', 'medium'],
     aspectRatio: ['9:16', '16:9'],
     clipLengthTarget: ['short', 'balanced', 'long'],
+    tightEditPreset: ['off', 'balanced', 'aggressive', 'very_aggressive'],
     generationMode: ['clips', 'trailer'],
     llmModel: [
         'gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'
@@ -25,6 +27,50 @@ const LLM_MODEL_OPTIONS = {
         { value: 'gemini-1.5-flash', label: 'gemini-1.5-flash | Gemini 1.5 Flash' }
     ]
 };
+
+const LANGUAGE_OPTIONS = [
+    { value: 'es', label: 'Español' },
+    { value: 'en', label: 'Inglés' },
+    { value: 'fr', label: 'Francés' },
+    { value: 'de', label: 'Alemán' },
+    { value: 'it', label: 'Italiano' },
+    { value: 'pt', label: 'Portugués' },
+    { value: 'auto', label: 'Detectar automáticamente' }
+];
+
+const DUBBING_LANGUAGE_OPTIONS = [
+    { value: 'es', label: 'Español' },
+    { value: 'en', label: 'Inglés' },
+    { value: 'fr', label: 'Francés' },
+    { value: 'de', label: 'Alemán' },
+    { value: 'it', label: 'Italiano' },
+    { value: 'pt', label: 'Portugués' },
+    { value: 'pl', label: 'Polaco' },
+    { value: 'hi', label: 'Hindi' },
+    { value: 'ja', label: 'Japonés' },
+    { value: 'ko', label: 'Coreano' },
+    { value: 'zh', label: 'Chino' },
+    { value: 'ar', label: 'Árabe' },
+    { value: 'ru', label: 'Ruso' },
+    { value: 'tr', label: 'Turco' },
+    { value: 'nl', label: 'Neerlandés' },
+    { value: 'sv', label: 'Sueco' },
+    { value: 'id', label: 'Indonesio' },
+    { value: 'fil', label: 'Filipino' },
+    { value: 'ms', label: 'Malayo' },
+    { value: 'vi', label: 'Vietnamita' },
+    { value: 'th', label: 'Tailandés' },
+    { value: 'uk', label: 'Ucraniano' },
+    { value: 'el', label: 'Griego' },
+    { value: 'cs', label: 'Checo' },
+    { value: 'fi', label: 'Finés' },
+    { value: 'ro', label: 'Rumano' },
+    { value: 'da', label: 'Danés' },
+    { value: 'bg', label: 'Búlgaro' },
+    { value: 'hr', label: 'Croata' },
+    { value: 'sk', label: 'Eslovaco' },
+    { value: 'ta', label: 'Tamil' }
+];
 
 const MODEL_OPTIONS_BY_BACKEND = {
     openai: [
@@ -296,6 +342,7 @@ function loadStoredMediaInputConfig() {
         if (!parsed || typeof parsed !== 'object') return null;
         return {
             language: pickAllowed(parsed.language, ALLOWED_VALUES.language, 'es'),
+            dubbingTargetLanguage: pickAllowed(parsed.dubbingTargetLanguage, ALLOWED_VALUES.dubbingTargetLanguage, 'es'),
             clipCount: clampNumber(parsed.clipCount, 6, 1, 15),
             trailerFragmentsTarget: clampNumber(parsed.trailerFragmentsTarget, 6, 2, 12),
             whisperBackend: pickAllowed(parsed.whisperBackend, ALLOWED_VALUES.whisperBackend, 'faster'),
@@ -304,10 +351,11 @@ function loadStoredMediaInputConfig() {
                 pickAllowed(parsed.whisperModel, ALLOWED_VALUES.whisperModel, 'large-v3')
             ),
             wordTimestamps: typeof parsed.wordTimestamps === 'boolean' ? parsed.wordTimestamps : true,
-            ffmpegPreset: pickAllowed(parsed.ffmpegPreset, ALLOWED_VALUES.ffmpegPreset, 'fast'),
-            ffmpegCrf: clampNumber(parsed.ffmpegCrf, 23, 18, 30),
+            ffmpegPreset: pickAllowed(parsed.ffmpegPreset, ALLOWED_VALUES.ffmpegPreset, 'medium'),
+            ffmpegCrf: clampNumber(parsed.ffmpegCrf, 18, 18, 30),
             aspectRatio: pickAllowed(parsed.aspectRatio, ALLOWED_VALUES.aspectRatio, '9:16'),
             clipLengthTarget: pickAllowed(parsed.clipLengthTarget, ALLOWED_VALUES.clipLengthTarget, 'balanced'),
+            tightEditPreset: pickAllowed(parsed.tightEditPreset, ALLOWED_VALUES.tightEditPreset, 'off'),
             selectedTemplate: TEMPLATE_PRESETS.some((p) => p.id === parsed.selectedTemplate) ? parsed.selectedTemplate : 'default',
             selectedContentPreset: CONTENT_PRESETS.some((p) => p.id === parsed.selectedContentPreset) ? parsed.selectedContentPreset : 'general',
             selectedWhisperOption: (WHISPER_OPTION_PRESETS.some((p) => p.id === parsed.selectedWhisperOption) || parsed.selectedWhisperOption === 'custom')
@@ -333,16 +381,18 @@ export default function MediaInput({
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
     const [language, setLanguage] = useState(initialConfig?.language ?? 'es');
+    const [dubbingTargetLanguage, setDubbingTargetLanguage] = useState(initialConfig?.dubbingTargetLanguage ?? 'es');
     const [clipCount, setClipCount] = useState(initialConfig?.clipCount ?? 6);
     const [trailerFragmentsTarget, setTrailerFragmentsTarget] = useState(initialConfig?.trailerFragmentsTarget ?? 6);
     const [whisperBackend, setWhisperBackend] = useState(initialConfig?.whisperBackend ?? 'faster');
     const [whisperModel, setWhisperModel] = useState(initialConfig?.whisperModel ?? 'large-v3');
     const [wordTimestamps, setWordTimestamps] = useState(initialConfig?.wordTimestamps ?? true);
     const [enableDiarization, setEnableDiarization] = useState(initialConfig?.enableDiarization ?? false);
-    const [ffmpegPreset, setFfmpegPreset] = useState(initialConfig?.ffmpegPreset ?? 'fast');
-    const [ffmpegCrf, setFfmpegCrf] = useState(initialConfig?.ffmpegCrf ?? 23);
+    const [ffmpegPreset, setFfmpegPreset] = useState(initialConfig?.ffmpegPreset ?? 'medium');
+    const [ffmpegCrf, setFfmpegCrf] = useState(initialConfig?.ffmpegCrf ?? 18);
     const [aspectRatio, setAspectRatio] = useState(initialConfig?.aspectRatio ?? '9:16');
     const [clipLengthTarget, setClipLengthTarget] = useState(initialConfig?.clipLengthTarget ?? 'balanced');
+    const [tightEditPreset, setTightEditPreset] = useState(initialConfig?.tightEditPreset ?? 'off');
     const [selectedTemplate, setSelectedTemplate] = useState(initialConfig?.selectedTemplate ?? 'default');
     const [selectedContentPreset, setSelectedContentPreset] = useState(initialConfig?.selectedContentPreset ?? 'general');
     const [selectedWhisperOption, setSelectedWhisperOption] = useState(initialConfig?.selectedWhisperOption ?? 'faster_balanced');
@@ -356,6 +406,7 @@ export default function MediaInput({
         if (typeof window === 'undefined') return;
         const payload = {
             language,
+            dubbingTargetLanguage,
             clipCount,
             trailerFragmentsTarget,
             whisperBackend,
@@ -365,6 +416,7 @@ export default function MediaInput({
             ffmpegCrf,
             aspectRatio,
             clipLengthTarget,
+            tightEditPreset,
             selectedTemplate,
             selectedContentPreset,
             selectedWhisperOption,
@@ -375,6 +427,7 @@ export default function MediaInput({
         window.localStorage.setItem(MEDIA_INPUT_STORAGE_KEY, JSON.stringify(payload));
     }, [
         language,
+        dubbingTargetLanguage,
         clipCount,
         trailerFragmentsTarget,
         whisperBackend,
@@ -385,6 +438,7 @@ export default function MediaInput({
         ffmpegCrf,
         aspectRatio,
         clipLengthTarget,
+        tightEditPreset,
         selectedTemplate,
         selectedContentPreset,
         selectedWhisperOption,
@@ -405,6 +459,7 @@ export default function MediaInput({
         if (typeof settings.wordTimestamps === 'boolean') setWordTimestamps(settings.wordTimestamps);
         if (settings.ffmpegPreset) setFfmpegPreset(settings.ffmpegPreset);
         if (typeof settings.ffmpegCrf === 'number') setFfmpegCrf(settings.ffmpegCrf);
+        if (settings.tightEditPreset) setTightEditPreset(settings.tightEditPreset);
     };
 
     useEffect(() => {
@@ -455,7 +510,8 @@ export default function MediaInput({
         applySettings(preset.settings);
     };
 
-    const canConfigure = (mode === 'url' && url.trim()) || (mode === 'file' && file);
+    const hasSource = (mode === 'url' && url.trim()) || (mode === 'file' && file);
+    const canConfigure = hasSource;
     const modalInputClass = 'w-full rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-3.5 text-sm text-slate-900 dark:text-white shadow-sm focus:border-primary focus:ring-primary';
     const modalLabelClass = 'block text-sm font-medium text-slate-700 dark:text-slate-300';
     const modalCardClass = 'rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900/60 p-5 shadow-sm';
@@ -465,6 +521,7 @@ export default function MediaInput({
 
         const payloadBase = {
             language,
+            dubbingTargetLanguage,
             clipCount,
             trailer_fragments_target: trailerFragmentsTarget,
             whisperBackend,
@@ -475,12 +532,14 @@ export default function MediaInput({
             ffmpegCrf,
             aspectRatio,
             clipLengthTarget,
+            tight_edit_preset: tightEditPreset,
             styleTemplate: selectedTemplate,
             contentPreset: selectedContentPreset,
             llm_provider: 'gemini',
             llm_model: llmModel,
             generation_mode: generationMode,
-            build_trailer: generationMode === 'trailer'
+            build_trailer: generationMode === 'trailer',
+            ownership_attested: true
         };
 
         const headers = {};
@@ -593,7 +652,7 @@ export default function MediaInput({
 
                 <button
                     type="button"
-                    disabled={isProcessing || !canConfigure}
+                    disabled={isProcessing || !hasSource}
                     onClick={() => setShowConfigModal(true)}
                     className="w-full mt-5 rounded-full bg-gradient-to-r from-[#ba9df8] via-[#aa8cf5] to-[#946ff1] hover:brightness-95 !text-white font-medium py-3.5 px-6 shadow-[0_10px_24px_rgba(139,92,246,0.35)] transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -828,13 +887,11 @@ export default function MediaInput({
                                                 onChange={(e) => setLanguage(e.target.value)}
                                                 className={modalInputClass}
                                             >
-                                                <option value="es">Español</option>
-                                                <option value="en">Inglés</option>
-                                                <option value="fr">Francés</option>
-                                                <option value="de">Alemán</option>
-                                                <option value="it">Italiano</option>
-                                                <option value="pt">Portugués</option>
-                                                <option value="auto">Detectar automáticamente</option>
+                                                {LANGUAGE_OPTIONS.map((option) => (
+                                                    <option key={option.value} value={option.value}>
+                                                        {option.label}
+                                                    </option>
+                                                ))}
                                             </select>
                                         </div>
                                     </div>
@@ -954,6 +1011,40 @@ export default function MediaInput({
 
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                             <div className="space-y-2">
+                                                <label className={modalLabelClass}>Idioma del video</label>
+                                                <select
+                                                    value={language}
+                                                    onChange={(e) => setLanguage(e.target.value)}
+                                                    className={modalInputClass}
+                                                >
+                                                    {LANGUAGE_OPTIONS.map((option) => (
+                                                        <option key={option.value} value={option.value}>
+                                                            {option.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                                                    Se usa para transcripción y análisis. En `auto`, el backend intenta detectarlo.
+                                                </p>
+                                            </div>
+                                            <div className="space-y-2">
+                                                <label className={modalLabelClass}>Idioma destino del doblaje</label>
+                                                <select
+                                                    value={dubbingTargetLanguage}
+                                                    onChange={(e) => setDubbingTargetLanguage(e.target.value)}
+                                                    className={modalInputClass}
+                                                >
+                                                    {DUBBING_LANGUAGE_OPTIONS.map((option) => (
+                                                        <option key={option.value} value={option.value}>
+                                                            {option.label}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                                                    Se aplicará como predeterminado cuando actives doblaje IA en Clip Studio.
+                                                </p>
+                                            </div>
+                                            <div className="space-y-2">
                                                 <label className={modalLabelClass}>Whisper backend</label>
                                                 <select
                                                     value={whisperBackend}
@@ -1048,6 +1139,22 @@ export default function MediaInput({
                                                     }}
                                                     className={modalInputClass}
                                                 />
+                                            </div>
+                                            <div className="space-y-2 md:col-span-2">
+                                                <label className={modalLabelClass}>Edición compacta</label>
+                                                <select
+                                                    value={tightEditPreset}
+                                                    onChange={(e) => {
+                                                        setTightEditPreset(e.target.value);
+                                                        setSelectedWhisperOption('custom');
+                                                    }}
+                                                    className={modalInputClass}
+                                                >
+                                                    <option value="off">Desactivada</option>
+                                                    <option value="balanced">Balanceada</option>
+                                                    <option value="aggressive">Agresiva</option>
+                                                    <option value="very_aggressive">Muy agresiva</option>
+                                                </select>
                                             </div>
                                         </div>
                                     </div>

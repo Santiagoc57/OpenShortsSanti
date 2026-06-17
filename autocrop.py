@@ -103,22 +103,29 @@ class SmoothedCameraman:
             x, y, w, h = box
             self.target_center_x = x + w / 2
     
+    # Exponential smoothing tuned for a "tripod" feel: speeds are relative to
+    # the video width so panning behaves the same at 720p and 4K.
+    SMOOTHING_FACTOR = 0.10   # fraction of remaining distance covered per frame
+    MAX_STEP_RATIO = 0.015    # max pan speed: 1.5% of width per frame
+    MIN_STEP_RATIO = 0.002    # avoids an asymptotic crawl near the target
+
     def get_crop_box(self, force_snap=False):
         if force_snap:
             self.current_center_x = self.target_center_x
         else:
             diff = self.target_center_x - self.current_center_x
             if abs(diff) > self.safe_zone_radius:
-                direction = 1 if diff > 0 else -1
-                if abs(diff) > self.crop_width * 0.5:
-                    speed = 15.0
-                else:
-                    speed = 3.0
-                
-                self.current_center_x += direction * speed
-                new_diff = self.target_center_x - self.current_center_x
-                if (direction == 1 and new_diff < 0) or (direction == -1 and new_diff > 0):
+                step = diff * self.SMOOTHING_FACTOR
+                max_step = self.video_width * self.MAX_STEP_RATIO
+                min_step = self.video_width * self.MIN_STEP_RATIO
+                if abs(step) > max_step:
+                    step = max_step if step > 0 else -max_step
+                elif abs(step) < min_step:
+                    step = min_step if step > 0 else -min_step
+                if abs(step) >= abs(diff):
                     self.current_center_x = self.target_center_x
+                else:
+                    self.current_center_x += step
                 
         half_crop = self.crop_width / 2
         
@@ -226,9 +233,27 @@ class SpeakerTracker:
             
         return None
 
+# Detection runs on a downscaled copy: MediaPipe/YOLO accuracy is unaffected at
+# this size, but color conversion + preprocessing on 1080p/4K frames dominates
+# per-frame cost otherwise.
+DETECTION_MAX_WIDTH = 640
+
+def _detection_frame(frame):
+    height, width = frame.shape[:2]
+    if width <= DETECTION_MAX_WIDTH:
+        return frame
+    scale = DETECTION_MAX_WIDTH / width
+    return cv2.resize(
+        frame,
+        (DETECTION_MAX_WIDTH, max(2, int(height * scale))),
+        interpolation=cv2.INTER_AREA,
+    )
+
 def detect_face_candidates(frame):
-    height, width, _ = frame.shape
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # Boxes are computed from MediaPipe's relative coords scaled by the
+    # ORIGINAL frame size, so downscaling the detection input is transparent.
+    height, width = frame.shape[:2]
+    rgb_frame = cv2.cvtColor(_detection_frame(frame), cv2.COLOR_BGR2RGB)
     detector = get_face_detector()
     results = detector.process(rgb_frame)
     
@@ -251,8 +276,10 @@ def detect_face_candidates(frame):
 
 def detect_person_yolo(frame):
     model = get_yolo_model()
-    results = model(frame, verbose=False, classes=[0])
-    
+    # imgsz=480 caps YOLO's internal letterbox size; boxes come back in
+    # original-frame coordinates regardless.
+    results = model(frame, verbose=False, classes=[0], imgsz=480)
+
     if not results:
         return None
         
@@ -274,39 +301,95 @@ def detect_person_yolo(frame):
                 
     return best_box
 
+def create_general_frame(frame, output_width, output_height):
+    """
+    'General Shot' frame:
+    - Background: blurred cover-crop of the original.
+    - Foreground: original scaled to fit, centered.
+    The background is blurred at quarter resolution and upscaled: visually
+    identical to a large-kernel blur at full size, ~10x faster per frame.
+    """
+    orig_h, orig_w = frame.shape[:2]
+
+    small_w = max(2, output_width // 4)
+    small_h = max(2, output_height // 4)
+    bg_scale = max(small_w / orig_w, small_h / orig_h)
+    bg_w = max(small_w, int(orig_w * bg_scale))
+    bg_h = max(small_h, int(orig_h * bg_scale))
+    bg_small = cv2.resize(frame, (bg_w, bg_h), interpolation=cv2.INTER_AREA)
+
+    start_x = max(0, (bg_w - small_w) // 2)
+    start_y = max(0, (bg_h - small_h) // 2)
+    bg_small = bg_small[start_y:start_y + small_h, start_x:start_x + small_w]
+    if bg_small.shape[0] != small_h or bg_small.shape[1] != small_w:
+        bg_small = cv2.resize(bg_small, (small_w, small_h))
+
+    bg_small = cv2.GaussianBlur(bg_small, (13, 13), 0)
+    background = cv2.resize(bg_small, (output_width, output_height), interpolation=cv2.INTER_LINEAR)
+
+    scale = min(output_width / orig_w, output_height / orig_h)
+    fg_w = max(2, int(orig_w * scale))
+    fg_h = max(2, int(orig_h * scale))
+    foreground = cv2.resize(frame, (fg_w, fg_h), interpolation=cv2.INTER_AREA)
+
+    x_offset = (output_width - fg_w) // 2
+    y_offset = (output_height - fg_h) // 2
+    background[y_offset:y_offset + fg_h, x_offset:x_offset + fg_w] = foreground
+
+    return background
+
+def _count_persons_yolo(frame, min_confidence=0.4):
+    model = get_yolo_model()
+    results = model(frame, verbose=False, classes=[0], imgsz=480)
+    count = 0
+    for result in results:
+        for box in result.boxes:
+            if float(box.conf[0]) >= min_confidence:
+                count += 1
+    return count
+
 def analyze_scenes_strategy(video_path, scenes):
     cap = cv2.VideoCapture(video_path)
     strategies = []
-    
+
     if not cap.isOpened():
         return ['TRACK'] * len(scenes)
-        
+
     for start, end in tqdm(scenes, desc="   Analyzing Scenes"):
         frames_to_check = [
             start.get_frames() + 5,
             int((start.get_frames() + end.get_frames()) / 2),
             end.get_frames() - 5
         ]
-        
+
         face_counts = []
+        middle_frame = None
         for f_idx in frames_to_check:
             cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
             ret, frame = cap.read()
             if not ret: continue
-            
+
             candidates = detect_face_candidates(frame)
             face_counts.append(len(candidates))
-            
+            if middle_frame is None or f_idx == frames_to_check[1]:
+                middle_frame = frame
+
         if not face_counts:
             avg_faces = 0
         else:
             avg_faces = sum(face_counts) / len(face_counts)
-            
-        if avg_faces > 1.2 or avg_faces < 0.5:
+
+        if avg_faces > 1.2:
             strategies.append('GENERAL')
+        elif avg_faces < 0.5:
+            # Face detection misses profiles/backlit subjects. If YOLO sees
+            # exactly one person, TRACK (with its YOLO fallback) frames better
+            # than the blurred GENERAL layout.
+            person_count = _count_persons_yolo(middle_frame) if middle_frame is not None else 0
+            strategies.append('TRACK' if person_count == 1 else 'GENERAL')
         else:
             strategies.append('TRACK')
-            
+
     cap.release()
     return strategies
 

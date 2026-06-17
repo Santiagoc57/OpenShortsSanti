@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { X, FileText, Captions, Type, LayoutTemplate, Music2, Search, Sparkles, Loader2, Play, Pause, Pencil, SlidersHorizontal, ZoomOut, ZoomIn, Crosshair, Menu, Lightbulb, Download, Languages, RotateCcw } from 'lucide-react';
+import { X, FileText, Captions, Type, LayoutTemplate, Music2, Search, Sparkles, Loader2, Play, Pause, Pencil, SlidersHorizontal, ZoomOut, ZoomIn, Crosshair, Menu, Lightbulb, Download, Languages, RotateCcw, RectangleHorizontal, RectangleVertical, Image } from 'lucide-react';
 import { apiFetch, getApiUrl } from '../config';
 import SubtitleRenderer from './SubtitleRenderer';
+import { useLocalBurn } from '../hooks/useLocalBurn';
 
 const CAPTION_PRESETS = [
   {
@@ -181,6 +182,7 @@ const SECTION_ITEMS = [
   { id: 'viral_hook', label: 'Hook Viral', icon: Sparkles },
   { id: 'layout', label: 'Editar layout', icon: LayoutTemplate },
   { id: 'music', label: 'Música', icon: Music2 },
+  { id: 'broll', label: 'Tomas B-Roll', icon: Image },
   { id: 'dubbing', label: 'Doblaje', icon: Languages }
 ];
 
@@ -216,6 +218,18 @@ const DEFAULT_DUBBING_LANGUAGES = {
   hr: 'Croatian',
   sk: 'Slovak',
   ta: 'Tamil'
+};
+
+const normalizeDubbingLanguageCode = (value, fallback = 'es') => {
+  const key = String(value || '').trim().toLowerCase();
+  if (key && key !== 'auto') return key;
+  return fallback;
+};
+
+const getDubbingLanguageLabel = (code, catalog = DEFAULT_DUBBING_LANGUAGES) => {
+  const key = String(code || '').trim().toLowerCase();
+  if (!key || key === 'auto') return 'Auto detectar';
+  return catalog?.[key] || key.toUpperCase();
 };
 
 const SUBTITLE_EMOJIS = ['🔥', '😈', '🤯', '😂', '😱', '🚨', '✅', '💸', '🎯', '💥', '👏', '🙏'];
@@ -587,6 +601,8 @@ export default function ClipStudioModal({
   clipIndex,
   clip,
   currentVideoUrl,
+  projectLanguage = 'auto',
+  defaultDubbingTargetLanguage = 'es',
   onApplied,
   onClipPatched,
   fontCatalog = DEFAULT_FONT_OPTIONS,
@@ -595,7 +611,10 @@ export default function ClipStudioModal({
   const [section, setSection] = useState('transcript');
   const [isApplying, setIsApplying] = useState(false);
   const [applyAction, setApplyAction] = useState('apply');
+  const { startExport, isExporting, exportProgress, exportStatus } = useLocalBurn();
   const [isRenderingFastPreview, setIsRenderingFastPreview] = useState(false);
+  const [isRenderingRemotion, setIsRenderingRemotion] = useState(false);
+  const [remotionProgress, setRemotionProgress] = useState(0);
   const [isLoadingTranscript, setIsLoadingTranscript] = useState(false);
   const [isLoadingSrt, setIsLoadingSrt] = useState(false);
   const [error, setError] = useState('');
@@ -634,6 +653,29 @@ export default function ClipStudioModal({
   const [subtitleSearch, setSubtitleSearch] = useState('');
   const [emojiPickerForId, setEmojiPickerForId] = useState('');
   const [emojiSuggestFeedback, setEmojiSuggestFeedback] = useState('');
+
+  const [brollSuggestions, setBrollSuggestions] = useState([]);
+  const [isFetchingBroll, setIsFetchingBroll] = useState(false);
+
+  const fetchBrollSuggestions = async () => {
+    if (!subtitleEntries || subtitleEntries.length === 0) return;
+    setIsFetchingBroll(true);
+    try {
+      const texts = subtitleEntries.map(e => e.text).filter(Boolean);
+      const res = await apiFetch(`/api/suggest-broll`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lines: texts })
+      });
+      if (res && res.suggestions) {
+        setBrollSuggestions(res.suggestions);
+      }
+    } catch (e) {
+      console.error('Error fetching B-roll suggestions:', e);
+    } finally {
+      setIsFetchingBroll(false);
+    }
+  };
 
   const [layoutAspect, setLayoutAspect] = useState(clip?.aspect_ratio === '16:9' ? '16:9' : '9:16');
   const [layoutStart, setLayoutStart] = useState(Number(clip?.start || 0));
@@ -761,7 +803,7 @@ export default function ClipStudioModal({
   const [musicVolume, setMusicVolume] = useState(0.18);
   const [duckVoice, setDuckVoice] = useState(true);
   const [dubbingEnabled, setDubbingEnabled] = useState(false);
-  const [dubbingTargetLanguage, setDubbingTargetLanguage] = useState('es');
+  const [dubbingTargetLanguage, setDubbingTargetLanguage] = useState(normalizeDubbingLanguageCode(defaultDubbingTargetLanguage, 'es'));
   const [dubbingSourceLanguage, setDubbingSourceLanguage] = useState('auto');
   const [dubbingLanguages, setDubbingLanguages] = useState(DEFAULT_DUBBING_LANGUAGES);
   const [isLoadingDubbingLanguages, setIsLoadingDubbingLanguages] = useState(false);
@@ -769,6 +811,13 @@ export default function ClipStudioModal({
     () => Object.entries(dubbingLanguages || {}).sort((a, b) => String(a[1]).localeCompare(String(b[1]))),
     [dubbingLanguages]
   );
+  const resolvedProjectLanguage = String(projectLanguage || 'auto').trim().toLowerCase() || 'auto';
+  const resolvedDefaultDubbingTargetLanguage = normalizeDubbingLanguageCode(
+    defaultDubbingTargetLanguage || (resolvedProjectLanguage !== 'auto' ? resolvedProjectLanguage : 'es'),
+    'es'
+  );
+  const projectLanguageLabel = getDubbingLanguageLabel(resolvedProjectLanguage, dubbingLanguages);
+  const defaultDubbingTargetLabel = getDubbingLanguageLabel(resolvedDefaultDubbingTargetLanguage, dubbingLanguages);
 
   const [viralHookText, setViralHookText] = useState(() => resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl));
   const [viralHookEnabled, setViralHookEnabled] = useState(() => Boolean(resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl)));
@@ -1447,6 +1496,158 @@ export default function ClipStudioModal({
     }
   }, [downloadVideoFromUrl, openDownloadFallback]);
 
+  const buildRemotionPayload = useCallback(() => {
+    const fps = 30;
+    const durationSeconds = Math.max(0.2, Number(timelineDuration || previewDuration || 30));
+    const normalizedAnimation = karaokeMode
+      ? 'karaoke'
+      : (subtitleAnimation === 'pop' ? 'pop' : (subtitleAnimation === 'none' ? 'none' : 'word-highlight'));
+
+    const captions = captionsOn
+      ? (subtitleEntries || [])
+        .filter((entry) => String(entry?.text || '').trim())
+        .flatMap((entry) => {
+          const words = Array.isArray(entry?.words) ? entry.words : [];
+          if (words.length > 0) {
+            return words
+              .filter((word) => String(word?.word || word?.text || '').trim())
+              .map((word) => ({
+                text: String(word.word || word.text || '').trim(),
+                startMs: Math.max(0, Math.round(Number(word.start || entry.start || 0) * 1000)),
+                endMs: Math.max(1, Math.round(Number(word.end || entry.end || entry.start || 0) * 1000))
+              }));
+          }
+          return [{
+            text: String(entry.text || '').trim(),
+            startMs: Math.max(0, Math.round(Number(entry.start || 0) * 1000)),
+            endMs: Math.max(1, Math.round(Number(entry.end || entry.start || 0) * 1000))
+          }];
+        })
+      : [];
+
+    const subtitles = captions.length > 0 ? {
+      captions,
+      position: ['top', 'middle', 'bottom'].includes(position) ? position : 'bottom',
+      style: {
+        fontFamily,
+        fontSize: Number(fontSize || 60),
+        fontColor,
+        highlightColor: '#FACC15',
+        borderColor: strokeColor,
+        borderWidth: Number(strokeWidth || 0),
+        bgColor: boxColor,
+        bgOpacity: clamp(Number(boxOpacity || 0) / 100, 0, 1),
+        animation: normalizedAnimation
+      }
+    } : null;
+
+    const hookText = viralHookEnabled ? String(viralHookText || '').trim() : '';
+    const hookSize = Number(viralHookFontSize || 54) >= 70 ? 'L' : (Number(viralHookFontSize || 54) <= 42 ? 'S' : 'M');
+
+    return {
+      jobId: String(jobId || 'manual'),
+      clipIndex: Number(clipIndex || 0),
+      props: {
+        videoUrl: currentVideoUrl,
+        durationInFrames: Math.max(1, Math.round(durationSeconds * fps)),
+        fps,
+        width: 1080,
+        height: 1920,
+        subtitles,
+        hook: hookText ? {
+          text: hookText,
+          position: 'top',
+          size: hookSize,
+          entranceAnimation: 'spring',
+          displayDurationSec: clamp(Number(viralHookDuration || VIRAL_HOOK_DEFAULT_DURATION), 0.4, 8)
+        } : null,
+        effects: {
+          segments: [{
+            startSec: 0,
+            endSec: durationSeconds,
+            zoom: clamp(Number(layoutZoom || 1), 0.5, 3),
+            zoomCenterX: 0.5,
+            zoomCenterY: 0.5,
+            brightness: 1,
+            contrast: 1,
+            saturate: 1
+          }]
+        }
+      }
+    };
+  }, [
+    boxColor,
+    boxOpacity,
+    captionsOn,
+    clipIndex,
+    currentVideoUrl,
+    fontColor,
+    fontFamily,
+    fontSize,
+    jobId,
+    karaokeMode,
+    layoutZoom,
+    position,
+    previewDuration,
+    strokeColor,
+    strokeWidth,
+    subtitleAnimation,
+    subtitleEntries,
+    timelineDuration,
+    viralHookDuration,
+    viralHookEnabled,
+    viralHookFontSize,
+    viralHookText
+  ]);
+
+  const handleRemotionRender = useCallback(async () => {
+    if (!currentVideoUrl || isRenderingRemotion) return;
+    setIsRenderingRemotion(true);
+    setRemotionProgress(0);
+    setError('');
+
+    try {
+      const submitRes = await apiFetch('/api/render/remotion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildRemotionPayload())
+      });
+      if (!submitRes.ok) throw new Error(await parseApiErrorDetail(submitRes));
+      const submitted = await submitRes.json();
+      const renderId = submitted?.renderId;
+      if (!renderId) throw new Error('El render-service no devolvió renderId');
+
+      let finalUrl = '';
+      for (let attempt = 0; attempt < 360; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const statusRes = await apiFetch(`/api/render/remotion/${encodeURIComponent(renderId)}`);
+        if (!statusRes.ok) throw new Error(await parseApiErrorDetail(statusRes));
+        const statusData = await statusRes.json();
+        setRemotionProgress(Number(statusData?.progress || 0));
+        if (statusData?.status === 'error') {
+          throw new Error(statusData?.error || 'Render Remotion falló');
+        }
+        if (statusData?.status === 'done') {
+          finalUrl = String(statusData?.outputUrl || '').trim();
+          break;
+        }
+      }
+
+      if (!finalUrl) throw new Error('Render Remotion agotó el tiempo de espera');
+      await downloadVideoWithFallback(finalUrl);
+    } catch (e) {
+      setError(`No se pudo renderizar con Remotion: ${e.message}`);
+      setTimeout(() => setError(''), 5000);
+    } finally {
+      setIsRenderingRemotion(false);
+    }
+  }, [
+    buildRemotionPayload,
+    currentVideoUrl,
+    downloadVideoWithFallback,
+    isRenderingRemotion
+  ]);
+
   useEffect(() => {
     if (!isOpen) return;
     setSection('transcript');
@@ -1475,7 +1676,7 @@ export default function ClipStudioModal({
     setMusicVolume(0.18);
     setDuckVoice(true);
     setDubbingEnabled(false);
-    setDubbingTargetLanguage(String(clip?.dub_target_language || 'es').trim().toLowerCase() || 'es');
+    setDubbingTargetLanguage(normalizeDubbingLanguageCode(clip?.dub_target_language || resolvedDefaultDubbingTargetLanguage, 'es'));
     setDubbingSourceLanguage(String(clip?.dub_source_language || 'auto').trim().toLowerCase() || 'auto');
     const nextViralHookDefault = resolveDefaultViralHookText(clip, clipIndex, currentVideoUrl);
     const nextViralHookStyle = resolveViralHookStyle(clip);
@@ -1609,7 +1810,8 @@ export default function ClipStudioModal({
     clip?.video_title_for_youtube_short,
     clip?.title,
     clip?.video_url,
-    currentVideoUrl
+    currentVideoUrl,
+    resolvedDefaultDubbingTargetLanguage
   ]);
 
   useEffect(() => {
@@ -2676,14 +2878,39 @@ export default function ClipStudioModal({
             <button
               type="button"
               onClick={() => handleApply({ downloadAfter: true })}
-              disabled={isApplying}
+              disabled={isApplying || isExporting}
               className="px-4 py-2 rounded-full bg-emerald-600 hover:bg-emerald-700 !text-white text-sm font-semibold shadow-sm shadow-emerald-900/20 disabled:opacity-60 inline-flex items-center gap-2 transition-colors"
-              title="Aplica cambios y descarga el clip final"
+              title="Aplica cambios y descarga el clip final en el servidor"
             >
               {isApplying && applyAction === 'apply_download' ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
               {isApplying
                 ? (applyAction === 'apply_download' ? 'Aplicando y descargando...' : 'Procesando...')
-                : 'Aplicar y descargar'}
+                : 'Aplicar y Servidor'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if(!previewVideoRef.current) return;
+                startExport(previewVideoRef.current, subtitleEntries, {
+                  fontSize, fontFamily, fontColor, strokeColor, strokeWidth, bold, boxColor, boxOpacity, position
+                });
+              }}
+              disabled={isApplying || isExporting}
+              className="px-4 py-2 rounded-full bg-[#18181B] hover:bg-[#27272A] border border-white/10 !text-white text-sm font-bold shadow-sm inline-flex items-center gap-2 transition-colors shrink-0"
+              title="Exportación 100% en tu navegador vía Canvas y MediaBunny (mucho más rápido y aísla al servidor)"
+            >
+              {isExporting ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+              {isExporting ? `Quemando sub (${Math.round(exportProgress)}%) ...` : 'Descarga Ultra Rápida'}
+            </button>
+            <button
+              type="button"
+              onClick={handleRemotionRender}
+              disabled={isApplying || isExporting || isRenderingRemotion || !currentVideoUrl}
+              className="px-4 py-2 rounded-full bg-indigo-600 hover:bg-indigo-700 !text-white text-sm font-semibold shadow-sm shadow-indigo-900/20 disabled:opacity-60 inline-flex items-center gap-2 transition-colors shrink-0"
+              title="Renderiza el clip con Remotion usando subtítulos animados y hook"
+            >
+              {isRenderingRemotion ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+              {isRenderingRemotion ? `Remotion ${Math.round(remotionProgress)}%` : 'Remotion'}
             </button>
           </div>
         </div>
@@ -3678,25 +3905,33 @@ export default function ClipStudioModal({
                     />
                   )}
 
-                  <div>
+                  <div className="mb-4">
                     <p className="text-xs font-semibold text-zinc-500 mb-2">Formato</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      {['9:16', '16:9'].map((ratio) => (
-                        <button
-                          key={ratio}
-                          type="button"
-                          onClick={() => {
-                            const changed = handleLayoutAspectChange(ratio);
-                            if (changed) void handleFastPreview(ratio);
-                          }}
-                          className={`rounded-lg px-3 py-2 text-sm border ${layoutAspect === ratio
-                            ? 'border-violet-400 bg-violet-100 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300'
-                            : 'border-black/10 dark:border-white/10 text-zinc-700 dark:text-zinc-200'
+                    <div className="flex items-center bg-slate-100 dark:bg-slate-800/60 p-1 rounded-[14px]">
+                      {[
+                        { ratio: '16:9', label: 'Landscape', Icon: RectangleHorizontal },
+                        { ratio: '9:16', label: 'Portrait', Icon: RectangleVertical }
+                      ].map(({ ratio, label, Icon }) => {
+                        const active = layoutAspect === ratio;
+                        return (
+                          <button
+                            key={ratio}
+                            type="button"
+                            onClick={() => {
+                              const changed = handleLayoutAspectChange(ratio);
+                              if (changed) void handleFastPreview(ratio);
+                            }}
+                            className={`flex flex-1 items-center justify-center gap-2 rounded-xl py-1.5 px-3 text-[13px] font-semibold transition-all duration-200 ${
+                              active
+                                ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm ring-1 ring-black/5 dark:ring-white/10'
+                                : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 hover:bg-black/5 dark:hover:text-slate-300 dark:hover:bg-white/5'
                             }`}
-                        >
-                          {ratio}
-                        </button>
-                      ))}
+                          >
+                            <Icon size={16} strokeWidth={2.5} />
+                            {label}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 
@@ -3971,6 +4206,69 @@ export default function ClipStudioModal({
                 </div>
               )}
 
+              {section === 'broll' && (
+                <div className="flex flex-col h-full bg-slate-50 dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800">
+                  <div className="shrink-0 p-4 border-b border-slate-200 dark:border-slate-800 flex items-center gap-2 bg-white dark:bg-slate-900">
+                    <Image className="text-pink-500" size={18} />
+                    <h3 className="font-semibold text-sm text-slate-800 dark:text-slate-100">B-Roll Assistant</h3>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    <div className="bg-blue-50 dark:bg-blue-900/20 text-blue-800 dark:text-blue-200 p-3 rounded-xl text-xs flex gap-2">
+                        <Lightbulb size={16} className="shrink-0 mt-0.5" />
+                        <p>Genera ideas visuales automáticas usando IA para cada línea de tu guion, listas para buscar en Pexels o generar en Midjourney.</p>
+                    </div>
+
+                    {!brollSuggestions.length ? (
+                        <button
+                            type="button"
+                            onClick={fetchBrollSuggestions}
+                            disabled={isFetchingBroll}
+                            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-pink-100 dark:bg-pink-900/30 text-pink-700 dark:text-pink-300 font-semibold hover:bg-pink-200 dark:hover:bg-pink-900/50 transition-colors"
+                        >
+                            {isFetchingBroll ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                            {isFetchingBroll ? 'Consultando a la IA...' : 'Generar Sugerencias Visuales'}
+                        </button>
+                    ) : (
+                        <div className="space-y-3">
+                            {brollSuggestions.map((item, idx) => (
+                                <div key={idx} className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-3 shadow-sm">
+                                    <h4 className="font-semibold text-[11px] text-slate-500 dark:text-slate-400 mb-1">
+                                       Línea {item.line_index || (idx + 1)}
+                                    </h4>
+                                    <p className="text-xs font-medium mb-3 text-slate-800 dark:text-slate-200 border-l-2 border-pink-400 pl-2">
+                                        "{subtitleEntries[idx]?.text || '(Texto)'}"
+                                    </p>
+                                    <div className="mt-3 space-y-2">
+                                        <div className="flex flex-col gap-1">
+                                            <span className="text-[9px] uppercase font-bold text-slate-400">Stock (Pexels)</span>
+                                            <div className="bg-slate-100 dark:bg-slate-900 rounded p-1.5 text-xs font-mono select-all cursor-text">{item.stock_keyword || '-'}</div>
+                                        </div>
+                                        <div className="flex flex-col gap-1">
+                                            <span className="text-[9px] uppercase font-bold text-slate-400">Midjourney Prompt</span>
+                                            <div className="bg-slate-100 dark:bg-slate-900 rounded p-1.5 text-xs font-mono text-pink-600 dark:text-pink-400 select-all cursor-text">{item.midjourney_prompt || '-'}</div>
+                                        </div>
+                                        <div className="mt-2 pt-2 flex justify-between items-center border-t border-slate-100 dark:border-slate-700">
+                                            <span className="text-[10px] text-slate-500 capitalize">{item.visual_theme || ''}</span>
+                                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 font-bold tracking-wider">{item.recommended_source || 'AI'}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                            <button
+                                type="button"
+                                onClick={fetchBrollSuggestions}
+                                disabled={isFetchingBroll}
+                                className="w-full flex items-center justify-center gap-2 py-2 mt-4 rounded-xl border border-pink-200 dark:border-pink-900/50 text-pink-600 dark:text-pink-400 text-xs font-medium hover:bg-pink-50 dark:hover:bg-pink-900/20"
+                            >
+                                {isFetchingBroll ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+                                Regenerar
+                            </button>
+                        </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {section === 'music' && (
                 <div className="space-y-4">
                   <h3 className="text-lg font-semibold text-zinc-800 dark:text-zinc-100">Música</h3>
@@ -4037,9 +4335,14 @@ export default function ClipStudioModal({
                       }}
                     />
 
+                    <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-black/20 px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
+                      <p>{`Idioma original del proyecto: ${projectLanguageLabel}`}</p>
+                      <p>{`Idioma destino predeterminado: ${defaultDubbingTargetLabel}`}</p>
+                    </div>
+
                     <div className="grid grid-cols-1 gap-3">
                       <label className="text-xs text-zinc-600 dark:text-zinc-300">
-                        Idioma destino
+                        Idioma destino del doblaje
                         <select
                           value={dubbingTargetLanguage}
                           onChange={(e) => {
