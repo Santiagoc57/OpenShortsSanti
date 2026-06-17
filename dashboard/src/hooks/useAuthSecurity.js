@@ -68,6 +68,9 @@ export const useAuthSecurity = (showToast) => {
   const [apiBaseUrlMessageType, setApiBaseUrlMessageType] = useState('info');
   const [connectivityStatus, setConnectivityStatus] = useState({ api: 'unknown' });
   const [isConnectivityChecking, setIsConnectivityChecking] = useState(false);
+  const [isFetchingUserProfiles, setIsFetchingUserProfiles] = useState(false);
+  const [userProfilesMessage, setUserProfilesMessage] = useState('');
+  const [userProfilesMessageType, setUserProfilesMessageType] = useState('info');
   const isTestingApiBaseUrl = isConnectivityChecking;
 
   // Persistance Sync
@@ -100,7 +103,15 @@ export const useAuthSecurity = (showToast) => {
   }, [uploadPostKey, uploadUserId]);
 
   const fetchUserProfiles = useCallback(async () => {
-    if (!uploadPostKey) return;
+    if (!uploadPostKey) {
+      setUserProfilesMessage('Agrega tu Upload-Post API Key antes de actualizar perfiles.');
+      setUserProfilesMessageType('error');
+      showToast('Agrega tu Upload-Post API Key antes de actualizar perfiles.', 'warning');
+      return;
+    }
+    setIsFetchingUserProfiles(true);
+    setUserProfilesMessage('Consultando perfiles...');
+    setUserProfilesMessageType('info');
     try {
       const res = await apiFetch('/api/social/user', {
         headers: { 'X-Upload-Post-Key': uploadPostKey }
@@ -110,12 +121,21 @@ export const useAuthSecurity = (showToast) => {
       if (data.profiles && data.profiles.length > 0) {
         setUserProfiles(data.profiles);
         if (!uploadUserId) setUploadUserId(data.profiles[0].username);
+        setUserProfilesMessage(`${data.profiles.length} perfil${data.profiles.length === 1 ? '' : 'es'} disponible${data.profiles.length === 1 ? '' : 's'}.`);
+        setUserProfilesMessageType('success');
       } else {
+        setUserProfiles([]);
+        setUserProfilesMessage('No se encontraron perfiles para esta API Key.');
+        setUserProfilesMessageType('error');
         showToast('No se encontraron perfiles para esta API Key.', 'warning');
       }
     } catch (e) {
+      setUserProfilesMessage('Error consultando perfiles. Revisa la API Key.');
+      setUserProfilesMessageType('error');
       showToast('Error consultando perfiles. Revisa la API Key.', 'error');
       console.error(e);
+    } finally {
+      setIsFetchingUserProfiles(false);
     }
   }, [uploadPostKey, uploadUserId, showToast]);
 
@@ -178,6 +198,9 @@ export const useAuthSecurity = (showToast) => {
     uploadUserId, setUploadUserId,
     userProfiles,
     fetchUserProfiles,
+    isFetchingUserProfiles,
+    userProfilesMessage,
+    userProfilesMessageType,
     apiBaseUrlInput, setApiBaseUrlInput,
     apiBaseUrlActive,
     apiBaseUrlMessage,

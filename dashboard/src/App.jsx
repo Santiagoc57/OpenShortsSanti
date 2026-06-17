@@ -342,6 +342,9 @@ export default function App() {
             uploadPostKey={uploadPostKey} setUploadPostKey={setUploadPostKey}
             uploadUserId={uploadUserId} setUploadUserId={setUploadUserId}
             userProfiles={userProfiles} fetchUserProfiles={fetchUserProfiles}
+            isFetchingUserProfiles={auth.isFetchingUserProfiles}
+            userProfilesMessage={auth.userProfilesMessage}
+            userProfilesMessageType={auth.userProfilesMessageType}
             apiBaseUrlInput={apiBaseUrlInput} setApiBaseUrlInput={setApiBaseUrlInput}
             apiBaseUrlActive={apiBaseUrlActive} apiBaseUrlMessage={apiBaseUrlMessage}
             apiBaseUrlMessageType={apiBaseUrlMessageType}

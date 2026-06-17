@@ -98,7 +98,7 @@ const ProjectsView = ({
                     setProjectsViewMode('detail');
                   }
                 }}
-                className={`relative overflow-hidden rounded-2xl border bg-white dark:bg-slate-900/60 p-4 shadow-sm hover:shadow-md transition-shadow ${project.job_id === jobId
+                className={`relative cursor-pointer overflow-hidden rounded-2xl border bg-white dark:bg-slate-900/60 p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-primary/40 ${project.job_id === jobId
                   ? 'border-primary/60 ring-2 ring-primary/20'
                   : 'border-slate-200 dark:border-slate-700'
                   }`}
@@ -189,9 +189,14 @@ const ProjectsView = ({
                   </div>
 
                   <div className="col-span-1 md:col-span-2">
-                    <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${projectSourceBadgeClass(project.source_kind)}`}>
-                      {project.source_kind === 'youtube' ? <Youtube size={13} /> : project.source_kind === 'url' ? <Link2 size={13} /> : <Upload size={13} />}
-                      {project.source_label || 'Archivo local'}
+                    <span
+                      className={`inline-flex max-w-full items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ${projectSourceBadgeClass(project.source_kind)}`}
+                      title={project.source_label || 'Archivo local'}
+                    >
+                      <span className="shrink-0">
+                        {project.source_kind === 'youtube' ? <Youtube size={13} /> : project.source_kind === 'url' ? <Link2 size={13} /> : <Upload size={13} />}
+                      </span>
+                      <span className="truncate">{project.source_label || 'Archivo local'}</span>
                     </span>
                   </div>
 
@@ -255,10 +260,11 @@ const ProjectsView = ({
                         openSavedProject(project);
                         setProjectsViewMode('detail');
                       }}
-                      className="p-2 rounded-full text-slate-400 hover:text-primary hover:bg-primary/10 transition-colors"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-slate-800"
                       title="Abrir proyecto"
                     >
-                      <ChevronRight size={16} />
+                      Abrir
+                      <ChevronRight size={14} />
                     </button>
                   </div>
                 </div>

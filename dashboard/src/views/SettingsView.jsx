@@ -1,5 +1,5 @@
 import React from 'react';
-import { Settings, Shield, Globe, RefreshCw, Key, Sparkles, Check, RotateCcw } from 'lucide-react';
+import { Settings, Shield, Globe, RefreshCw, Key, Sparkles, Check, RotateCcw, Save, AlertCircle, CheckCircle2 } from 'lucide-react';
 
 const SettingsView = ({
   apiKey, setApiKey,
@@ -8,6 +8,9 @@ const SettingsView = ({
   uploadPostKey, setUploadPostKey,
   uploadUserId, setUploadUserId,
   userProfiles, fetchUserProfiles,
+  isFetchingUserProfiles,
+  userProfilesMessage,
+  userProfilesMessageType,
   apiBaseUrlInput, setApiBaseUrlInput,
   apiBaseUrlActive,
   apiBaseUrlMessage,
@@ -28,6 +31,22 @@ const SettingsView = ({
   const canCheckConnectivity = typeof runConnectivityCheck === 'function';
   const canSaveApiBaseUrl = typeof handleSaveApiBaseUrl === 'function';
   const canReset = typeof handleReset === 'function';
+  const activeApiLabel = apiBaseUrlActive || 'http://localhost:8000';
+  const isRemoteApi = /^https?:\/\//i.test(activeApiLabel) && !activeApiLabel.includes('localhost');
+  const keyStatusClass = (configured) => configured
+    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    : 'bg-slate-50 text-slate-500 border-slate-200';
+  const messageClass = (type) => type === 'error'
+    ? 'text-red-600'
+    : type === 'success'
+      ? 'text-emerald-600'
+      : 'text-slate-500';
+  const KeyState = ({ configured }) => (
+    <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${keyStatusClass(configured)}`}>
+      {configured ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
+      {configured ? 'Configurado' : 'Pendiente'}
+    </span>
+  );
 
   return (
     <div className="max-w-6xl mx-auto py-6 md:py-12 animate-[fadeIn_0.3s_ease-out]">
@@ -48,11 +67,16 @@ const SettingsView = ({
             <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Servidor y Conectividad</h2>
           </div>
           <div className="p-6 space-y-6">
-            <div className="grid md:grid-cols-2 gap-6">
-              <div className="space-y-4">
+            <div className="grid lg:grid-cols-[1.1fr_0.9fr] gap-6">
+              <div className="space-y-4 min-w-0">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Base URL del API (FastAPI)</label>
-                  <div className="flex gap-2">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Base URL del API (FastAPI)</label>
+                    <span className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-semibold ${isRemoteApi ? 'border-violet-200 bg-violet-50 text-violet-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+                      {isRemoteApi ? 'Remoto / ngrok' : 'Local'}
+                    </span>
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2">
                     <input
                       type="text"
                       value={apiBaseUrlInput || ''}
@@ -63,9 +87,26 @@ const SettingsView = ({
                       className="flex-1 py-2.5 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm focus:ring-2 focus:ring-primary/20 transition-all"
                       placeholder="http://localhost:8000"
                     />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (canSaveApiBaseUrl) {
+                          handleSaveApiBaseUrl();
+                          if (canCheckConnectivity) setTimeout(runConnectivityCheck, 0);
+                        }
+                      }}
+                      disabled={!canSaveApiBaseUrl}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-slate-800 disabled:opacity-50"
+                    >
+                      <Save size={15} />
+                      Guardar y probar
+                    </button>
                   </div>
+                  <p className="mt-2 truncate text-xs text-slate-500">
+                    Activa: <span className="font-medium text-slate-700">{activeApiLabel}</span>
+                  </p>
                   {apiBaseUrlMessage && (
-                    <p className={`mt-2 text-xs font-medium ${apiBaseUrlMessageType === 'error' ? 'text-red-500' : 'text-emerald-500'}`}>
+                    <p className={`mt-2 text-xs font-medium ${messageClass(apiBaseUrlMessageType)}`}>
                       {apiBaseUrlMessage}
                     </p>
                   )}
@@ -89,6 +130,15 @@ const SettingsView = ({
                         {safeConnectivityStatus.api === 'online' ? 'EN LÍNEA' : safeConnectivityStatus.api === 'offline' ? 'DESCONECTADO' : 'SIN VERIFICAR'}
                       </span>
                     </div>
+                    <button
+                      type="button"
+                      onClick={runConnectivityCheck}
+                      disabled={isConnectivityChecking || !canCheckConnectivity}
+                      className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition-colors hover:border-primary hover:text-primary disabled:opacity-50"
+                    >
+                      <RefreshCw size={13} className={isConnectivityChecking ? 'animate-spin' : ''} />
+                      Probar conexión
+                    </button>
                   </div>
                 </div>
               </div>
@@ -99,12 +149,12 @@ const SettingsView = ({
                   Privacidad y Reset
                 </h3>
                 <p className="text-slate-500 dark:text-slate-400 text-xs leading-relaxed">
-                  Tus llaves se guardan de forma segura en el navegador. Si usas una conexión vía túnel (ngrok), asegúrate de que sea segura.
+                  Tus llaves y la URL de ngrok se guardan en el navegador. Reiniciar el estado no borra esta configuración.
                 </p>
                 <div className="pt-2">
                   <button
                     onClick={() => {
-                      if (window.confirm('¿Estás seguro de que quieres limpiar todo el estado y logs? Esto no borrará tus API Keys.')) {
+                      if (window.confirm('¿Estás seguro de que quieres limpiar estado y logs? Esto no borrará tus API Keys ni la URL de ngrok.')) {
                         if (canReset) handleReset();
                       }
                     }}
@@ -125,10 +175,13 @@ const SettingsView = ({
             <Key size={18} className="text-primary" />
             <h2 className="text-lg font-semibold text-slate-900 dark:text-white">API Keys e Inteligencia Artificial</h2>
           </div>
-          <div className="p-6 grid md:grid-cols-2 gap-8">
+          <div className="p-6 grid lg:grid-cols-2 gap-8">
             <div className="space-y-5">
               <div>
-                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Google Gemini API Key (Recomendado)</label>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Google Gemini API Key (Recomendado)</label>
+                  <KeyState configured={Boolean(apiKey)} />
+                </div>
                 <input
                   type="password"
                   value={apiKey}
@@ -136,9 +189,13 @@ const SettingsView = ({
                   className="w-full py-2.5 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm"
                   placeholder="AIzaSy..."
                 />
+                <p className="mt-1 text-xs text-slate-500">Se usa para títulos, selección y textos sociales.</p>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">ElevenLabs API Key (Doblaje)</label>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">ElevenLabs API Key (Doblaje)</label>
+                  <KeyState configured={Boolean(elevenLabsKey)} />
+                </div>
                 <input
                   type="password"
                   value={elevenLabsKey}
@@ -146,9 +203,13 @@ const SettingsView = ({
                   className="w-full py-2.5 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm"
                   placeholder="Llave para ElevenLabs"
                 />
+                <p className="mt-1 text-xs text-slate-500">Sólo es necesaria para doblaje/voz.</p>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">HuggingFace Token (Transcripción Pro)</label>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">HuggingFace Token (Transcripción Pro)</label>
+                  <KeyState configured={Boolean(huggingfaceToken)} />
+                </div>
                 <input
                   type="password"
                   value={huggingfaceToken}
@@ -156,12 +217,16 @@ const SettingsView = ({
                   className="w-full py-2.5 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm"
                   placeholder="hf_..."
                 />
+                <p className="mt-1 text-xs text-slate-500">Requerido para modelos privados o diarización avanzada.</p>
               </div>
             </div>
 
             <div className="space-y-5">
               <div>
-                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Upload-Post API Key (Social)</label>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Upload-Post API Key (Social)</label>
+                  <KeyState configured={Boolean(uploadPostKey)} />
+                </div>
                 <input
                   type="password"
                   value={uploadPostKey}
@@ -169,11 +234,20 @@ const SettingsView = ({
                   className="w-full py-2.5 px-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm"
                   placeholder="Tu llave de subida"
                 />
+                <p className="mt-1 text-xs text-slate-500">Se usa para consultar perfiles y publicar en redes.</p>
               </div>
               <div>
-                <div className="flex justify-between items-center mb-2">
+                <div className="flex justify-between items-center gap-3 mb-2">
                   <label className="text-sm font-medium text-slate-700 dark:text-slate-300">Perfil de Usuario Vinculado</label>
-                  <button onClick={fetchUserProfiles} className="text-xs text-primary hover:underline">Actualizar perfiles</button>
+                  <button
+                    type="button"
+                    onClick={fetchUserProfiles}
+                    disabled={isFetchingUserProfiles}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-primary/30 px-2.5 py-1 text-xs font-semibold text-primary transition-colors hover:bg-primary/10 disabled:opacity-50"
+                  >
+                    <RefreshCw size={12} className={isFetchingUserProfiles ? 'animate-spin' : ''} />
+                    {isFetchingUserProfiles ? 'Actualizando' : 'Actualizar perfiles'}
+                  </button>
                 </div>
                 <select
                   value={uploadUserId}
@@ -187,6 +261,11 @@ const SettingsView = ({
                     </option>
                   ))}
                 </select>
+                {userProfilesMessage && (
+                  <p className={`mt-2 text-xs font-medium ${messageClass(userProfilesMessageType)}`}>
+                    {userProfilesMessage}
+                  </p>
+                )}
               </div>
             </div>
           </div>

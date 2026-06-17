@@ -11,7 +11,11 @@ export const formatTimelineTime = (seconds) => {
 
 export const formatProjectDate = (value) => {
   if (!value) return '-';
-  const date = new Date(value);
+  const numeric = Number(value);
+  const normalized = Number.isFinite(numeric) && numeric > 0 && numeric < 100000000000
+    ? numeric * 1000
+    : value;
+  const date = new Date(normalized);
   if (Number.isNaN(date.getTime())) return String(value);
   return date.toLocaleString();
 };
