@@ -41,6 +41,24 @@ app.include_router(search.router)
 app.include_router(social.router)
 app.include_router(render.router)
 
+@app.get("/api/fonts")
+async def list_fonts():
+    font_specs = [
+        ("Montserrat", "Montserrat", "dashboard/public/fonts/Montserrat-Bold.ttf"),
+        ("Anton", "Anton", "dashboard/public/fonts/Anton-Regular.ttf"),
+        ("Archivo Black", "Archivo Black", "dashboard/public/fonts/ArchivoBlack-Regular.ttf"),
+        ("Bebas Neue", "Bebas Neue", "dashboard/public/fonts/BebasNeue-Regular.ttf"),
+        ("Oswald", "Oswald", "dashboard/public/fonts/Oswald-Variable.ttf"),
+        ("Teko", "Teko", "dashboard/public/fonts/Teko-Variable.ttf"),
+        ("Arial", "Arial", None),
+        ("Verdana", "Verdana", None),
+    ]
+    fonts = [
+        {"value": value, "label": label, "available": True if path is None else os.path.exists(path)}
+        for value, label, path in font_specs
+    ]
+    return {"fonts": fonts}
+
 @app.on_event("startup")
 async def startup_event():
     # Initialize DB and Background Worker
