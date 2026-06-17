@@ -10,6 +10,7 @@ ASPECT_RATIO = 9 / 16
 _yolo_model = None
 _mp_face_detection = None
 _face_detector = None
+_face_detector_unavailable = False
 
 def get_yolo_model():
     global _yolo_model
@@ -30,11 +31,18 @@ def get_yolo_model():
     return _yolo_model
 
 def get_face_detector():
-    global _mp_face_detection, _face_detector
+    global _mp_face_detection, _face_detector, _face_detector_unavailable
+    if _face_detector_unavailable:
+        return None
     if _face_detector is None:
-        import mediapipe as mp
-        _mp_face_detection = mp.solutions.face_detection
-        _face_detector = _mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+        try:
+            import mediapipe as mp
+            _mp_face_detection = mp.solutions.face_detection
+            _face_detector = _mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+        except Exception as exc:
+            _face_detector_unavailable = True
+            print(f"⚠️ MediaPipe face detector unavailable; falling back to YOLO/general crop: {exc}")
+            return None
     return _face_detector
 
 class _DummyTime:
@@ -255,6 +263,8 @@ def detect_face_candidates(frame):
     height, width = frame.shape[:2]
     rgb_frame = cv2.cvtColor(_detection_frame(frame), cv2.COLOR_BGR2RGB)
     detector = get_face_detector()
+    if detector is None:
+        return []
     results = detector.process(rgb_frame)
     
     candidates = []
