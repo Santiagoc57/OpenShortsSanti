@@ -69,6 +69,12 @@ const ProjectDetailView = ({
   trailerScoreLabel, handleTranscriptSegmentPlay: globalHandleTranscriptSegmentPlay,
   uploadPostKey, uploadUserId, userProfiles
 }) => {
+  const costAnalysis = results?.cost_analysis || null;
+  const totalCost = Number(costAnalysis?.total_cost);
+  const hasCostAnalysis = Number.isFinite(totalCost);
+  const inputTokens = Number.isFinite(Number(costAnalysis?.input_tokens)) ? Number(costAnalysis.input_tokens).toLocaleString() : '-';
+  const outputTokens = Number.isFinite(Number(costAnalysis?.output_tokens)) ? Number(costAnalysis.output_tokens).toLocaleString() : '-';
+
   return (
     <div className="animate-[fadeIn_0.3s_ease-out]">
       {studioContext ? (
@@ -263,9 +269,9 @@ const ProjectDetailView = ({
                     <LayoutDashboard size={12} />
                     {`Formato: ${outputModeLabel(processingMedia?.aspectRatio)}`}
                   </span>
-                  {results?.cost_analysis && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-green-300 dark:border-green-500/30 bg-green-50 dark:bg-green-500/10 text-green-700 dark:text-green-300" title={`Entrada: ${results.cost_analysis.input_tokens} | Salida: ${results.cost_analysis.output_tokens}`}>
-                      {`Costo: $${results.cost_analysis.total_cost.toFixed(5)}`}
+                  {hasCostAnalysis && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-green-300 dark:border-green-500/30 bg-green-50 dark:bg-green-500/10 text-green-700 dark:text-green-300" title={`Entrada: ${inputTokens} | Salida: ${outputTokens}`}>
+                      {`Costo: $${totalCost.toFixed(5)}`}
                     </span>
                   )}
                 </div>
