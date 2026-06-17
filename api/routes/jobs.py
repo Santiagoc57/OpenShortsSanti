@@ -108,6 +108,13 @@ async def process_endpoint(
     python_bin = sys.executable or "python3"
     cmd = [python_bin, "-u", "main.py"]
     env = os.environ.copy()
+    # Avoid macOS aborts when multiple native ML libraries load their own
+    # OpenMP runtimes in the transcription subprocess.
+    env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    env.setdefault("OMP_NUM_THREADS", "1")
+    env.setdefault("MKL_NUM_THREADS", "1")
+    env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+    env.setdefault("OPENBLAS_NUM_THREADS", "1")
     if x_gemini_key:
         env["GEMINI_API_KEY"] = x_gemini_key
     if x_groq_key:
@@ -190,6 +197,15 @@ async def process_endpoint(
         'video_type': 'Super trailer' if generation_mode == 'trailer' else 'Topic-clips',
         'updated_at': time.time()
     }
+    try:
+        jobs[job_id]['max_auto_retries'] = max(0, min(5, int(max_auto_retries if max_auto_retries is not None else MAX_AUTO_RETRIES_DEFAULT)))
+    except Exception:
+        jobs[job_id]['max_auto_retries'] = MAX_AUTO_RETRIES_DEFAULT
+    try:
+        jobs[job_id]['retry_delay_seconds'] = max(0, min(120, int(retry_delay_seconds if retry_delay_seconds is not None else JOB_RETRY_DELAY_SECONDS_DEFAULT)))
+    except Exception:
+        jobs[job_id]['retry_delay_seconds'] = JOB_RETRY_DELAY_SECONDS_DEFAULT
+    jobs[job_id]['auto_retry_count'] = 0
     _persist_job_state(job_id)
     write_job_manifest(job_id, jobs[job_id], "queued")
     await job_queue.put(job_id)

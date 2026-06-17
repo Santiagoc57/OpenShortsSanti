@@ -43,12 +43,26 @@ def enqueue_output(out, job_id):
 async def _queue_job_retry(job_id: str, reason: str, trigger: str = "auto", delay_seconds: Optional[int] = None):
     job = _ensure_job_context(job_id)
     if not job: return False
-    
+
+    retry_count = int(job.get('auto_retry_count') or 0)
+    max_retries = int(job.get('max_auto_retries', MAX_AUTO_RETRIES_DEFAULT) or 0)
+    if retry_count >= max_retries:
+        job['status'] = 'error'
+        job['last_error'] = reason
+        job['logs'].append(f"Retries exhausted ({retry_count}/{max_retries}): {reason}")
+        write_job_manifest(job_id, job, "failed", error=reason)
+        _persist_job_state(job_id)
+        return False
+
     delay = delay_seconds if delay_seconds is not None else job.get('retry_delay_seconds', JOB_RETRY_DELAY_SECONDS_DEFAULT)
+    delay = max(0, int(delay or 0))
+    job['auto_retry_count'] = retry_count + 1
     job['last_error'] = reason
     job['status'] = 'queued'
-    job['logs'].append(f"Retry scheduled: {reason}")
+    job['logs'].append(f"Retry scheduled ({job['auto_retry_count']}/{max_retries}): {reason}")
     _persist_job_state(job_id)
+    if delay:
+        await asyncio.sleep(delay)
     await job_queue.put(job_id)
     return True
 
@@ -62,11 +76,18 @@ async def run_job(job_id: str):
     _persist_job_state(job_id)
     
     try:
+        process_env = dict(os.environ)
+        process_env.update(job_data.get('env') or {})
+        process_env.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+        process_env.setdefault("OMP_NUM_THREADS", "1")
+        process_env.setdefault("MKL_NUM_THREADS", "1")
+        process_env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+        process_env.setdefault("OPENBLAS_NUM_THREADS", "1")
         process = subprocess.Popen(
             job_data['cmd'],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            env=job_data['env'],
+            env=process_env,
             cwd=os.getcwd()
         )
         running_processes[job_id] = process
@@ -94,10 +115,12 @@ async def run_job(job_id: str):
             except Exception as upload_error:
                 job_data['logs'].append(f"Artifact upload warning: {upload_error}")
         else:
+            job_data['status'] = 'error'
             write_job_manifest(job_id, job_data, "failed", returncode=process.returncode)
             await _queue_job_retry(job_id, f"Process failed with code {process.returncode}")
             
     except Exception as e:
+        job_data['status'] = 'error'
         write_job_manifest(job_id, job_data, "error", error=str(e))
         await _queue_job_retry(job_id, str(e))
     finally:
