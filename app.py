@@ -10,8 +10,13 @@ from api.core.database import _init_jobs_store
 from api.core.worker import job_worker
 from api.routes import jobs, editor, search, social, render
 
-# Allow nested event loops (useful for some environments)
-nest_asyncio.apply()
+# Allow nested event loops where supported. Colab's uvicorn can run on uvloop,
+# which is not patchable by nest_asyncio and would fail during app import.
+try:
+    nest_asyncio.apply()
+except ValueError as exc:
+    if "uvloop" not in str(exc).lower():
+        raise
 
 app = FastAPI(title="OpenShorts API", version="1.0.0")
 
