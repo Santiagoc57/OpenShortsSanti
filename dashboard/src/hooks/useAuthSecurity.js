@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { apiFetch } from '../config';
+import { apiFetch, getApiBaseUrl, normalizeApiBaseUrl, setApiBaseUrl } from '../config';
 
 // Simple XOR + Base64 encryption for client-side obfuscation
 const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || "OpenShorts-Static-Salt-Change-Me";
@@ -62,6 +62,13 @@ export const useAuthSecurity = (showToast) => {
 
   const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
   const [userProfiles, setUserProfiles] = useState([]);
+  const [apiBaseUrlInput, setApiBaseUrlInput] = useState(() => getApiBaseUrl());
+  const [apiBaseUrlActive, setApiBaseUrlActive] = useState(() => getApiBaseUrl());
+  const [apiBaseUrlMessage, setApiBaseUrlMessage] = useState('');
+  const [apiBaseUrlMessageType, setApiBaseUrlMessageType] = useState('info');
+  const [connectivityStatus, setConnectivityStatus] = useState({ api: 'unknown' });
+  const [isConnectivityChecking, setIsConnectivityChecking] = useState(false);
+  const isTestingApiBaseUrl = isConnectivityChecking;
 
   // Persistance Sync
   useEffect(() => {
@@ -118,6 +125,51 @@ export const useAuthSecurity = (showToast) => {
     }
   }, [uploadPostKey, userProfiles.length, fetchUserProfiles]);
 
+  const runConnectivityCheck = useCallback(async () => {
+    setIsConnectivityChecking(true);
+    setConnectivityStatus({ api: 'checking' });
+    try {
+      const res = await apiFetch('/');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setConnectivityStatus({ api: 'online' });
+      setApiBaseUrlMessage('API conectada correctamente.');
+      setApiBaseUrlMessageType('success');
+    } catch (e) {
+      setConnectivityStatus({ api: 'offline' });
+      setApiBaseUrlMessage('No se pudo conectar con la API. Revisa la URL y que Colab siga activo.');
+      setApiBaseUrlMessageType('error');
+      console.error(e);
+    } finally {
+      setIsConnectivityChecking(false);
+    }
+  }, []);
+
+  const handleSaveApiBaseUrl = useCallback(() => {
+    const rawValue = String(apiBaseUrlInput || '').trim();
+    const normalized = normalizeApiBaseUrl(rawValue);
+    if (rawValue && !normalized) {
+      setApiBaseUrlMessage('URL inválida. Pega una URL completa de ngrok, por ejemplo https://xxxx.ngrok-free.app');
+      setApiBaseUrlMessageType('error');
+      return '';
+    }
+
+    const saved = setApiBaseUrl(normalized);
+    setApiBaseUrlInput(saved);
+    setApiBaseUrlActive(saved);
+    setApiBaseUrlMessage(saved ? 'URL de API guardada.' : 'Usando API local por defecto.');
+    setApiBaseUrlMessageType('success');
+    return saved;
+  }, [apiBaseUrlInput]);
+
+  const handleResetApiBaseUrl = useCallback(() => {
+    setApiBaseUrl('');
+    setApiBaseUrlInput('');
+    setApiBaseUrlActive('');
+    setConnectivityStatus({ api: 'unknown' });
+    setApiBaseUrlMessage('URL remota borrada. Usando API local por defecto.');
+    setApiBaseUrlMessageType('success');
+  }, []);
+
   return {
     apiKey, setApiKey,
     elevenLabsKey, setElevenLabsKey,
@@ -126,6 +178,16 @@ export const useAuthSecurity = (showToast) => {
     uploadUserId, setUploadUserId,
     userProfiles,
     fetchUserProfiles,
+    apiBaseUrlInput, setApiBaseUrlInput,
+    apiBaseUrlActive,
+    apiBaseUrlMessage,
+    apiBaseUrlMessageType,
+    isTestingApiBaseUrl,
+    handleSaveApiBaseUrl,
+    runConnectivityCheck,
+    handleResetApiBaseUrl,
+    connectivityStatus,
+    isConnectivityChecking,
     encrypt,
     decrypt
   };
