@@ -74,6 +74,10 @@ const ProjectDetailView = ({
   const hasCostAnalysis = Number.isFinite(totalCost);
   const inputTokens = Number.isFinite(Number(costAnalysis?.input_tokens)) ? Number(costAnalysis.input_tokens).toLocaleString() : '-';
   const outputTokens = Number.isFinite(Number(costAnalysis?.output_tokens)) ? Number(costAnalysis.output_tokens).toLocaleString() : '-';
+  const safeLogs = Array.isArray(logs) ? logs : [];
+  const safeAvailableTags = Array.isArray(availableTags) ? availableTags : [];
+  const safeVisibleClips = Array.isArray(visibleClips) ? visibleClips : [];
+  const safeSortedClips = Array.isArray(sortedClips) ? sortedClips : [];
 
   return (
     <div className="animate-[fadeIn_0.3s_ease-out]">
@@ -191,10 +195,10 @@ const ProjectDetailView = ({
                 </button>
                 {logsVisible && (
                   <div className="max-h-36 overflow-y-auto p-3 font-mono text-xs space-y-1.5 custom-scrollbar text-slate-600 dark:text-zinc-400 bg-white dark:bg-[#0c0c0e]">
-                    {logs.length === 0 && (
+                    {safeLogs.length === 0 && (
                       <div className="text-slate-400 dark:text-zinc-500">Aún no hay logs.</div>
                     )}
-                    {logs.map((log, i) => (
+                    {safeLogs.map((log, i) => (
                       <div key={i} className={`flex gap-2 ${log.toLowerCase().includes('error') ? 'text-red-500 dark:text-red-400' : 'text-slate-600 dark:text-zinc-400'}`}>
                         <span className="text-slate-400 dark:text-zinc-600 shrink-0">{new Date().toLocaleTimeString()}</span>
                         <span>{log}</span>
@@ -220,10 +224,10 @@ const ProjectDetailView = ({
                     <Sparkles className="text-yellow-400" size={20} />
                     {showTrailerFocusLayout ? 'Super trailer' : 'Clips generados'}
                   </h2>
-                  {!showTrailerFocusLayout && sortedClips.length > 0 && (
+                  {!showTrailerFocusLayout && safeSortedClips.length > 0 && (
                     <div className="ml-auto flex items-center gap-2">
                       <span className="text-xs bg-slate-100 dark:bg-white/10 text-slate-700 dark:text-white px-2 py-0.5 rounded-full border border-slate-200 dark:border-transparent">
-                        {visibleClips.length}/{sortedClips.length} Clips
+                        {safeVisibleClips.length}/{safeSortedClips.length} Clips
                       </span>
                       <div className="inline-flex items-center rounded-lg border border-slate-200 dark:border-white/15 bg-white dark:bg-white/5 p-1">
                         <button
@@ -277,7 +281,7 @@ const ProjectDetailView = ({
                 </div>
               </div>
 
-              {!showTrailerFocusLayout && sortedClips.length > 0 && (
+              {!showTrailerFocusLayout && safeSortedClips.length > 0 && (
                 <div className="mb-4 shrink-0 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50/80 dark:bg-white/[0.02] p-3.5 space-y-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs font-medium text-slate-500 dark:text-zinc-500">Orden:</span>
@@ -308,7 +312,7 @@ const ProjectDetailView = ({
                       className="text-xs bg-white dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-md px-2 py-1.5 text-slate-700 dark:text-zinc-200"
                     >
                       <option value="all">Todas</option>
-                      {availableTags.map((tag) => (
+                      {safeAvailableTags.map((tag) => (
                         <option key={tag} value={tag}>{tag}</option>
                       ))}
                     </select>
@@ -379,7 +383,7 @@ const ProjectDetailView = ({
                     </select>
                     <button
                       onClick={() => handleBatchScheduleReport()}
-                      disabled={isBatchScheduling || (batchScope === 'global' ? sortedClips.length === 0 : visibleClips.length === 0)}
+                      disabled={isBatchScheduling || (batchScope === 'global' ? safeSortedClips.length === 0 : safeVisibleClips.length === 0)}
                       className="ml-1 text-xs bg-violet-100 dark:bg-primary/20 border border-violet-300 dark:border-primary/40 text-violet-700 dark:text-primary rounded-md px-2 py-1.5 hover:bg-violet-200 dark:hover:bg-primary/30 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {isBatchScheduling ? 'Encolando...' : `Encolar ${Math.max(1, Math.min(10, Number(batchTopCount) || 1))}`}
@@ -402,7 +406,7 @@ const ProjectDetailView = ({
                 </div>
               )}
 
-              {!showTrailerFocusLayout && sortedClips.length > 0 && (
+              {!showTrailerFocusLayout && safeSortedClips.length > 0 && (
                 <div className="mb-4 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/[0.02] p-3.5 shadow-sm">
                   <div className="flex items-center gap-2">
                     <Search size={14} className="text-slate-400" />
@@ -459,13 +463,13 @@ const ProjectDetailView = ({
                     ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 pb-12"
                     : "flex flex-col gap-4 pb-12"
                   }>
-                    {visibleClips.length === 0 && (
+                    {safeVisibleClips.length === 0 && (
                       <div className="flex flex-col items-center justify-center py-20 text-slate-400">
                         <Activity size={40} className="mb-4 opacity-20" />
                         <p className="text-sm font-medium">Aún no hay clips generados para mostrar.</p>
                       </div>
                     )}
-                    {visibleClips.map((clip, index) => (
+                    {safeVisibleClips.map((clip, index) => (
                       <ResultCard
                         key={`${clip.clip_index || index}-${clip.start}`}
                         clip={clip}
