@@ -5,10 +5,10 @@ import {
 } from 'lucide-react';
 
 import { 
-  getApiUrl, 
   outputModeLabel,
   formatProjectDate
 } from './utils';
+import { apiFetch } from './config';
 
 import { useAuthSecurity } from './hooks/useAuthSecurity';
 import { useJobManager } from './hooks/useJobManager';
@@ -169,7 +169,7 @@ export default function App() {
   useEffect(() => {
     const fetchFonts = async () => {
       try {
-        const response = await fetch('/api/fonts');
+        const response = await apiFetch('/api/fonts');
         if (response.ok) {
           const data = await response.json();
           setCaptionFontOptions(data.fonts || []);
