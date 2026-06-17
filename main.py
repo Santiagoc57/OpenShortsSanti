@@ -2014,6 +2014,36 @@ def _extract_retry_after_seconds(err):
     except ValueError:
         return None
 
+def _is_gemini_transient_error(err):
+    msg = str(err or "").lower()
+    return (
+        "503" in msg
+        or "unavailable" in msg
+        or "high demand" in msg
+        or "overloaded" in msg
+        or "temporarily" in msg
+        or "429" in msg
+        or "quota" in msg
+        or "rate limit" in msg
+    )
+
+def _gemini_analysis_model_candidates(preferred_model):
+    env_models = os.getenv(
+        "GEMINI_ANALYSIS_MODELS",
+        "gemini-2.5-flash-lite,gemini-2.5-flash,gemini-2.0-flash,gemini-2.0-flash-lite,gemini-1.5-flash-latest,gemini-1.5-flash"
+    )
+    candidates = [str(preferred_model or "").strip()]
+    candidates.extend(part.strip() for part in env_models.split(",") if part.strip())
+
+    out = []
+    seen = set()
+    for candidate in candidates:
+        key = candidate.lower()
+        if candidate and key not in seen:
+            seen.add(key)
+            out.append(candidate)
+    return out
+
 def get_viral_clips(
     transcript_result,
     video_duration,
@@ -2088,15 +2118,30 @@ def get_viral_clips(
     )
 
     max_attempts = 2 if llm_provider == 'groq' else 1
+    gemini_models = _gemini_analysis_model_candidates(model_name) if llm_provider == 'gemini' else [model_name]
     for attempt in range(1, max_attempts + 1):
         try:
             if llm_provider == 'gemini':
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config={'response_mime_type': 'application/json'}
-                )
-                result_json = json.loads(response.text)
+                last_error = None
+                for idx, candidate_model in enumerate(gemini_models, start=1):
+                    try:
+                        if candidate_model != model_name or idx > 1:
+                            print(f"🔁 Trying Gemini fallback model ({idx}/{len(gemini_models)}): {candidate_model}")
+                        response = client.models.generate_content(
+                            model=candidate_model,
+                            contents=prompt,
+                            config={'response_mime_type': 'application/json'}
+                        )
+                        result_json = json.loads(response.text)
+                        if candidate_model != model_name:
+                            print(f"✅ Gemini fallback succeeded with model: {candidate_model}")
+                        break
+                    except Exception as gemini_error:
+                        last_error = gemini_error
+                        if _is_gemini_transient_error(gemini_error) and idx < len(gemini_models):
+                            print(f"⚠️ Gemini model unavailable ({candidate_model}): {gemini_error}")
+                            continue
+                        raise
             elif llm_provider == 'groq':
                 chat_completion = client.chat.completions.create(
                     messages=[{"role": "user", "content": prompt}],
