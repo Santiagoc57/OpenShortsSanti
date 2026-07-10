@@ -1,6 +1,7 @@
 import hashlib
 import ctypes
 import ctypes.util
+import importlib.metadata
 import os
 import re
 import threading
@@ -76,8 +77,31 @@ def _shared_library_available(*names: str) -> bool:
     return False
 
 
+def _version_at_least(version: str, minimum: str) -> bool:
+    def parts(value: str) -> List[int]:
+        return [int(part) for part in re.findall(r"\d+", value)[:3]]
+
+    current = parts(version)
+    target = parts(minimum)
+    while len(current) < len(target):
+        current.append(0)
+    while len(target) < len(current):
+        target.append(0)
+    return current >= target
+
+
+def _ctranslate2_supports_colab_cudnn9() -> bool:
+    try:
+        version = importlib.metadata.version("ctranslate2")
+    except Exception:
+        return False
+    return _version_at_least(version, "4.5.0")
+
+
 def _cuda_decode_runtime_available() -> bool:
     if _env_bool("WHISPER_ALLOW_CUDA_WITHOUT_CUDNN8", False):
+        return True
+    if _ctranslate2_supports_colab_cudnn9():
         return True
     return _shared_library_available("cudnn_ops_infer", "libcudnn_ops_infer.so.8")
 
