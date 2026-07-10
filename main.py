@@ -1863,80 +1863,83 @@ def transcribe_video(video_path, language=None, backend=None, model_name=None, w
 
     if backend == "whisperx":
         print(f"🎙️  Transcribing video with WhisperX (model={model_name}, device={device}, compute={compute_type})...")
-        import whisperx
-        import gc
-        
-        # 1. Transcribe
-        batch_size = 16 if device == "cuda" else 4
-        model = whisperx.load_model(model_name, device, compute_type=compute_type)
-        
-        audio = whisperx.load_audio(video_path)
-        result = model.transcribe(audio, batch_size=batch_size, language=language)
-        detected_language = result["language"]
-        
-        del model
-        gc.collect()
-        if device == "cuda":
-            torch.cuda.empty_cache()
-            
-        # 2. Align (For Perfect Karaoke)
-        print("🎯 Aligning words with audio for exact timestamps...")
-        model_a, metadata = whisperx.load_align_model(language_code=detected_language, device=device)
-        result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
-        
-        del model_a
-        gc.collect()
-        if device == "cuda":
-            torch.cuda.empty_cache()
-            
-        # 3. Diarize (Detect Speakers) if Token Provided AND explicitly enabled
-        if hf_token and enable_diarization:
-            print("👥 Detecting speakers (Diarization)...")
-            try:
-                diarize_model = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
-                diarize_segments = diarize_model(audio, min_speakers=1, max_speakers=8)
-                result = whisperx.assign_word_speakers(diarize_segments, result)
-            except Exception as e:
-                print(f"⚠️ Diarization failed: {e}. Falling back to default speakers.")
-        else:
-            if not enable_diarization:
-                print("ℹ️ Diarization disabled. Skipping pyannote (fast mode).")
-            else:
-                print("⚠️ No HuggingFace token provided. Skipping Speaker Diarization.")
-            
-        # 4. Format Output match existing schema
-        full_text = ""
-        transcript_segments = []
-        
-        for segment in result["segments"]:
-            seg_dict = {
-                'text': segment.get("text", "").strip(),
-                'start': segment.get("start", 0.0),
-                'end': segment.get("end", 0.0),
-                'speaker': segment.get("speaker", "SPEAKER_00"),
-                'words': []
-            }
-            
-            if "words" in segment:
-                for word in segment["words"]:
-                    if "start" not in word or "end" not in word:
-                        continue
-                    seg_dict['words'].append({
-                        'word': word.get("word", ""),
-                        'start': word["start"],
-                        'end': word["end"],
-                        'probability': word.get("score", 0.0),
-                        'speaker': word.get("speaker", segment.get("speaker", "SPEAKER_00"))
-                    })
-            
-            transcript_segments.append(seg_dict)
-            full_text += seg_dict['text'] + " "
+        try:
+            import whisperx
+            import gc
 
-        return {
-            'text': full_text.strip(),
-            'segments': transcript_segments,
-            'language': detected_language
-        }
+            # 1. Transcribe
+            batch_size = 16 if device == "cuda" else 4
+            model = whisperx.load_model(model_name, device, compute_type=compute_type)
+
+            audio = whisperx.load_audio(video_path)
+            result = model.transcribe(audio, batch_size=batch_size, language=language)
+            detected_language = result["language"]
+
+            del model
+            gc.collect()
+            if device == "cuda":
+                torch.cuda.empty_cache()
+
+            # 2. Align (For Perfect Karaoke)
+            print("🎯 Aligning words with audio for exact timestamps...")
+            model_a, metadata = whisperx.load_align_model(language_code=detected_language, device=device)
+            result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
+
+            del model_a
+            gc.collect()
+            if device == "cuda":
+                torch.cuda.empty_cache()
+
+            # 3. Diarize (Detect Speakers) if Token Provided AND explicitly enabled
+            if hf_token and enable_diarization:
+                print("👥 Detecting speakers (Diarization)...")
+                try:
+                    diarize_model = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
+                    diarize_segments = diarize_model(audio, min_speakers=1, max_speakers=8)
+                    result = whisperx.assign_word_speakers(diarize_segments, result)
+                except Exception as e:
+                    print(f"⚠️ Diarization failed: {e}. Falling back to default speakers.")
+            else:
+                if not enable_diarization:
+                    print("ℹ️ Diarization disabled. Skipping pyannote (fast mode).")
+                else:
+                    print("⚠️ No HuggingFace token provided. Skipping Speaker Diarization.")
+
+            # 4. Format Output match existing schema
+            full_text = ""
+            transcript_segments = []
+
+            for segment in result["segments"]:
+                seg_dict = {
+                    'text': segment.get("text", "").strip(),
+                    'start': segment.get("start", 0.0),
+                    'end': segment.get("end", 0.0),
+                    'speaker': segment.get("speaker", "SPEAKER_00"),
+                    'words': []
+                }
+
+                if "words" in segment:
+                    for word in segment["words"]:
+                        if "start" not in word or "end" not in word:
+                            continue
+                        seg_dict['words'].append({
+                            'word': word.get("word", ""),
+                            'start': word["start"],
+                            'end': word["end"],
+                            'probability': word.get("score", 0.0),
+                            'speaker': word.get("speaker", segment.get("speaker", "SPEAKER_00"))
+                        })
+
+                transcript_segments.append(seg_dict)
+                full_text += seg_dict['text'] + " "
+
+            return {
+                'text': full_text.strip(),
+                'segments': transcript_segments,
+                'language': detected_language
+            }
+        except Exception as e:
+            print(f"⚠️ WhisperX unavailable ({type(e).__name__}: {e}). Falling back to Faster-Whisper runtime manager.")
 
     # Fallback to faster-whisper with runtime cache, GPU/CPU fallback, and safer defaults.
     if model_name:

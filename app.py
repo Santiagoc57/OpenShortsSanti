@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from api.core.config import OUTPUT_DIR, UPLOAD_DIR
 from api.core.database import _init_jobs_store
 from api.core.worker import job_worker
-from api.routes import jobs, editor, search, social, render
+from api.routes import jobs, editor, search, social, render, transcript
 
 # Allow nested event loops where supported. Colab's uvicorn can run on uvloop,
 # which is not patchable by nest_asyncio and would fail during app import.
@@ -40,6 +40,7 @@ app.include_router(editor.router)
 app.include_router(search.router)
 app.include_router(social.router)
 app.include_router(render.router)
+app.include_router(transcript.router)
 
 @app.get("/api/fonts")
 async def list_fonts():

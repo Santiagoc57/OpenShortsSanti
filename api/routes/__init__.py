@@ -1,2 +1,2 @@
 # api/routes/__init__.py
-from . import jobs, editor, search, social, render
+from . import jobs, editor, search, social, render, transcript

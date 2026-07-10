@@ -1,4 +1,6 @@
 import hashlib
+import ctypes
+import ctypes.util
 import os
 import re
 import threading
@@ -61,6 +63,23 @@ def _normalize_language_code(raw: Any) -> str:
     if not all(ch in _VALID_LANGUAGE_TOKEN for ch in value):
         return ""
     return value.split("-")[0]
+
+
+def _shared_library_available(*names: str) -> bool:
+    for name in names:
+        try:
+            resolved = ctypes.util.find_library(name) or name
+            ctypes.CDLL(resolved)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _cuda_decode_runtime_available() -> bool:
+    if _env_bool("WHISPER_ALLOW_CUDA_WITHOUT_CUDNN8", False):
+        return True
+    return _shared_library_available("cudnn_ops_infer", "libcudnn_ops_infer.so.8")
 
 
 def _language_hints() -> List[str]:
@@ -128,9 +147,24 @@ def _transcribe_once(
 
 def _resolve_device() -> str:
     configured = (os.environ.get("WHISPER_DEVICE") or "auto").strip().lower()
-    if configured in {"cpu", "cuda"}:
+    if configured == "cpu":
         return configured
+    cuda_available = bool(torch is not None and torch.cuda.is_available())
+    if configured == "cuda":
+        if cuda_available and _cuda_decode_runtime_available():
+            return "cuda"
+        print(
+            "⚠️ WHISPER_DEVICE=cuda requested, but the CUDA decode runtime is incomplete "
+            "(missing libcudnn_ops_infer.so.8). Falling back to CPU/int8."
+        )
+        return "cpu"
     if torch is not None and torch.cuda.is_available():
+        if not _cuda_decode_runtime_available():
+            print(
+                "⚠️ CUDA is visible, but Faster-Whisper cannot use it because "
+                "libcudnn_ops_infer.so.8 is missing. Using CPU/int8 safe mode."
+            )
+            return "cpu"
         return "cuda"
     return "cpu"
 
